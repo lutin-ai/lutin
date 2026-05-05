@@ -1,0 +1,14 @@
+[package]
+name = "lutin-auth"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+getrandom = "0.4.2"
+lutin-ids = { version = "0.1.0", path = "../lutin-ids" }
+postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-big-array = "0.5.1"
+thiserror = "2.0.18"

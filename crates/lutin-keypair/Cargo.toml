@@ -1,0 +1,12 @@
+[package]
+name = "lutin-keypair"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = "1"
+getrandom = "0.4"
+lutin-auth = { version = "0.1.0", path = "../lutin-auth" }
+
+[dev-dependencies]
+tempfile = "3"

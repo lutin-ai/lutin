@@ -1,0 +1,13 @@
+[package]
+name = "lutin-settings"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+lutin-storage = { path = "../lutin-storage" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.27.0"

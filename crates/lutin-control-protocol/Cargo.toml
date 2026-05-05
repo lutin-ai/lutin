@@ -1,0 +1,11 @@
+[package]
+name = "lutin-control-protocol"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+lutin-auth.workspace = true
+lutin-protocol = { version = "0.1.0", path = "../lutin-protocol" }
+postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"

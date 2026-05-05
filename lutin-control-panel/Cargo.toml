@@ -1,0 +1,42 @@
+[package]
+name = "lutin-control-panel"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lutin-control-panel"
+path = "src/main.rs"
+
+[[bin]]
+name = "lutin-cp-mint"
+path = "src/bin/mint.rs"
+
+[dependencies]
+lutin-protocol.workspace = true
+lutin-auth.workspace = true
+lutin-keypair = { path = "../crates/lutin-keypair" }
+lutin-control-protocol = { path = "../crates/lutin-control-protocol" }
+lutin-storage = { path = "../crates/lutin-storage" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process", "fs", "signal"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+include_dir = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1"
+libc = "0.2"
+dotenvy = "0.15"
+
+[build-dependencies]
+toml = "1.1"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["full"] }
+tempfile = "3"
+escargot = "0.5"

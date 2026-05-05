@@ -1,0 +1,14 @@
+# Everything cargo writes — multi-GB of incremental artifacts, and
+# they'd be invalidated inside the container anyway.
+target/
+**/target/
+
+# Editor / OS noise.
+.git/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local Claude state.
+.claude/

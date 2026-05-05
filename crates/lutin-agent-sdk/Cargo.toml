@@ -1,0 +1,20 @@
+[package]
+name = "lutin-agent-sdk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lutin-llm = { workspace = true }
+lutin-tools = { workspace = true }
+async-trait = "0.1.89"
+futures = "0.3.32"
+serde = "1.0.228"
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.52.1", features = ["rt", "sync", "macros", "time"] }
+tokio-stream = "0.1"
+tracing = "0.1.44"
+url = "2.5.8"
+
+[dev-dependencies]
+tokio = { version = "1.52.1", features = ["full"] }

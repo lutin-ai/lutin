@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["lutin-desktop", "lutin-control-panel", "crates/*", "lutin-project"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+lutin-entities = { path = "crates/lutin-entities" }
+lutin-llm = { path = "crates/lutin-llm" }
+lutin-settings = { path = "crates/lutin-settings" }
+lutin-storage = { path = "crates/lutin-storage" }
+lutin-tools = { path = "crates/lutin-tools" }
+lutin-protocol = { path = "crates/lutin-protocol" }
+lutin-auth = { path = "crates/lutin-auth" }
+lutin-keypair = { path = "crates/lutin-keypair" }
+lutin-agent-sdk = { path = "crates/lutin-agent-sdk" }
+lutin-workflow-sdk = { path = "crates/lutin-workflow-sdk" }
+lutin-workflow-ui = { path = "crates/lutin-workflow-ui" }

@@ -1,0 +1,5 @@
+name = "Chat"
+description = "Simple chat with one model"
+
+[runtime]
+kind = "binary"

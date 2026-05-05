@@ -1,0 +1,259 @@
+//! Control-panel tier payload definitions.
+//!
+//! Sits on top of `lutin-protocol::Frame`. The wire flow:
+//! `Frame::Payload { body }` carries `postcard(Request | Response)`,
+//! `Frame::Broadcast { body }` carries `postcard(Event)`.
+
+pub use lutin_auth::Slug;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
+use thiserror::Error;
+
+/// Project display name. Non-empty, ≤ 128 chars.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct DisplayName(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayNameError {
+    Empty,
+    TooLong,
+}
+
+impl fmt::Display for DisplayNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DisplayNameError::Empty => write!(f, "display name must not be empty"),
+            DisplayNameError::TooLong => write!(f, "display name exceeds 128 chars"),
+        }
+    }
+}
+
+impl std::error::Error for DisplayNameError {}
+
+impl DisplayName {
+    pub fn parse(s: impl Into<String>) -> Result<Self, DisplayNameError> {
+        let s = s.into();
+        if s.is_empty() {
+            return Err(DisplayNameError::Empty);
+        }
+        if s.len() > 128 {
+            return Err(DisplayNameError::TooLong);
+        }
+        Ok(DisplayName(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DisplayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DisplayName {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(d)?;
+        DisplayName::parse(s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// ed25519 public key, exactly 32 bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ProjectPubkey([u8; 32]);
+
+impl ProjectPubkey {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        ProjectPubkey(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProjectStatus {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectInfo {
+    pub slug: Slug,
+    pub display_name: DisplayName,
+    pub status: ProjectStatus,
+}
+
+/// Where a started project listens, and the token a client should
+/// present when connecting directly to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectEndpoint {
+    pub addr: std::net::SocketAddr,
+    pub token: String,
+    /// Issuer pubkey the project will present (ed25519). The client
+    /// uses this to verify any tier-3 tokens the project mints.
+    pub project_pubkey: ProjectPubkey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Request {
+    ListProjects,
+    CreateProject {
+        slug: Slug,
+        display_name: DisplayName,
+    },
+    DeleteProject {
+        slug: Slug,
+    },
+    OpenProject {
+        slug: Slug,
+    },
+    StopProject {
+        slug: Slug,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Response {
+    Ok(ResponseOk),
+    Err(ApiError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResponseOk {
+    Projects(Vec<ProjectInfo>),
+    Created(ProjectInfo),
+    Deleted,
+    Opened(ProjectEndpoint),
+    Stopped,
+}
+
+/// Why a project supervisor spawn failed. Lets clients branch on the
+/// failure mode (e.g. surface "binary missing" vs "handoff timeout"
+/// with different UX) instead of grepping a stringly-typed message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SpawnFailureKind {
+    /// Could not exec the project binary (not found, not executable, etc).
+    BinaryMissing,
+    /// Child exited before publishing its handoff.
+    ChildExited,
+    /// Child still alive but didn't publish handoff in time.
+    HandoffTimeout,
+    /// Handoff file existed but couldn't be parsed (corrupt or wrong format).
+    InvalidHandoff,
+    /// Filesystem prep failed (data dir create, stale-file remove, etc).
+    Io,
+    /// A backend CLI call (e.g. `docker run`/`stop`/`inspect`) blew its
+    /// per-call timeout budget. Distinguishes a wedged daemon from a
+    /// generic Io failure so clients can prompt the operator to check
+    /// the daemon rather than the project state.
+    DaemonUnresponsive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub enum ApiError {
+    #[error("project not found: {0}")]
+    NotFound(Slug),
+    #[error("project already exists: {0}")]
+    AlreadyExists(Slug),
+    #[error("project is running: {0}")]
+    ProjectRunning(Slug),
+    #[error("spawn failed ({kind:?}): {detail}")]
+    SpawnFailed { kind: SpawnFailureKind, detail: String },
+    #[error("supervisor: {0}")]
+    Supervisor(String),
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("not implemented yet")]
+    Unimplemented,
+}
+
+/// Server-pushed events, fanned out to every authenticated client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Event {
+    ProjectCreated(ProjectInfo),
+    ProjectDeleted { slug: Slug },
+    ProjectStatusChanged { slug: Slug, status: ProjectStatus },
+}
+
+#[derive(Debug, Error)]
+pub enum CodecError {
+    #[error("postcard: {0}")]
+    Postcard(#[from] postcard::Error),
+}
+
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
+    Ok(postcard::to_allocvec(value)?)
+}
+
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_roundtrip() {
+        let r = Request::CreateProject {
+            slug: Slug::parse("foo").unwrap(),
+            display_name: DisplayName::parse("Foo").unwrap(),
+        };
+        assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_roundtrip() {
+        let r = Response::Ok(ResponseOk::Opened(ProjectEndpoint {
+            addr: "127.0.0.1:9001".parse().unwrap(),
+            token: "abc".into(),
+            project_pubkey: ProjectPubkey::new([0u8; 32]),
+        }));
+        assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn event_roundtrip() {
+        let e = Event::ProjectStatusChanged {
+            slug: Slug::parse("foo").unwrap(),
+            status: ProjectStatus::Running,
+        };
+        assert_eq!(decode::<Event>(&encode(&e).unwrap()).unwrap(), e);
+    }
+
+    #[test]
+    fn err_response_roundtrip() {
+        let r = Response::Err(ApiError::NotFound(Slug::parse("x").unwrap()));
+        assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn spawn_failed_roundtrip() {
+        for kind in [
+            SpawnFailureKind::BinaryMissing,
+            SpawnFailureKind::ChildExited,
+            SpawnFailureKind::HandoffTimeout,
+            SpawnFailureKind::InvalidHandoff,
+            SpawnFailureKind::Io,
+            SpawnFailureKind::DaemonUnresponsive,
+        ] {
+            let r = Response::Err(ApiError::SpawnFailed {
+                kind: kind.clone(),
+                detail: "boom".into(),
+            });
+            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "lutin-project"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = "1.0.102"
+futures-util = "0.3.32"
+getrandom = "0.4"
+lutin-auth = { version = "0.1.0", path = "../crates/lutin-auth" }
+lutin-keypair = { version = "0.1.0", path = "../crates/lutin-keypair" }
+lutin-project-protocol = { version = "0.1.0", path = "../crates/lutin-project-protocol" }
+lutin-protocol = { version = "0.1.0", path = "../crates/lutin-protocol" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+toml = "1.1"
+tokio = { version = "1.52.1", features = ["full"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+escargot = "0.5"
+futures-util = "0.3"
+lutin-protocol = { path = "../crates/lutin-protocol" }
+tempfile = "3.27.0"
+tokio-tungstenite = "0.29"

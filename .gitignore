@@ -1,0 +1,23 @@
+# Rust build artifacts (root and any nested cargo project)
+target/
+**/target/
+*.rs.bk
+
+# Local runtime state (vendor tree, per-project state, seeded workflows)
+.local/
+
+# Per-machine state outside .local/ (e.g. control-panel keypair)
+/local/
+
+# Per-machine env config (paths, addresses, secrets)
+.env
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor junk
+*.swp
+*.swo
+.idea/
+.vscode/
