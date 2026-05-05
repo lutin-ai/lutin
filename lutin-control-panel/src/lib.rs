@@ -5,6 +5,7 @@
 
 pub mod defaults;
 mod registry;
+pub mod sessions;
 pub mod workflow_images;
 
 use futures_util::{SinkExt, StreamExt};
@@ -14,7 +15,7 @@ use lutin_auth::{
 };
 use lutin_control_protocol::{
     self as cp, ApiError, DisplayName, Event, ProjectEndpoint, ProjectInfo, ProjectPubkey,
-    ProjectStatus, Request, Response, ResponseOk, Slug, SpawnFailureKind,
+    ProjectStatus, Request, Response, ResponseOk, SessionId, Slug, SpawnFailureKind, WorkflowId,
 };
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use serde::{Deserialize, Serialize};
@@ -271,6 +272,28 @@ enum Command {
         slug: Slug,
         reply: oneshot::Sender<Response>,
     },
+    ListWorkflows {
+        reply: oneshot::Sender<Response>,
+    },
+    ListSessions {
+        slug: Slug,
+        reply: oneshot::Sender<Response>,
+    },
+    StartSession {
+        slug: Slug,
+        workflow: WorkflowId,
+        reply: oneshot::Sender<Response>,
+    },
+    StopSession {
+        slug: Slug,
+        session: SessionId,
+        reply: oneshot::Sender<Response>,
+    },
+    OpenSession {
+        slug: Slug,
+        session: SessionId,
+        reply: oneshot::Sender<Response>,
+    },
 }
 
 /// Cheap-clonable handle. Holds the control-panel's pubkey for inbound
@@ -340,16 +363,23 @@ impl AppState {
             Request::DeleteProject { slug } => Command::DeleteProject { slug, reply },
             Request::OpenProject { slug } => Command::OpenProject { slug, reply },
             Request::StopProject { slug } => Command::StopProject { slug, reply },
-            // Session-management surface lands in Phase 4.2; the
-            // protocol variants exist now so 4.3 can wire them up on the
-            // desktop without blocking on the orchestrator impl.
-            Request::ListWorkflows
-            | Request::ListSessions { .. }
-            | Request::StartSession { .. }
-            | Request::StopSession { .. }
-            | Request::OpenSession { .. } => {
-                return Response::Err(ApiError::Unimplemented);
-            }
+            Request::ListWorkflows => Command::ListWorkflows { reply },
+            Request::ListSessions { slug } => Command::ListSessions { slug, reply },
+            Request::StartSession { slug, workflow } => Command::StartSession {
+                slug,
+                workflow,
+                reply,
+            },
+            Request::StopSession { slug, session } => Command::StopSession {
+                slug,
+                session,
+                reply,
+            },
+            Request::OpenSession { slug, session } => Command::OpenSession {
+                slug,
+                session,
+                reply,
+            },
         };
         if self.commands.send(cmd).await.is_err() {
             return Response::Err(ApiError::Supervisor("supervisor stopped".into()));
@@ -523,6 +553,11 @@ async fn supervisor(
         }
     };
     let mut running: Vec<(Slug, RunningEntry)> = Vec::new();
+    // Per-slug live-session map. Owned by the supervisor task; no
+    // sharing across threads. Sessions are CP-orchestrated containers
+    // (see `sessions` module); the legacy `running` list above is the
+    // soon-to-be-deleted lutin-project tier.
+    let mut session_registry: sessions::SessionRegistry = std::collections::HashMap::new();
 
     // Docker-only preflight: image must exist locally (operator's job
     // to `docker load` or `docker pull` it), and any leftover project
@@ -587,12 +622,16 @@ async fn supervisor(
             }
             cmd = rx.recv() => {
                 match cmd {
-                    Some(c) => handle_command(c, &mut projects, &mut running, &signing, &config, &events).await,
+                    Some(c) => handle_command(c, &mut projects, &mut running, &mut session_registry, &signing, &config, &events).await,
                     None => break,
                 }
             }
         }
     }
+
+    // Tear down all session containers we own. Docker containers
+    // outlive CP unless we stop them explicitly.
+    sessions::stop_all(&mut session_registry).await;
 
     // Drain `running` and tear down each project. Subprocess entries
     // would die on Drop via kill_on_drop, but Docker containers are
@@ -654,6 +693,7 @@ async fn handle_command(
     cmd: Command,
     projects: &mut Vec<ProjectRecord>,
     running: &mut Vec<(Slug, RunningEntry)>,
+    session_registry: &mut sessions::SessionRegistry,
     signing: &SigningKey,
     config: &SpawnConfig,
     events: &broadcast::Sender<Event>,
@@ -726,6 +766,9 @@ async fn handle_command(
                 let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
                 return;
             }
+            // Tear down any session containers tied to this slug — the
+            // `.lutin/` wipe below would orphan their state otherwise.
+            sessions::stop_all_for_slug(session_registry, &slug).await;
             // Wipe `.lutin/` so a future CreateProject with the same
             // slug starts with a fresh identity instead of silently
             // inheriting the deleted project's keypair. User workspace
@@ -800,6 +843,107 @@ async fn handle_command(
             }
             set_status(projects, &slug, ProjectStatus::Stopped, events);
             let _ = reply.send(Response::Ok(ResponseOk::Stopped));
+        }
+        Command::ListWorkflows { reply } => {
+            let workflows = sessions::list_workflows(&config.global_config_dir);
+            let _ = reply.send(Response::Ok(ResponseOk::Workflows(workflows)));
+        }
+        Command::ListSessions { slug, reply } => {
+            if !projects.iter().any(|p| p.info.slug == slug) {
+                let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
+                return;
+            }
+            let infos = sessions::list_sessions(session_registry, &slug);
+            let _ = reply.send(Response::Ok(ResponseOk::Sessions(infos)));
+        }
+        Command::StartSession {
+            slug,
+            workflow,
+            reply,
+        } => {
+            if !projects.iter().any(|p| p.info.slug == slug) {
+                let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
+                return;
+            }
+            let container_prefix = match &config.backend {
+                SpawnBackend::Docker {
+                    container_prefix, ..
+                } => format!("{container_prefix}-session"),
+                SpawnBackend::Subprocess { .. } => "lutin-session".to_owned(),
+            };
+            match sessions::start_session(
+                session_registry,
+                &slug,
+                &workflow,
+                &config.projects_root,
+                &config.global_config_dir,
+                &container_prefix,
+            )
+            .await
+            {
+                Ok((running_session, endpoint)) => {
+                    let info = running_session.info.clone();
+                    let _ = events.send(Event::SessionStarted {
+                        slug: slug.clone(),
+                        info: info.clone(),
+                    });
+                    let _ = reply.send(Response::Ok(ResponseOk::SessionStarted {
+                        info,
+                        endpoint,
+                    }));
+                }
+                Err(sessions::SessionError::WorkflowNotFound(id)) => {
+                    let _ = reply.send(Response::Err(ApiError::WorkflowNotFound(id)));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
+                        "start session for {}: {e}",
+                        slug.as_str()
+                    ))));
+                }
+            }
+        }
+        Command::StopSession {
+            slug,
+            session,
+            reply,
+        } => {
+            match sessions::stop_session(session_registry, &slug, &session).await {
+                Ok(()) => {
+                    let _ = events.send(Event::SessionEnded {
+                        slug: slug.clone(),
+                        session,
+                    });
+                    let _ = reply.send(Response::Ok(ResponseOk::SessionStopped));
+                }
+                Err(sessions::SessionError::SessionNotFound(id)) => {
+                    let _ = reply.send(Response::Err(ApiError::SessionNotFound(id)));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
+                        "stop session: {e}"
+                    ))));
+                }
+            }
+        }
+        Command::OpenSession {
+            slug,
+            session,
+            reply,
+        } => {
+            match sessions::open_session(session_registry, &slug, &session, &config.projects_root) {
+                Ok(endpoint) => {
+                    let _ = reply.send(Response::Ok(ResponseOk::SessionOpened(endpoint)));
+                }
+                Err(sessions::SessionError::SessionNotFound(id)) => {
+                    let _ = reply.send(Response::Err(ApiError::SessionNotFound(id)));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
+                        "open session: {e}"
+                    ))));
+                }
+            }
         }
     }
 }
