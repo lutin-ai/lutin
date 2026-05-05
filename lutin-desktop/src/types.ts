@@ -39,7 +39,8 @@ export type Request =
   | { StartSession: { slug: Slug; workflow: WorkflowId } }
   | { StopSession: { slug: Slug; session: SessionId } }
   | { OpenSession: { slug: Slug; session: SessionId } }
-  | { GetWorkflowCdylib: { id: WorkflowId } };
+  | { GetWorkflowCdylib: { id: WorkflowId } }
+  | { GetWorkflowBundle: { id: WorkflowId } };
 
 export type ResponseOk =
   | { Projects: ProjectInfo[] }
@@ -50,7 +51,8 @@ export type ResponseOk =
   | { SessionStarted: { info: SessionInfo; endpoint: SessionEndpoint } }
   | "SessionStopped"
   | { SessionOpened: SessionEndpoint }
-  | { WorkflowCdylib: { id: WorkflowId; digest: string; bytes: number[] } };
+  | { WorkflowCdylib: { id: WorkflowId; digest: string; bytes: number[] } }
+  | { WorkflowBundle: { id: WorkflowId; digest: string; bytes: number[] } };
 
 export type ApiError =
   | { NotFound: Slug }
@@ -76,6 +78,21 @@ export interface ConnectionProfile {
 export interface DesktopSettings {
   default: string;
   connections: ConnectionProfile[];
+}
+
+// Mirrors Rust `PluginManifest` + `PluginOpened` (lib.rs). `url` is
+// the iframe `src`; the React side never constructs it, since the
+// custom-protocol URL form differs by platform.
+export interface PluginManifest {
+  entry: string;
+  permissions: string[];
+  display_name: string;
+  icon: string;
+}
+
+export interface PluginOpened {
+  url: string;
+  manifest: PluginManifest;
 }
 
 // Mirrors Rust `ConnSnapshot` (lib.rs) — externally tagged on `kind`,

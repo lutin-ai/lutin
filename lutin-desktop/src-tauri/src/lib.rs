@@ -2,20 +2,23 @@
 //! that JS calls, and pumps `CpUpdate` events out as Tauri events the
 //! React chrome listens to.
 
+mod bundles;
 mod cp;
+mod plugin_protocol;
 mod settings;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lutin_control_protocol::{Request, Response};
+use lutin_control_protocol::{Request, Response, ResponseOk, WorkflowId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+use crate::bundles::BundleCache;
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
 use crate::settings::{ConnectionProfile, DesktopSettings};
 
@@ -45,6 +48,9 @@ struct AppState {
     pending: Mutex<HashMap<u64, oneshot::Sender<Response>>>,
     next_request_id: AtomicU64,
     settings: Mutex<DesktopSettings>,
+    /// Workflow plugin bundles unpacked under the app cache dir.
+    /// Read by the `lutin-plugin` URI scheme handler.
+    pub bundles: BundleCache,
     /// Last known connection state, updated by the drainer task.
     /// Read by `cp_status` so JS can initialize without racing
     /// against a `cp:connected` event that fires before the
@@ -98,6 +104,100 @@ async fn cp_send(state: State<'_, AppState>, request: Request) -> Result<Respons
 #[tauri::command]
 fn cp_status(state: State<'_, AppState>) -> ConnSnapshot {
     state.conn.lock().expect("conn mutex poisoned").clone()
+}
+
+/// Reply to `workflow_open_plugin`. JS sets the iframe `src` to `url`
+/// and uses `manifest` to decide which capabilities to wire into the
+/// plugin's `window.lutin` shim once the MessagePort handshake lands.
+#[derive(Clone, Debug, Serialize)]
+pub struct PluginOpened {
+    pub url: String,
+    pub manifest: PluginManifest,
+}
+
+/// Mirrors the plugin's `lutin.workflow.json` (subset). Fields beyond
+/// what chrome cares about are ignored at parse time.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct PluginManifest {
+    #[serde(default = "default_entry")]
+    pub entry: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub icon: String,
+}
+
+fn default_entry() -> String {
+    "index.html".to_owned()
+}
+
+/// Ensure a workflow's plugin bundle is unpacked locally and return
+/// the iframe URL + parsed manifest. The desktop fetches bundles from
+/// CP on first use (and on digest mismatch) and caches them under the
+/// Tauri app-cache dir; subsequent calls hit the cache.
+#[tauri::command]
+async fn workflow_open_plugin(
+    state: State<'_, AppState>,
+    workflow: WorkflowId,
+    digest: String,
+) -> Result<PluginOpened, String> {
+    let dir = match state.bundles.lookup(&workflow, &digest) {
+        Some(p) => p,
+        None => {
+            // Cache miss — go fetch the tarball from CP via the same
+            // request path JS uses, then unpack on a blocking thread.
+            let id = state.alloc_request_id();
+            let (tx, rx) = oneshot::channel();
+            state
+                .pending
+                .lock()
+                .expect("pending mutex poisoned")
+                .insert(id.0, tx);
+            let send_res = state.cp.lock().expect("cp mutex poisoned").send(CpCommand::Send {
+                request_id: id,
+                request: Request::GetWorkflowBundle { id: workflow.clone() },
+            });
+            if send_res.is_err() {
+                state
+                    .pending
+                    .lock()
+                    .expect("pending mutex poisoned")
+                    .remove(&id.0);
+                return Err("control panel not connected".into());
+            }
+            let resp = rx.await.map_err(|_| "request cancelled".to_string())?;
+            let bytes = match resp {
+                Response::Ok(ResponseOk::WorkflowBundle { digest: got, bytes, .. }) => {
+                    if got != digest {
+                        warn!(
+                            workflow = %workflow.as_str(),
+                            expected = %digest,
+                            actual = %got,
+                            "bundle digest mismatch — using fetched digest"
+                        );
+                    }
+                    bytes
+                }
+                Response::Ok(other) => return Err(format!("unexpected response: {other:?}")),
+                Response::Err(e) => return Err(format!("CP error: {e}")),
+            };
+            state
+                .bundles
+                .install(&workflow, &digest, &bytes)
+                .map_err(|e| format!("install bundle: {e}"))?
+        }
+    };
+
+    let manifest_path = dir.join("lutin.workflow.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| format!("read manifest: {e}"))?;
+    let manifest: PluginManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("parse manifest: {e}"))?;
+
+    let url = plugin_protocol::url_for(&workflow, &manifest.entry);
+    Ok(PluginOpened { url, manifest })
 }
 
 #[tauri::command]
@@ -222,14 +322,36 @@ pub fn run() {
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
         settings: Mutex::new(settings),
+        bundles: BundleCache::new(),
         conn: Mutex::new(initial_conn),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
+        .register_asynchronous_uri_scheme_protocol(
+            plugin_protocol::SCHEME,
+            |ctx, req, responder| {
+                let res = plugin_protocol::handle(ctx, req);
+                responder.respond(res);
+            },
+        )
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Bind the bundle cache to the app's per-user cache dir.
+            // path().app_cache_dir() returns the platform-correct
+            // base; failures here mean we can't load any plugins, so
+            // surface them by panicking — there's nothing useful the
+            // app can do without plugin storage.
+            let cache_root = handle
+                .path()
+                .app_cache_dir()
+                .expect("resolve app cache dir");
+            handle
+                .state::<AppState>()
+                .bundles
+                .init(cache_root)
+                .expect("init bundle cache");
             tokio.spawn(drain_updates(handle, evt_rx));
             Ok(())
         })
@@ -238,6 +360,7 @@ pub fn run() {
             cp_status,
             settings_get,
             settings_set,
+            workflow_open_plugin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

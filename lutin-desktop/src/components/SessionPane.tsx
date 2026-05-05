@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { cpSendOk } from "../api";
 import { useApp } from "../store";
 import type { ProjectInfo, WorkflowInfo } from "../types";
+import { PluginIframe } from "./PluginIframe";
 import styles from "./SessionPane.module.css";
 
 interface Props { project: ProjectInfo }
@@ -38,6 +39,23 @@ export function SessionPane({ project }: Props) {
       .finally(() => !cancelled && setLoadingSessions(false));
     return () => { cancelled = true; };
   }, [project.slug, setSessions]);
+
+  // Always-on workflow listing so we can resolve digest → bundle for
+  // any active session, not just those started in the current picker
+  // session. Re-fetched on project change since the install set is
+  // global today but may turn project-scoped later.
+  useEffect(() => {
+    let cancelled = false;
+    cpSendOk("ListWorkflows")
+      .then((r) => {
+        if (cancelled) return;
+        if (typeof r === "object" && "Workflows" in r) {
+          setWorkflows(r.Workflows);
+        }
+      })
+      .catch(() => { /* surfaced by the picker if the user opens it */ });
+    return () => { cancelled = true; };
+  }, [project.slug]);
 
   const loadWorkflows = async () => {
     setError(null);
@@ -136,9 +154,29 @@ export function SessionPane({ project }: Props) {
       {error && <div className={styles.error}>{error}</div>}
 
       <section className={styles.body}>
-        {activeSession ? (
-          <Placeholder workflow={activeSession.workflow} sessionId={activeSession.id} />
-        ) : (
+        {activeSession ? (() => {
+          const wf = workflows?.find((w) => w.id === activeSession.workflow);
+          if (!wf) {
+            return (
+              <div className={styles.placeholder}>
+                <div className={styles.placeholderIcon}>⏳</div>
+                <div className={styles.placeholderTitle}>Resolving workflow…</div>
+                <div className={styles.placeholderSub}>
+                  Waiting for workflow metadata for <code>{activeSession.workflow}</code>.
+                </div>
+              </div>
+            );
+          }
+          return (
+            <PluginIframe
+              key={activeSession.id}
+              slug={project.slug}
+              session={activeSession.id}
+              workflow={activeSession.workflow}
+              digest={wf.digest}
+            />
+          );
+        })() : (
           <div className={styles.empty}>
             {sessions.length === 0
               ? "No sessions yet. Start one above."
@@ -147,21 +185,6 @@ export function SessionPane({ project }: Props) {
         )}
       </section>
     </main>
-  );
-}
-
-function Placeholder({ workflow, sessionId }: { workflow: string; sessionId: string }) {
-  return (
-    <div className={styles.placeholder}>
-      <div className={styles.placeholderIcon}>🔌</div>
-      <div className={styles.placeholderTitle}>Plugin loading not implemented yet</div>
-      <div className={styles.placeholderSub}>
-        Workflow <code>{workflow}</code> · session <code>{shortId(sessionId)}</code>
-      </div>
-      <div className={styles.placeholderHint}>
-        Phase 2 wires per-session iframe plugins served from the workflow image.
-      </div>
-    </div>
   );
 }
 

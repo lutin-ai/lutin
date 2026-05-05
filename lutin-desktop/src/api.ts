@@ -4,9 +4,11 @@ import type {
   ConnState,
   CpEvent,
   DesktopSettings,
+  PluginOpened,
   Request,
   Response,
   ResponseOk,
+  WorkflowId,
 } from "./types";
 
 export async function cpSend(request: Request): Promise<Response> {
@@ -34,6 +36,16 @@ export async function settingsGet(): Promise<DesktopSettings> {
 
 export async function settingsSet(settings: DesktopSettings): Promise<void> {
   return invoke("settings_set", { new: settings });
+}
+
+/// Resolve a workflow's plugin bundle to an iframe URL + manifest.
+/// Triggers a CP fetch on cache miss, so first-call latency depends on
+/// the bundle size.
+export async function workflowOpenPlugin(
+  workflow: WorkflowId,
+  digest: string,
+): Promise<PluginOpened> {
+  return invoke("workflow_open_plugin", { workflow, digest });
 }
 
 type EventHandlers = {
