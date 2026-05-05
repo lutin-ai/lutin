@@ -2,6 +2,7 @@
 //! that JS calls, and pumps `CpUpdate` events out as Tauri events the
 //! React chrome listens to.
 
+mod bridge;
 mod bundles;
 mod cp;
 mod plugin_protocol;
@@ -11,13 +12,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lutin_control_protocol::{Request, Response, ResponseOk, WorkflowId};
+use lutin_control_protocol::{Request, Response, ResponseOk, SessionId, Slug, WorkflowId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+use crate::bridge::{BridgeCmd, BridgeHandle, EngineBytes};
 use crate::bundles::BundleCache;
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
 use crate::settings::{ConnectionProfile, DesktopSettings};
@@ -51,6 +53,10 @@ struct AppState {
     /// Workflow plugin bundles unpacked under the app cache dir.
     /// Read by the `lutin-plugin` URI scheme handler.
     pub bundles: BundleCache,
+    /// Live engine bridges keyed by session id. Open via
+    /// `workflow_session_open`; closed when the JS side calls
+    /// `workflow_session_close` or chrome shuts down.
+    bridges: Mutex<HashMap<String, BridgeHandle>>,
     /// Last known connection state, updated by the drainer task.
     /// Read by `cp_status` so JS can initialize without racing
     /// against a `cp:connected` event that fires before the
@@ -77,8 +83,11 @@ fn profile_to_config(profile: &ConnectionProfile) -> Result<Option<CpConfig>, St
     Ok(Some(CpConfig { url, token }))
 }
 
-#[tauri::command]
-async fn cp_send(state: State<'_, AppState>, request: Request) -> Result<Response, String> {
+/// Send `request` to CP and await its `Response`. Lower-level helper
+/// used by both the JS-facing `cp_send` command and Rust commands
+/// (e.g. `workflow_session_open`) that need to call CP without
+/// round-tripping through JS.
+async fn cp_dispatch(state: &AppState, request: Request) -> Result<Response, String> {
     let id = state.alloc_request_id();
     let (tx, rx) = oneshot::channel();
     state
@@ -99,6 +108,11 @@ async fn cp_send(state: State<'_, AppState>, request: Request) -> Result<Respons
         return Err("control panel not connected".into());
     }
     rx.await.map_err(|_| "request cancelled".to_string())
+}
+
+#[tauri::command]
+async fn cp_send(state: State<'_, AppState>, request: Request) -> Result<Response, String> {
+    cp_dispatch(&state, request).await
 }
 
 #[tauri::command]
@@ -146,28 +160,11 @@ async fn workflow_open_plugin(
     let dir = match state.bundles.lookup(&workflow, &digest) {
         Some(p) => p,
         None => {
-            // Cache miss — go fetch the tarball from CP via the same
-            // request path JS uses, then unpack on a blocking thread.
-            let id = state.alloc_request_id();
-            let (tx, rx) = oneshot::channel();
-            state
-                .pending
-                .lock()
-                .expect("pending mutex poisoned")
-                .insert(id.0, tx);
-            let send_res = state.cp.lock().expect("cp mutex poisoned").send(CpCommand::Send {
-                request_id: id,
-                request: Request::GetWorkflowBundle { id: workflow.clone() },
-            });
-            if send_res.is_err() {
-                state
-                    .pending
-                    .lock()
-                    .expect("pending mutex poisoned")
-                    .remove(&id.0);
-                return Err("control panel not connected".into());
-            }
-            let resp = rx.await.map_err(|_| "request cancelled".to_string())?;
+            let resp = cp_dispatch(
+                &state,
+                Request::GetWorkflowBundle { id: workflow.clone() },
+            )
+            .await?;
             let bytes = match resp {
                 Response::Ok(ResponseOk::WorkflowBundle { digest: got, bytes, .. }) => {
                     if got != digest {
@@ -198,6 +195,101 @@ async fn workflow_open_plugin(
 
     let url = plugin_protocol::url_for(&workflow, &manifest.entry);
     Ok(PluginOpened { url, manifest })
+}
+
+/// Open the engine WebSocket for a session and stash the bridge in
+/// AppState keyed by session id. Idempotent — if a bridge is already
+/// open for this session id, the existing one is reused. Token never
+/// crosses the JS boundary; chrome holds it for the lifetime of the
+/// bridge.
+#[tauri::command]
+async fn workflow_session_open(
+    state: State<'_, AppState>,
+    slug: Slug,
+    session: SessionId,
+) -> Result<(), String> {
+    let key = session.as_str().to_owned();
+    if state.bridges.lock().expect("bridges mutex poisoned").contains_key(&key) {
+        return Ok(());
+    }
+
+    let resp = cp_dispatch(
+        &state,
+        Request::OpenSession { slug, session: session.clone() },
+    )
+    .await?;
+    let endpoint = match resp {
+        Response::Ok(ResponseOk::SessionOpened(ep)) => ep,
+        Response::Ok(other) => return Err(format!("unexpected response: {other:?}")),
+        Response::Err(e) => return Err(format!("CP error: {e}")),
+    };
+
+    let url = format!("ws://{}", endpoint.addr);
+    let handle = bridge::connect(&state.tokio, url, endpoint.token).await?;
+    state
+        .bridges
+        .lock()
+        .expect("bridges mutex poisoned")
+        .insert(key, handle);
+    Ok(())
+}
+
+/// Forward a request body to the engine. Resolves with the body of
+/// the matching `Frame::Payload` reply.
+#[tauri::command]
+async fn workflow_session_request(
+    state: State<'_, AppState>,
+    session: SessionId,
+    body: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let handle = state
+        .bridges
+        .lock()
+        .expect("bridges mutex poisoned")
+        .get(session.as_str())
+        .cloned()
+        .ok_or_else(|| format!("no bridge for session {}", session.as_str()))?;
+    let (tx, rx) = oneshot::channel();
+    handle
+        .send(BridgeCmd::Request { body, reply: tx })
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "bridge dropped reply".to_string())?
+}
+
+/// Subscribe to engine broadcasts for `session`. Each `Frame::Broadcast`
+/// body is delivered on `channel`. Channel closes when the bridge
+/// teardown happens (WS closed, or session closed via
+/// `workflow_session_close`).
+#[tauri::command]
+fn workflow_session_subscribe(
+    state: State<'_, AppState>,
+    session: SessionId,
+    channel: tauri::ipc::Channel<EngineBytes>,
+) -> Result<(), String> {
+    let handle = state
+        .bridges
+        .lock()
+        .expect("bridges mutex poisoned")
+        .get(session.as_str())
+        .cloned()
+        .ok_or_else(|| format!("no bridge for session {}", session.as_str()))?;
+    handle
+        .send(BridgeCmd::Subscribe { channel })
+        .map_err(|e| e.to_string())
+}
+
+/// Tear down a session bridge. Safe to call on a session id that has
+/// no bridge (no-op).
+#[tauri::command]
+fn workflow_session_close(state: State<'_, AppState>, session: SessionId) {
+    if let Some(handle) = state
+        .bridges
+        .lock()
+        .expect("bridges mutex poisoned")
+        .remove(session.as_str())
+    {
+        let _ = handle.send(BridgeCmd::Close);
+    }
 }
 
 #[tauri::command]
@@ -323,6 +415,7 @@ pub fn run() {
         next_request_id: AtomicU64::new(1),
         settings: Mutex::new(settings),
         bundles: BundleCache::new(),
+        bridges: Mutex::new(HashMap::new()),
         conn: Mutex::new(initial_conn),
     };
 
@@ -361,6 +454,10 @@ pub fn run() {
             settings_get,
             settings_set,
             workflow_open_plugin,
+            workflow_session_open,
+            workflow_session_request,
+            workflow_session_subscribe,
+            workflow_session_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

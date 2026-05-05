@@ -36,8 +36,8 @@ export function App({ lutin }: Props) {
         </dd>
       </dl>
       <p style={styles.note}>
-        Bytes pump not wired yet. Chat will stream once the engine
-        bridge lands.
+        Engine bridge is wired (lutin.request / lutin.onBroadcast
+        round-trip through chrome). Chat protocol decoding lands next.
       </p>
       <button style={styles.button} onClick={ping}>
         Send test notification

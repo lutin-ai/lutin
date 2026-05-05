@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { workflowOpenPlugin } from "../api";
+import {
+  workflowOpenPlugin,
+  workflowSessionClose,
+  workflowSessionOpen,
+  workflowSessionRequest,
+  workflowSessionSubscribe,
+} from "../api";
 import type { PluginOpened, SessionId, Slug, WorkflowId } from "../types";
 import styles from "./SessionPane.module.css";
 
@@ -10,25 +16,29 @@ interface Props {
   digest: string;
 }
 
-/// Renders a workflow plugin's UI in a sandboxed cross-origin iframe.
+/// Renders a workflow plugin's UI in a sandboxed cross-origin iframe
+/// and proxies the bytes pump between iframe and engine.
 ///
-/// Once the iframe loads, chrome creates a `MessageChannel`, sends one
-/// of the ports to the iframe in a single bootstrap `postMessage`, and
-/// drives all subsequent IPC through the other port. The iframe's
-/// origin is the bundle's custom-protocol origin (`lutin-plugin://...`)
-/// — distinct from chrome's — so postMessage origin targeting is
-/// meaningful.
-///
-/// The bytes pump (workflow-engine I/O) is intentionally not wired
-/// here yet; this slice proves the plumbing with a chrome-handled
-/// `notification.post` and an echo `send` that round-trips through
-/// chrome. Engine bridge lands with the chat workflow rewrite.
+/// Lifecycle:
+///   1. Resolve the iframe URL via `workflow_open_plugin` (fetches +
+///      caches the bundle on miss).
+///   2. Open the engine WebSocket via `workflow_session_open`. Token
+///      never crosses to JS; chrome holds it.
+///   3. Subscribe to engine broadcasts; on each broadcast body, post
+///      `{ kind: "broadcast", body }` to the iframe over the port.
+///   4. On iframe `lutin-init` load, transfer one MessagePort.
+///   5. Forward iframe `request` messages → `workflow_session_request`,
+///      reply with `{ kind: "response", request_id, body }`.
+///   6. Forward iframe `notification` messages → chrome notification.
+///   7. On unmount: close the engine bridge.
 export function PluginIframe(props: Props) {
   const { slug, session, workflow, digest } = props;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [opened, setOpened] = useState<PluginOpened | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [bridgeReady, setBridgeReady] = useState(false);
 
+  // Resolve plugin URL.
   useEffect(() => {
     let cancelled = false;
     setError(null);
@@ -39,18 +49,84 @@ export function PluginIframe(props: Props) {
     return () => { cancelled = true; };
   }, [workflow, digest]);
 
+  // Open the engine bridge for this session. Tear down on unmount.
+  useEffect(() => {
+    let cancelled = false;
+    setBridgeReady(false);
+    workflowSessionOpen(slug, session)
+      .then(() => { if (!cancelled) setBridgeReady(true); })
+      .catch((e) => { if (!cancelled) setError((prev) => prev ?? String(e)); });
+    return () => {
+      cancelled = true;
+      // Best-effort; the bridge map is keyed by session id and is
+      // safe to close even if open hadn't completed yet.
+      workflowSessionClose(session).catch(() => {});
+    };
+  }, [slug, session]);
+
+  // Wire the MessagePort handshake + the bytes pump.
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe || !opened) return;
+    if (!iframe || !opened || !bridgeReady) return;
 
-    // Wait for the iframe document to actually load before posting —
-    // otherwise the message arrives with no listener attached.
     let port: MessagePort | null = null;
+    let unsubscribePromise: Promise<{ id: () => number }> | null = null;
+    let cancelled = false;
+
     const onLoad = () => {
       const channel = new MessageChannel();
       port = channel.port1;
-      port.onmessage = (e) => handlePortMessage(e.data, opened.manifest.permissions);
+      port.onmessage = async (e) => {
+        const msg = e.data as
+          | { kind: "request"; request_id: number; body: Uint8Array | number[] }
+          | { kind: "notification"; body: string; title?: string }
+          | undefined;
+        if (!msg || !port) return;
+        if (msg.kind === "request") {
+          const bytes = msg.body instanceof Uint8Array
+            ? msg.body
+            : Uint8Array.from(msg.body);
+          try {
+            const reply = await workflowSessionRequest(session, bytes);
+            port.postMessage({
+              kind: "response",
+              request_id: msg.request_id,
+              body: reply,
+            });
+          } catch (err) {
+            // Surface to the iframe so the plugin can show the
+            // failure; using an `error` field on the response keeps
+            // the request_id correlation intact.
+            port.postMessage({
+              kind: "response",
+              request_id: msg.request_id,
+              error: String(err),
+            });
+          }
+          return;
+        }
+        if (msg.kind === "notification") {
+          console.info("[plugin notification]", msg.title ?? "Plugin", msg.body);
+          try {
+            if ("Notification" in window && Notification.permission === "granted") {
+              new Notification(msg.title ?? "Plugin", { body: msg.body });
+            }
+          } catch { /* non-fatal */ }
+        }
+      };
       port.start();
+
+      // Subscribe to engine broadcasts → forward to iframe. The
+      // promise resolves before the channel is wired, but the bridge
+      // pump won't fire any broadcasts before subscribe lands as long
+      // as the iframe hasn't asked for any yet (engines push events
+      // only in response to subscribe-style requests).
+      unsubscribePromise = (async () => {
+        const ch = await workflowSessionSubscribe(session, (body) => {
+          port?.postMessage({ kind: "broadcast", body });
+        });
+        return { id: () => ch.id };
+      })();
 
       const targetOrigin = originOf(opened.url);
       iframe.contentWindow?.postMessage(
@@ -68,10 +144,16 @@ export function PluginIframe(props: Props) {
 
     iframe.addEventListener("load", onLoad);
     return () => {
+      cancelled = true;
       iframe.removeEventListener("load", onLoad);
       port?.close();
+      // Tauri Channels can't be unregistered explicitly; the bridge
+      // drops dead subscribers on the next broadcast send. Holding
+      // the promise prevents an unused-var warning while documenting
+      // the intent.
+      void unsubscribePromise; void cancelled;
     };
-  }, [opened, slug, session, workflow]);
+  }, [opened, bridgeReady, slug, session, workflow]);
 
   if (error) {
     return (
@@ -98,9 +180,6 @@ export function PluginIframe(props: Props) {
     <iframe
       ref={iframeRef}
       src={opened.url}
-      // sandbox here is belt-and-braces; the cross-origin custom
-      // protocol already isolates the plugin from chrome's origin.
-      // `allow-scripts` is required for any plugin to function.
       sandbox="allow-scripts"
       title={opened.manifest.display_name || workflow}
       style={{ width: "100%", height: "100%", border: 0 }}
@@ -113,43 +192,5 @@ function originOf(url: string): string {
     return new URL(url).origin;
   } catch {
     return "*";
-  }
-}
-
-/// Handle a single message received over the plugin's MessagePort.
-/// Drops messages for capabilities the plugin didn't declare in its
-/// manifest. Permission strings match the manifest exactly — adding a
-/// new capability means listing it here AND declaring it in the
-/// plugin's `lutin.workflow.json`.
-function handlePortMessage(data: unknown, permissions: string[]): void {
-  if (!data || typeof data !== "object") return;
-  const msg = data as { type?: string; [k: string]: unknown };
-  switch (msg.type) {
-    case "notification.post": {
-      // Notifications are always allowed in this slice — when we wire
-      // the OS-level notify call through Tauri, gate this on a
-      // "notification" permission.
-      const body = String(msg.body ?? "");
-      const title = typeof msg.title === "string" ? msg.title : "Plugin";
-      // Browser-level fallback for the smallest slice; replaced by a
-      // Tauri command in Phase 3.
-      console.info("[plugin notification]", title, body);
-      try {
-        if ("Notification" in window && Notification.permission === "granted") {
-          new Notification(title, { body });
-        }
-      } catch { /* ignore — non-fatal */ }
-      break;
-    }
-    case "send": {
-      // Echo placeholder: the engine bytes pump isn't wired yet.
-      // Logging proves the round-trip works without falsely
-      // implying any engine connectivity.
-      if (!permissions.includes("send")) return;
-      console.info("[plugin send]", msg.bytes);
-      break;
-    }
-    default:
-      console.warn("[plugin] unknown message type", msg.type);
   }
 }

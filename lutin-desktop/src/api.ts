@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ConnState,
@@ -8,6 +8,8 @@ import type {
   Request,
   Response,
   ResponseOk,
+  SessionId,
+  Slug,
   WorkflowId,
 } from "./types";
 
@@ -46,6 +48,49 @@ export async function workflowOpenPlugin(
   digest: string,
 ): Promise<PluginOpened> {
   return invoke("workflow_open_plugin", { workflow, digest });
+}
+
+/// Open the engine WebSocket for a session. Token never crosses the
+/// JS boundary; chrome holds it for the lifetime of the bridge.
+export async function workflowSessionOpen(
+  slug: Slug,
+  session: SessionId,
+): Promise<void> {
+  return invoke("workflow_session_open", { slug, session });
+}
+
+/// Forward a request body to the engine. Resolves with the matching
+/// `Frame::Payload` reply body.
+export async function workflowSessionRequest(
+  session: SessionId,
+  body: Uint8Array,
+): Promise<Uint8Array> {
+  // Tauri serializes Uint8Array as a number array; the Rust side
+  // expects `Vec<u8>`. The reply is also a number array, so we
+  // Uint8Array.from() it on the way back.
+  const reply: number[] = await invoke("workflow_session_request", {
+    session,
+    body: Array.from(body),
+  });
+  return Uint8Array.from(reply);
+}
+
+/// Subscribe to engine broadcasts for a session. Returns the active
+/// Tauri channel — `chan.onmessage = cb` to receive bodies. Drop the
+/// channel (let it GC) when done; chrome cleans up dead subscribers
+/// when their next broadcast attempt fails.
+export async function workflowSessionSubscribe(
+  session: SessionId,
+  onBody: (body: Uint8Array) => void,
+): Promise<Channel<number[]>> {
+  const channel = new Channel<number[]>();
+  channel.onmessage = (msg) => onBody(Uint8Array.from(msg));
+  await invoke("workflow_session_subscribe", { session, channel });
+  return channel;
+}
+
+export async function workflowSessionClose(session: SessionId): Promise<void> {
+  return invoke("workflow_session_close", { session });
 }
 
 type EventHandlers = {
