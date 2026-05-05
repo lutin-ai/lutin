@@ -675,6 +675,18 @@ async fn handle_command(
                 let _ = reply.send(Response::Err(ApiError::AlreadyExists(slug)));
                 return;
             }
+            // Materialize the per-project tree + project keypair eagerly
+            // at create time so (a) the bind-mount source dir exists
+            // before the first session container runs and (b) the
+            // project's signing identity is owned by CP, not minted
+            // lazily inside a tier-2 container.
+            if let Err(e) = init_project_storage(&config.projects_root, &slug) {
+                let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
+                    "init project storage for {}: {e}",
+                    slug.as_str()
+                ))));
+                return;
+            }
             let info = ProjectInfo {
                 slug,
                 display_name,
@@ -933,6 +945,23 @@ fn set_status(
     }
 }
 
+
+/// Eagerly create the per-project on-disk layout and mint the
+/// project's signing keypair if absent. Idempotent: safe to call on a
+/// pre-existing project tree (re-creates the `.lutin/` subdir if a
+/// prior `DeleteProject` wiped it, leaves an existing keypair alone).
+///
+/// Held in the synchronous path because it runs once at CreateProject
+/// time and the I/O is a single mkdir + ed25519 keygen — too cheap to
+/// justify spawn_blocking ceremony.
+fn init_project_storage(projects_root: &Path, slug: &Slug) -> std::io::Result<()> {
+    let lutin_dir = projects_root.join(slug.as_str()).join(".lutin");
+    std::fs::create_dir_all(&lutin_dir)?;
+    let keypair_path = lutin_dir.join("keypair");
+    lutin_keypair::load_or_create_keypair(&keypair_path)
+        .map_err(std::io::Error::other)?;
+    Ok(())
+}
 
 async fn spawn_project(
     slug: &Slug,

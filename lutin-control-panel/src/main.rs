@@ -56,10 +56,13 @@ async fn main() -> anyhow::Result<()> {
     let config = SpawnConfig {
         backend,
         // Single root parents every per-project tree. Each project
-        // owns `<projects_root>/<slug>/` (user files + `.lutin/`),
-        // and the registry sits at `<projects_root>/projects.toml`.
+        // owns `<projects_root>/<slug>/` (user files + `.lutin/`), and
+        // the registry sits at `<projects_root>/projects.toml`. The
+        // default is CWD-relative so a developer running CP from the
+        // workspace root drops state into `./projects/` next to their
+        // checkout, with no global filesystem layout to set up first.
         projects_root: std::env::var("LUTIN_CP_PROJECTS_ROOT")
-            .unwrap_or_else(|_| "/var/lib/lutin/projects".into())
+            .unwrap_or_else(|_| "./projects".into())
             .into(),
         global_config_dir,
     };
