@@ -26,7 +26,6 @@ lutin-ids = { path = "../../crates/lutin-ids" }
 lutin-keypair = { path = "../../crates/lutin-keypair" }
 lutin-llm = { path = "../../crates/lutin-llm" }
 lutin-protocol = { path = "../../crates/lutin-protocol" }
-lutin-project-protocol = { path = "../../crates/lutin-project-protocol" }
 lutin-settings = { path = "../../crates/lutin-settings" }
 lutin-storage = { path = "../../crates/lutin-storage" }
 lutin-workflow-sdk = { path = "../../crates/lutin-workflow-sdk" }

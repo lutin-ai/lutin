@@ -95,17 +95,6 @@ pub struct ProjectInfo {
     pub status: ProjectStatus,
 }
 
-/// Where a started project listens, and the token a client should
-/// present when connecting directly to it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectEndpoint {
-    pub addr: std::net::SocketAddr,
-    pub token: String,
-    /// Issuer pubkey the project will present (ed25519). The client
-    /// uses this to verify any tier-3 tokens the project mints.
-    pub project_pubkey: ProjectPubkey,
-}
-
 /// Metadata about an installed workflow image, returned by
 /// `ListWorkflows`. Sourced from the workflow image's labels — see
 /// `lutin-control-panel/src/workflow_images.rs`.
@@ -149,12 +138,6 @@ pub enum Request {
     DeleteProject {
         slug: Slug,
     },
-    OpenProject {
-        slug: Slug,
-    },
-    StopProject {
-        slug: Slug,
-    },
     /// Globally installed workflow images. Workflows are not yet
     /// per-project scoped; `slug` is reserved for forward-compat.
     ListWorkflows,
@@ -195,8 +178,6 @@ pub enum ResponseOk {
     Projects(Vec<ProjectInfo>),
     Created(ProjectInfo),
     Deleted,
-    Opened(ProjectEndpoint),
-    Stopped,
     Workflows(Vec<WorkflowInfo>),
     Sessions(Vec<SessionInfo>),
     /// Reply to `StartSession` — carries the new session metadata plus
@@ -211,38 +192,12 @@ pub enum ResponseOk {
     SessionOpened(SessionEndpoint),
 }
 
-/// Why a project supervisor spawn failed. Lets clients branch on the
-/// failure mode (e.g. surface "binary missing" vs "handoff timeout"
-/// with different UX) instead of grepping a stringly-typed message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SpawnFailureKind {
-    /// Could not exec the project binary (not found, not executable, etc).
-    BinaryMissing,
-    /// Child exited before publishing its handoff.
-    ChildExited,
-    /// Child still alive but didn't publish handoff in time.
-    HandoffTimeout,
-    /// Handoff file existed but couldn't be parsed (corrupt or wrong format).
-    InvalidHandoff,
-    /// Filesystem prep failed (data dir create, stale-file remove, etc).
-    Io,
-    /// A backend CLI call (e.g. `docker run`/`stop`/`inspect`) blew its
-    /// per-call timeout budget. Distinguishes a wedged daemon from a
-    /// generic Io failure so clients can prompt the operator to check
-    /// the daemon rather than the project state.
-    DaemonUnresponsive,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
 pub enum ApiError {
     #[error("project not found: {0}")]
     NotFound(Slug),
     #[error("project already exists: {0}")]
     AlreadyExists(Slug),
-    #[error("project is running: {0}")]
-    ProjectRunning(Slug),
-    #[error("spawn failed ({kind:?}): {detail}")]
-    SpawnFailed { kind: SpawnFailureKind, detail: String },
     #[error("supervisor: {0}")]
     Supervisor(String),
     #[error("workflow not found: {0}")]
@@ -262,7 +217,6 @@ pub enum ApiError {
 pub enum Event {
     ProjectCreated(ProjectInfo),
     ProjectDeleted { slug: Slug },
-    ProjectStatusChanged { slug: Slug, status: ProjectStatus },
     SessionStarted { slug: Slug, info: SessionInfo },
     SessionEnded { slug: Slug, session: SessionId },
 }
@@ -296,19 +250,18 @@ mod tests {
 
     #[test]
     fn response_roundtrip() {
-        let r = Response::Ok(ResponseOk::Opened(ProjectEndpoint {
-            addr: "127.0.0.1:9001".parse().unwrap(),
-            token: "abc".into(),
-            project_pubkey: ProjectPubkey::new([0u8; 32]),
+        let r = Response::Ok(ResponseOk::Created(ProjectInfo {
+            slug: Slug::parse("foo").unwrap(),
+            display_name: DisplayName::parse("Foo").unwrap(),
+            status: ProjectStatus::Stopped,
         }));
         assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
     }
 
     #[test]
     fn event_roundtrip() {
-        let e = Event::ProjectStatusChanged {
+        let e = Event::ProjectDeleted {
             slug: Slug::parse("foo").unwrap(),
-            status: ProjectStatus::Running,
         };
         assert_eq!(decode::<Event>(&encode(&e).unwrap()).unwrap(), e);
     }
@@ -317,23 +270,5 @@ mod tests {
     fn err_response_roundtrip() {
         let r = Response::Err(ApiError::NotFound(Slug::parse("x").unwrap()));
         assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
-    }
-
-    #[test]
-    fn spawn_failed_roundtrip() {
-        for kind in [
-            SpawnFailureKind::BinaryMissing,
-            SpawnFailureKind::ChildExited,
-            SpawnFailureKind::HandoffTimeout,
-            SpawnFailureKind::InvalidHandoff,
-            SpawnFailureKind::Io,
-            SpawnFailureKind::DaemonUnresponsive,
-        ] {
-            let r = Response::Err(ApiError::SpawnFailed {
-                kind: kind.clone(),
-                detail: "boom".into(),
-            });
-            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
-        }
     }
 }

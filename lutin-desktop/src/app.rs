@@ -19,9 +19,8 @@ use std::sync::Arc;
 
 use egui::{Align, CentralPanel, Color32, Layout, RichText};
 use lutin_control_protocol::{
-    DisplayName, DisplayNameError, Event as CpEvent, ProjectEndpoint as CpProjectEndpoint,
-    ProjectInfo, ProjectStatus, Request, Response, ResponseOk, SessionEndpoint as CpSessionEndpoint,
-    SessionInfo, Slug, WorkflowInfo,
+    DisplayName, DisplayNameError, Event as CpEvent, ProjectInfo, ProjectStatus, Request, Response,
+    ResponseOk, SessionEndpoint as CpSessionEndpoint, SessionInfo, Slug, WorkflowInfo,
 };
 use lutin_ids::{SessionId, SlugError, WorkflowId};
 use lutin_ui::prelude::*;
@@ -101,7 +100,6 @@ impl std::error::Error for Disconnected {}
 pub enum Intent {
     SelectProject(Slug),
     OpenProject(Slug),
-    StopProject(Slug),
     DeleteProject(Slug),
     SubmitCreate {
         slug: Slug,
@@ -165,7 +163,6 @@ impl Drop for BridgeGuard {
 /// tears the whole subtree down: workflow UI → workflow bridge,
 /// session UIs → session bridges.
 struct ProjectEntry {
-    endpoint: CpProjectEndpoint,
     /// `None` when the workflow `.so` failed to dlopen.
     loaded: Option<LoadedProject>,
     /// Sessions reported by CP (mirrors `ListSessions` +
@@ -236,7 +233,6 @@ pub struct App {
     workflow_cache: WorkflowCache,
     chrome_api: RealChromeApi,
 
-    pending_opens: HashMap<RequestId, Slug>,
     /// Slug a `ListSessions` reply is for.
     pending_list_sessions: HashMap<RequestId, Slug>,
     /// `(slug, session)` an `OpenSession` reply is for.
@@ -294,7 +290,6 @@ impl App {
             projects_state: HashMap::new(),
             workflow_cache,
             chrome_api: RealChromeApi { tx: chrome_intent_tx },
-            pending_opens: HashMap::new(),
             pending_list_sessions: HashMap::new(),
             pending_session_opens: HashMap::new(),
             pending_starts: HashMap::new(),
@@ -348,7 +343,6 @@ impl App {
         self.projects_state.clear();
         self.projects.clear();
         self.workflows.clear();
-        self.pending_opens.clear();
         self.pending_list_sessions.clear();
         self.pending_session_opens.clear();
         self.pending_starts.clear();
@@ -376,27 +370,20 @@ impl App {
     /// Attempt to dlopen the workflow `.so` and install a fresh
     /// `ProjectEntry`. Always inserts an entry — even when the
     /// workflow UI failed to load, chrome still tracks the project.
-    fn load_workflow_for(&mut self, slug: Slug, endpoint: CpProjectEndpoint) {
+    fn load_workflow_for(&mut self, slug: Slug) {
         let workflow_id = default_workflow_id();
         let loaded = match self.workflow_cache.load(&slug, &workflow_id) {
             Ok(lib) => {
                 let manifest = lib.workflow().manifest();
-                // Transitional: workflow ProjectUi gets a dummy transport
-                // in Phase 4.3. The legacy project-tier protocol it used
-                // to send over this is dead; the trait itself is being
-                // removed in Phase 6/cleanup.
                 let transport = dummy_transport(&self.tokio);
-                // Phase 4.3: no per-project WS exists. addr/token are
-                // placeholders; the chat workflow's ProjectUi doesn't
-                // dial them anymore.
+                // No per-project WS exists post-Phase-5. Placeholder
+                // endpoint kept for ProjectUi trait shape.
                 let ui_endpoint = UiProjectEndpoint {
                     slug: slug.clone(),
                     workflow: workflow_id.clone(),
                     addr: "127.0.0.1:0".parse().unwrap(),
                     token: AuthToken::new(String::new()),
                 };
-                // No bridge task to spawn — install a no-op guard so
-                // the field's type stays uniform.
                 let no_op = self.tokio.spawn(async {});
                 let ui = lib.workflow().open_project(ui_endpoint, transport);
                 Some(LoadedProject {
@@ -415,14 +402,12 @@ impl App {
         self.projects_state.insert(
             slug.clone(),
             ProjectEntry {
-                endpoint,
                 loaded,
                 sessions: Vec::new(),
                 loaded_sessions: HashMap::new(),
                 active_session: None,
             },
         );
-        // Initial session-list refresh; broadcasts keep it fresh after.
         if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
             self.pending_list_sessions.insert(id, slug);
         }
@@ -507,7 +492,6 @@ impl App {
     }
 
     fn on_response(&mut self, request_id: RequestId, resp: Response) {
-        let pending_open = self.pending_opens.remove(&request_id);
         let pending_list = self.pending_list_sessions.remove(&request_id);
         let pending_session_open = self.pending_session_opens.remove(&request_id);
         let pending_start = self.pending_starts.remove(&request_id);
@@ -530,8 +514,6 @@ impl App {
                     }
                     self.projects_state
                         .retain(|slug, _| live_slugs.contains(slug));
-                    self.pending_opens
-                        .retain(|_, slug| self.projects.iter().any(|p| &p.slug == slug));
                     self.pending_list_sessions
                         .retain(|_, slug| live_slugs.contains(slug));
                     self.pending_session_opens
@@ -545,12 +527,6 @@ impl App {
                     self.new_error = None;
                 }
                 ResponseOk::Deleted => {}
-                ResponseOk::Opened(endpoint) => {
-                    if let Some(slug) = pending_open {
-                        self.load_workflow_for(slug, endpoint);
-                    }
-                }
-                ResponseOk::Stopped => {}
                 ResponseOk::Workflows(list) => {
                     self.workflows = list;
                 }
@@ -598,9 +574,7 @@ impl App {
 
     fn on_broadcast(&mut self, ev: CpEvent) {
         match ev {
-            CpEvent::ProjectCreated(_)
-            | CpEvent::ProjectDeleted { .. }
-            | CpEvent::ProjectStatusChanged { .. } => {
+            CpEvent::ProjectCreated(_) | CpEvent::ProjectDeleted { .. } => {
                 if let Err(e) = self.send(Request::ListProjects) {
                     self.last_error = Some(e.to_string());
                 }
@@ -703,19 +677,7 @@ impl App {
                     self.active = Some(slug);
                 }
                 Intent::OpenProject(slug) => {
-                    match self.send(Request::OpenProject { slug: slug.clone() }) {
-                        Ok(id) => {
-                            self.pending_opens.insert(id, slug);
-                        }
-                        Err(e) => {
-                            self.last_error = Some(e.to_string());
-                        }
-                    }
-                }
-                Intent::StopProject(slug) => {
-                    if let Err(e) = self.send(Request::StopProject { slug }) {
-                        self.last_error = Some(e.to_string());
-                    }
+                    self.load_workflow_for(slug);
                 }
                 Intent::DeleteProject(slug) => {
                     if let Err(e) = self.send(Request::DeleteProject { slug }) {
@@ -955,9 +917,7 @@ fn draw_left_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
                         }
                         if ui.add(btn).clicked() {
                             intents.push(Intent::SelectProject(p.slug.clone()));
-                            let need_open = !matches!(p.status, ProjectStatus::Running)
-                                || app.entry(&p.slug).is_none();
-                            if need_open {
+                            if app.entry(&p.slug).is_none() {
                                 intents.push(Intent::OpenProject(p.slug.clone()));
                             }
                         }
@@ -1045,7 +1005,7 @@ fn draw_right_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
         ui.add_space(8.0);
         if let Some(entry) = app.entry(slug) {
             ui.label(
-                RichText::new(format!("endpoint: {}", entry.endpoint.addr))
+                RichText::new(format!("sessions: {}", entry.sessions.len()))
                     .color(theme().text.dim)
                     .small(),
             );
@@ -1084,7 +1044,6 @@ fn draw_main(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
     }
 
     let info = app.projects.iter().find(|p| p.slug == slug).cloned();
-    let endpoint_addr = app.entry(&slug).map(|e| e.endpoint.addr);
     ui.vertical(|ui| {
         if let Some(p) = &info {
             ui.label(RichText::new(p.display_name.as_str()).size(18.0).strong());
@@ -1095,42 +1054,10 @@ fn draw_main(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
             );
             ui.add_space(12.0);
         }
-        match endpoint_addr {
-            None => {
-                ui.label(RichText::new("project not yet opened").color(theme().text.dim));
-            }
-            Some(addr) => {
-                ui.label(
-                    RichText::new("project running — workflow UI not loaded")
-                        .color(theme().text.dim),
-                );
-                ui.label(
-                    RichText::new(format!("listening on {addr}"))
-                        .color(theme().text.dim)
-                        .small(),
-                );
-            }
-        }
+        ui.label(RichText::new("workflow UI not loaded").color(theme().text.dim));
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            let running = info
-                .as_ref()
-                .map(|p| matches!(p.status, ProjectStatus::Running))
-                .unwrap_or(false);
-            let mut stop = button::secondary("Stop");
-            if !running {
-                stop = stop.disabled();
-            }
-            if ui.add(stop).clicked()
-                && let Some(p) = &info
-            {
-                intents.push(Intent::StopProject(p.slug.clone()));
-            }
-            let mut delete = button::danger("Delete");
-            if running {
-                delete = delete.disabled();
-            }
-            if ui.add(delete).clicked()
+            if ui.add(button::danger("Delete")).clicked()
                 && let Some(p) = &info
             {
                 intents.push(Intent::DeleteProject(p.slug.clone()));

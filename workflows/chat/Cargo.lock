@@ -298,7 +298,6 @@ dependencies = [
  "lutin-ids",
  "lutin-keypair",
  "lutin-llm",
- "lutin-project-protocol",
  "lutin-protocol",
  "lutin-settings",
  "lutin-storage",
@@ -1791,17 +1790,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "lutin-project-protocol"
-version = "0.1.0"
-dependencies = [
- "lutin-auth",
- "lutin-ids",
- "postcard",
- "serde",
- "thiserror",
 ]
 
 [[package]]

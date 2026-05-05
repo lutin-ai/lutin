@@ -27,11 +27,6 @@
 use std::sync::Arc;
 
 use egui::{Align, Color32, Layout, RichText, ScrollArea, TextEdit};
-use lutin_ids::SessionId;
-use lutin_project_protocol::{
-    Event as ProjectEvent, Request as ProjectRequest, Response as ProjectResponse,
-    decode as proj_decode, encode as proj_encode,
-};
 use lutin_protocol::{Frame, decode as frame_decode, encode as frame_encode};
 use lutin_workflow_ui::{
     Manifest, ProjectCtx, ProjectEndpoint, SessionCtx, SessionEndpoint, Slot, Transport, Workflow,
@@ -83,20 +78,6 @@ enum Turn {
     Errored(String),
 }
 
-/// One row in the project sidebar.
-#[derive(Clone)]
-struct SessionRow {
-    id: SessionId,
-}
-
-/// Project-scoped state. Authored by the project pump.
-#[derive(Clone, Default)]
-struct ProjectSnapshot {
-    /// Sessions known to this project, in arrival order. Single source
-    /// of truth (no parallel HashMap).
-    sessions: Vec<SessionRow>,
-}
-
 // ─── Intents (UI → pump) ─────────────────────────────────────────────
 
 enum SessionIntent {
@@ -127,9 +108,12 @@ impl Workflow for ChatWorkflow {
     fn open_project(
         &self,
         endpoint: ProjectEndpoint,
-        transport: Transport,
+        _transport: Transport,
     ) -> Box<dyn WorkflowProjectUi> {
-        Box::new(ProjectUi::new(endpoint, transport))
+        // The project-tier WS is gone post-refactor; chrome owns the
+        // session list now. We only need the slug+workflow for the
+        // "+ New" button in the sidebar slot.
+        Box::new(ProjectUi { endpoint })
     }
 
     fn open_session(
@@ -143,26 +127,14 @@ impl Workflow for ChatWorkflow {
 
 // ─── Project-scoped UI ───────────────────────────────────────────────
 
+/// Project-scoped UI. Stripped to the minimum: a "+ New" button plus
+/// the workflow header. The session list itself is owned by chrome
+/// (lutin-desktop pulls it from CP), not by this workflow — the project
+/// tier that used to publish broadcasts here is gone. The trait is kept
+/// so chrome can still locate the workflow + slug for the start-session
+/// intent it raises against `ChromeApi`.
 struct ProjectUi {
     endpoint: ProjectEndpoint,
-    /// Latest snapshot published by the project pump.
-    rx: watch::Receiver<Arc<ProjectSnapshot>>,
-}
-
-impl ProjectUi {
-    fn new(endpoint: ProjectEndpoint, transport: Transport) -> Self {
-        let (tx, rx) = watch::channel(Arc::new(ProjectSnapshot::default()));
-        // Best-effort: ask the project tier for its current session
-        // list so we don't render an empty sidebar before the first
-        // broadcast arrives.
-        send_project_request(
-            &transport.send,
-            &std::sync::atomic::AtomicU64::new(1),
-            &ProjectRequest::ListSessions,
-        );
-        spawn_project_pump(transport, tx);
-        Self { endpoint, rx }
-    }
 }
 
 impl WorkflowProjectUi for ProjectUi {
@@ -179,7 +151,6 @@ impl WorkflowProjectUi for ProjectUi {
 
 impl ProjectUi {
     fn render_sidebar(&mut self, ctx: ProjectCtx<'_>, ui: &mut egui::Ui) {
-        let snap: Arc<ProjectSnapshot> = self.rx.borrow().clone();
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.heading("Sessions");
@@ -191,119 +162,8 @@ impl ProjectUi {
                 });
             });
             ui.separator();
-
-            ScrollArea::vertical().show(ui, |ui| {
-                if snap.sessions.is_empty() {
-                    ui.label(RichText::new("no sessions yet").weak());
-                    return;
-                }
-                for row in &snap.sessions {
-                    let active = ctx.active_session == Some(&row.id);
-                    let label = format!("{}", row.id);
-                    let resp = ui.selectable_label(active, label);
-                    if resp.clicked() {
-                        ctx.chrome.activate_session(&self.endpoint.slug, &row.id);
-                    }
-                }
-            });
+            ui.label(RichText::new("(session list rendered by chrome)").weak());
         });
-    }
-}
-
-fn spawn_project_pump(mut transport: Transport, tx: watch::Sender<Arc<ProjectSnapshot>>) {
-    tokio::spawn(async move {
-        // Pump-owned mutable state. Sole writer.
-        let mut state = ProjectSnapshot::default();
-        while let Some(bytes) = transport.recv.recv().await {
-            let frame = match frame_decode(&bytes) {
-                Ok(f) => f,
-                Err(err) => {
-                    tracing::warn!(?err, "malformed frame from project transport");
-                    continue;
-                }
-            };
-            let mut changed = false;
-            match frame {
-                Frame::Broadcast { body } => match proj_decode::<ProjectEvent>(&body) {
-                    Ok(ev) => changed = apply_project_event(&mut state, ev),
-                    Err(err) => {
-                        tracing::warn!(?err, "malformed ProjectEvent broadcast");
-                    }
-                },
-                Frame::Payload { body, .. } => match proj_decode::<ProjectResponse>(&body) {
-                    Ok(ProjectResponse::Ok(lutin_project_protocol::ResponseOk::Sessions(
-                        list,
-                    ))) => {
-                        state.sessions.clear();
-                        for s in &list {
-                            state.sessions.push(SessionRow { id: s.id.clone() });
-                        }
-                        changed = true;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::warn!(?err, "malformed ProjectResponse payload");
-                    }
-                },
-                _ => {}
-            }
-            if changed {
-                // Republish: clone the owned state into a fresh Arc.
-                if tx.send(Arc::new(state.clone())).is_err() {
-                    return; // no more receivers
-                }
-            }
-        }
-    });
-}
-
-/// Pure: returns true iff the snapshot changed.
-fn apply_project_event(state: &mut ProjectSnapshot, ev: ProjectEvent) -> bool {
-    match ev {
-        ProjectEvent::SessionStarted(info) => {
-            if !state.sessions.iter().any(|s| s.id == info.id) {
-                state.sessions.push(SessionRow {
-                    id: info.id.clone(),
-                });
-            }
-            true
-        }
-        ProjectEvent::SessionEnded { id } => {
-            let before = state.sessions.len();
-            state.sessions.retain(|s| s.id != id);
-            state.sessions.len() != before
-        }
-        ProjectEvent::WorkflowBuildStarted { .. }
-        | ProjectEvent::WorkflowBuildOutput { .. }
-        | ProjectEvent::WorkflowBuildFinished { .. } => false,
-    }
-}
-
-fn send_project_request(
-    send: &mpsc::UnboundedSender<Vec<u8>>,
-    counter: &std::sync::atomic::AtomicU64,
-    req: &ProjectRequest,
-) {
-    let body = match proj_encode(req) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::warn!(?err, "project request encode failed");
-            return;
-        }
-    };
-    let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let bytes = match frame_encode(&Frame::Payload {
-        request_id: id,
-        body,
-    }) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::warn!(?err, "frame encode failed");
-            return;
-        }
-    };
-    if let Err(err) = send.send(bytes) {
-        tracing::warn!(?err, "project transport closed; request dropped");
     }
 }
 

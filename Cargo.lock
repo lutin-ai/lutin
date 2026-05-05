@@ -1246,17 +1246,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
-name = "escargot"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11c3aea32bc97b500c9ca6a72b768a26e558264303d101d3409cf6d57a9ed0cf"
-dependencies = [
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "euclid"
 version = "0.22.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2129,25 +2118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2501,10 +2471,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dotenvy",
- "escargot",
  "futures-util",
  "getrandom 0.3.4",
- "include_dir",
  "libc",
  "lutin-auth",
  "lutin-control-protocol",
@@ -2607,39 +2575,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "lutin-project"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "escargot",
- "futures-util",
- "getrandom 0.4.2",
- "lutin-auth",
- "lutin-keypair",
- "lutin-project-protocol",
- "lutin-protocol",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "lutin-project-protocol"
-version = "0.1.0"
-dependencies = [
- "lutin-auth",
- "lutin-ids",
- "postcard",
- "serde",
- "thiserror 2.0.18",
 ]
 
 [[package]]
