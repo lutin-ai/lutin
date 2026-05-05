@@ -8,12 +8,32 @@
 # ../../crates/lutin-*).
 #   docker build -f workflows/chat/Dockerfile -t lutin-workflow-chat:<version> .
 #
-# CP extracts the cdylib from this image at install time via
-# `docker create` + `docker cp <id>:/workflow/lib.so <host_path>`. The
-# path is declared via the `lutin.workflow.cdylib` label so CP can find
-# it without hard-coding.
+# CP extracts artefacts on demand via `docker run --rm <image> cat <path>`:
+#   - cdylib UI (legacy egui, removed in Phase 4) at the path declared by
+#     the `lutin.workflow.cdylib` label.
+#   - Plugin bundle tarball (HTML/JS UI for the Tauri chrome) at the path
+#     declared by the `lutin.workflow.bundle` label.
 
-# ---------- builder ----------
+# ---------- ui-builder (Vite/React) ----------
+# Built first so a Rust source change doesn't bust the JS layer's cache.
+# `oven/bun` ships bun + a recent Node toolchain; we only need bun to
+# install + `bun run build`.
+FROM oven/bun:1-debian AS ui-builder
+
+WORKDIR /ui
+COPY workflows/chat/ui/package.json workflows/chat/ui/bun.lock* ./
+RUN bun install --frozen-lockfile || bun install
+
+COPY workflows/chat/ui/ ./
+RUN bun run build
+
+# Tar the dist directory at the bundle root so chrome's BundleCache
+# can `tar::Archive::new(...)` it directly. `--directory=dist` keeps
+# `lutin.workflow.json` and `index.html` at archive root rather than
+# nested under `dist/`.
+RUN tar --create --file=/ui.tar --directory=dist .
+
+# ---------- engine builder ----------
 FROM rust:1-bookworm AS builder
 
 # reqwest's default features pull in native-tls → OpenSSL. pkg-config +
@@ -50,15 +70,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 libdbus-1-3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Fixed image-side layout. CP reads the cdylib path from the label
-# below, so changing it here is a one-line change. The bin path is
-# implicit in the ENTRYPOINT.
+# Fixed image-side layout. CP reads each artefact path from the label
+# below, so changing them here is a one-line change.
 RUN mkdir -p /workflow /project /session
-COPY --from=builder /build/workflows/chat/target/release/chat        /workflow/bin
-COPY --from=builder /build/workflows/chat/target/release/libchat.so  /workflow/lib.so
+COPY --from=builder    /build/workflows/chat/target/release/chat        /workflow/bin
+COPY --from=builder    /build/workflows/chat/target/release/libchat.so  /workflow/lib.so
+COPY --from=ui-builder /ui.tar                                          /workflow/ui.tar
 
 LABEL lutin.workflow.id="chat"
 LABEL lutin.workflow.cdylib="/workflow/lib.so"
+LABEL lutin.workflow.bundle="/workflow/ui.tar"
 LABEL lutin.workflow.display_name="Chat"
 LABEL lutin.workflow.icon="💬"
 
