@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 lutin-protocol = { path = "../crates/lutin-protocol" }
 lutin-control-protocol = { path = "../crates/lutin-control-protocol" }
-lutin-project-protocol = { path = "../crates/lutin-project-protocol" }
 lutin-workflow-ui = { path = "../crates/lutin-workflow-ui" }
 lutin-ids = { path = "../crates/lutin-ids" }
 lutin-storage = { path = "../crates/lutin-storage" }

@@ -7,7 +7,6 @@ mod app;
 mod bridge;
 mod cp;
 mod loader;
-mod proj;
 pub mod settings;
 mod view;
 

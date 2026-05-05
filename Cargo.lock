@@ -2544,7 +2544,6 @@ dependencies = [
  "libloading",
  "lutin-control-protocol",
  "lutin-ids",
- "lutin-project-protocol",
  "lutin-protocol",
  "lutin-storage",
  "lutin-ui",

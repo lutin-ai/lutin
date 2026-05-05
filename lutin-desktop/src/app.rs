@@ -20,18 +20,16 @@ use std::sync::Arc;
 use egui::{Align, CentralPanel, Color32, Layout, RichText};
 use lutin_control_protocol::{
     DisplayName, DisplayNameError, Event as CpEvent, ProjectEndpoint as CpProjectEndpoint,
-    ProjectInfo, ProjectStatus, Request, Response, ResponseOk, Slug,
+    ProjectInfo, ProjectStatus, Request, Response, ResponseOk, SessionEndpoint as CpSessionEndpoint,
+    SessionInfo, Slug, WorkflowInfo,
 };
 use lutin_ids::{SessionId, SlugError, WorkflowId};
-use lutin_project_protocol::{
-    BuildOutcome, Event as ProjEvent_, Request as ProjRequest, Response as ProjResponse,
-    ResponseOk as ProjResponseOk, SessionInfo,
-};
 use lutin_ui::prelude::*;
 use lutin_ui::widget::{button, panel, text_input};
 use lutin_workflow_ui::{
     AuthToken, ChromeApi, ProjectCtx, ProjectEndpoint as UiProjectEndpoint,
-    SessionCtx, SessionEndpoint as UiSessionEndpoint, Slot, WorkflowProjectUi, WorkflowSessionUi,
+    SessionCtx, SessionEndpoint as UiSessionEndpoint, Slot, Transport, WorkflowProjectUi,
+    WorkflowSessionUi,
 };
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -39,7 +37,6 @@ use tracing::{info, warn};
 use crate::bridge::{self, make_transport_pair};
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
 use crate::loader::{WorkflowCache, WorkflowLibrary};
-use crate::proj::{ProjCommand, ProjUpdate, ProjUpdateKind};
 use crate::settings::DesktopSettings;
 use crate::view::settings::{self as settings_view, ConnStatus, NewConnectionForm};
 
@@ -164,54 +161,20 @@ impl Drop for BridgeGuard {
     }
 }
 
-/// In-flight cargo build of a workflow crate. Absent value (no map
-/// entry / `None`) means "no build observed" — the warm path doesn't
-/// emit start/finish events at all, and successful finishes clear the
-/// status.
-#[derive(Debug, Clone)]
-enum BuildStatus {
-    Running {
-        workflow: WorkflowId,
-        /// Tail of cargo output (cap at MAX_BUILD_LINES).
-        lines: Vec<String>,
-    },
-    Failed {
-        workflow: WorkflowId,
-        exit_code: Option<i32>,
-        lines: Vec<String>,
-    },
-}
-
-const MAX_BUILD_LINES: usize = 200;
-
-/// Per-project tier-2 worker handle owned by the `ProjectEntry`.
-/// Dropping `cmd_tx` signals the worker; `_abort` then unconditionally
-/// aborts its tokio task on drop.
-struct ProjWorker {
-    cmd_tx: mpsc::UnboundedSender<ProjCommand>,
-    _abort: BridgeGuard,
-}
-
 /// Everything chrome owns about one opened project. Dropping the entry
 /// tears the whole subtree down: workflow UI → workflow bridge,
-/// session UIs → session bridges, proj worker → tier-2 WS.
+/// session UIs → session bridges.
 struct ProjectEntry {
     endpoint: CpProjectEndpoint,
-    /// `None` when the workflow `.so` failed to dlopen (chrome can
-    /// still talk to the project tier via `worker`, but won't render
-    /// the workflow's slots).
+    /// `None` when the workflow `.so` failed to dlopen.
     loaded: Option<LoadedProject>,
-    worker: ProjWorker,
-    /// Sessions reported by the project tier (mirrors
-    /// `ListSessions` + `SessionStarted`/`SessionEnded` broadcasts).
+    /// Sessions reported by CP (mirrors `ListSessions` +
+    /// `SessionStarted`/`SessionEnded` broadcasts).
     sessions: Vec<SessionInfo>,
     /// Loaded session UIs keyed by session id.
     loaded_sessions: HashMap<SessionId, LoadedSession>,
     /// Currently focused session in this project's tab strip.
     active_session: Option<SessionId>,
-    /// Latest build status, if any. `None` after a successful build or
-    /// before the first one is observed.
-    build: Option<BuildStatus>,
 }
 
 pub enum ChromeIntent {
@@ -257,8 +220,6 @@ pub struct App {
     /// Control-panel client. Owns the worker task + its channels;
     /// re-dialing on settings change goes through `cp.reconnect`.
     cp: CpClient,
-    proj_evt_rx: mpsc::UnboundedReceiver<ProjUpdate>,
-    proj_evt_tx: mpsc::UnboundedSender<ProjUpdate>,
     chrome_intent_rx: mpsc::UnboundedReceiver<ChromeIntent>,
     tokio: tokio::runtime::Handle,
     egui_ctx: egui::Context,
@@ -266,14 +227,21 @@ pub struct App {
     conn: ConnState,
     /// Authoritative project list from the control-panel.
     projects: Vec<ProjectInfo>,
+    /// Authoritative workflow list (refreshed on connect via
+    /// `ListWorkflows`).
+    workflows: Vec<WorkflowInfo>,
     /// Per-opened-project state. Single source of truth — dropping an
-    /// entry tears down workers, bridges, and loaded UIs together.
+    /// entry tears down bridges and loaded UIs together.
     projects_state: HashMap<Slug, ProjectEntry>,
     workflow_cache: WorkflowCache,
     chrome_api: RealChromeApi,
 
     pending_opens: HashMap<RequestId, Slug>,
+    /// Slug a `ListSessions` reply is for.
+    pending_list_sessions: HashMap<RequestId, Slug>,
+    /// `(slug, session)` an `OpenSession` reply is for.
     pending_session_opens: HashMap<RequestId, (Slug, SessionId)>,
+    /// Slug a `StartSession` reply is for.
     pending_starts: HashMap<RequestId, Slug>,
 
     next_request_id: u64,
@@ -305,7 +273,6 @@ impl App {
         lutin_ui::font::install(&cc.egui_ctx, lutin_ui::font::Preset::Inter);
         set_theme(dark(), &cc.egui_ctx);
 
-        let (proj_evt_tx, proj_evt_rx) = mpsc::unbounded_channel();
         let (chrome_intent_tx, chrome_intent_rx) = mpsc::unbounded_channel();
 
         let cfg = build_cp_config(&settings);
@@ -318,17 +285,17 @@ impl App {
 
         Self {
             cp,
-            proj_evt_rx,
-            proj_evt_tx,
             chrome_intent_rx,
             tokio,
             egui_ctx: cc.egui_ctx.clone(),
             conn,
             projects: Vec::new(),
+            workflows: Vec::new(),
             projects_state: HashMap::new(),
             workflow_cache,
             chrome_api: RealChromeApi { tx: chrome_intent_tx },
             pending_opens: HashMap::new(),
+            pending_list_sessions: HashMap::new(),
             pending_session_opens: HashMap::new(),
             pending_starts: HashMap::new(),
             next_request_id: 1,
@@ -380,7 +347,9 @@ impl App {
 
         self.projects_state.clear();
         self.projects.clear();
+        self.workflows.clear();
         self.pending_opens.clear();
+        self.pending_list_sessions.clear();
         self.pending_session_opens.clear();
         self.pending_starts.clear();
         self.active = None;
@@ -404,52 +373,35 @@ impl App {
         id
     }
 
-    /// Spawn the chrome-side tier-2 worker, attempt to dlopen the
-    /// workflow `.so`, and install a fresh `ProjectEntry`. Always
-    /// inserts an entry — the worker exists even when the workflow UI
-    /// failed to load, so chrome can still talk to the project tier.
+    /// Attempt to dlopen the workflow `.so` and install a fresh
+    /// `ProjectEntry`. Always inserts an entry — even when the
+    /// workflow UI failed to load, chrome still tracks the project.
     fn load_workflow_for(&mut self, slug: Slug, endpoint: CpProjectEndpoint) {
-        // 1) Tier-2 worker — independent of dlopen success.
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ProjCommand>();
-        let evt_tx = self.proj_evt_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        let proj_task = self.tokio.spawn(crate::proj::run(
-            slug.clone(),
-            endpoint.addr,
-            endpoint.token.clone(),
-            cmd_rx,
-            evt_tx,
-            move || ctx.request_repaint(),
-        ));
-        let worker = ProjWorker {
-            cmd_tx,
-            _abort: BridgeGuard(proj_task.abort_handle()),
-        };
-
-        // 2) Workflow `.so` + project UI. Failure is non-fatal — leave
-        //    `loaded = None` and surface to the user via `last_error`.
         let workflow_id = default_workflow_id();
         let loaded = match self.workflow_cache.load(&slug, &workflow_id) {
             Ok(lib) => {
                 let manifest = lib.workflow().manifest();
-                let (transport, bridge_endpoints) = make_transport_pair();
-                let token = AuthToken::new(endpoint.token.clone());
+                // Transitional: workflow ProjectUi gets a dummy transport
+                // in Phase 4.3. The legacy project-tier protocol it used
+                // to send over this is dead; the trait itself is being
+                // removed in Phase 6/cleanup.
+                let transport = dummy_transport(&self.tokio);
+                // Phase 4.3: no per-project WS exists. addr/token are
+                // placeholders; the chat workflow's ProjectUi doesn't
+                // dial them anymore.
                 let ui_endpoint = UiProjectEndpoint {
                     slug: slug.clone(),
                     workflow: workflow_id.clone(),
-                    addr: endpoint.addr,
-                    token: token.clone(),
+                    addr: "127.0.0.1:0".parse().unwrap(),
+                    token: AuthToken::new(String::new()),
                 };
-                let bridge_task = self.tokio.spawn(bridge::run_workflow_bridge(
-                    slug.clone(),
-                    endpoint.addr,
-                    token,
-                    bridge_endpoints,
-                ));
+                // No bridge task to spawn — install a no-op guard so
+                // the field's type stays uniform.
+                let no_op = self.tokio.spawn(async {});
                 let ui = lib.workflow().open_project(ui_endpoint, transport);
                 Some(LoadedProject {
                     ui,
-                    _bridge: BridgeGuard(bridge_task.abort_handle()),
+                    _bridge: BridgeGuard(no_op.abort_handle()),
                     _lib: lib,
                     manifest,
                 })
@@ -460,22 +412,20 @@ impl App {
             }
         };
 
-        // 3) Install the entry (overwriting any prior one — its drop
-        //    tears down stale bridges / workers).
         self.projects_state.insert(
             slug.clone(),
             ProjectEntry {
                 endpoint,
                 loaded,
-                worker,
                 sessions: Vec::new(),
                 loaded_sessions: HashMap::new(),
                 active_session: None,
-                build: None,
             },
         );
         // Initial session-list refresh; broadcasts keep it fresh after.
-        let _ = self.send_proj(&slug, ProjRequest::ListSessions);
+        if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
+            self.pending_list_sessions.insert(id, slug);
+        }
     }
 
     fn send(&mut self, req: Request) -> Result<RequestId, Disconnected> {
@@ -492,26 +442,6 @@ impl App {
             return Err(Disconnected);
         }
         Ok(request_id)
-    }
-
-    /// Send a request to the project-tier worker for `slug`. `None`
-    /// means no entry/worker is registered for that slug.
-    fn send_proj(&mut self, slug: &Slug, req: ProjRequest) -> Option<RequestId> {
-        let request_id = self.next_request_id();
-        let entry = self.projects_state.get(slug)?;
-        if entry
-            .worker
-            .cmd_tx
-            .send(ProjCommand::Send {
-                request_id,
-                request: req,
-            })
-            .is_err()
-        {
-            warn!(%slug, "proj worker channel closed; command dropped");
-            return None;
-        }
-        Some(request_id)
     }
 
     fn entry(&self, slug: &Slug) -> Option<&ProjectEntry> {
@@ -531,6 +461,9 @@ impl App {
                     if let Err(e) = self.send(Request::ListProjects) {
                         self.last_error = Some(e.to_string());
                     }
+                    if let Err(e) = self.send(Request::ListWorkflows) {
+                        self.last_error = Some(e.to_string());
+                    }
                 }
                 CpUpdate::Disconnected => self.conn = ConnState::Disconnected,
                 CpUpdate::HandshakeRejected(reason) => self.conn = ConnState::Rejected(reason),
@@ -541,9 +474,6 @@ impl App {
                 CpUpdate::Broadcast(ev) => self.on_broadcast(ev),
             }
         }
-        while let Ok(ev) = self.proj_evt_rx.try_recv() {
-            self.on_proj_update(ev);
-        }
         self.drain_chrome_intents();
     }
 
@@ -551,16 +481,17 @@ impl App {
         while let Ok(intent) = self.chrome_intent_rx.try_recv() {
             match intent {
                 ChromeIntent::StartSession { project, workflow } => {
-                    let Some(id) = self.send_proj(
-                        &project,
-                        ProjRequest::StartSession { workflow },
-                    ) else {
-                        self.last_error = Some(format!(
-                            "no active project worker for {project} — cannot start session"
-                        ));
-                        continue;
-                    };
-                    self.pending_starts.insert(id, project);
+                    match self.send(Request::StartSession {
+                        slug: project.clone(),
+                        workflow,
+                    }) {
+                        Ok(id) => {
+                            self.pending_starts.insert(id, project);
+                        }
+                        Err(e) => {
+                            self.last_error = Some(e.to_string());
+                        }
+                    }
                 }
                 ChromeIntent::ActivateSession { project, session } => {
                     if let Some(entry) = self.entry_mut(&project) {
@@ -576,7 +507,10 @@ impl App {
     }
 
     fn on_response(&mut self, request_id: RequestId, resp: Response) {
-        let pending_slug = self.pending_opens.remove(&request_id);
+        let pending_open = self.pending_opens.remove(&request_id);
+        let pending_list = self.pending_list_sessions.remove(&request_id);
+        let pending_session_open = self.pending_session_opens.remove(&request_id);
+        let pending_start = self.pending_starts.remove(&request_id);
         match resp {
             Response::Ok(ok) => match ok {
                 ResponseOk::Projects(list) => {
@@ -594,12 +528,12 @@ impl App {
                     {
                         self.active = None;
                     }
-                    // One retain — entry's Drop tears down everything
-                    // (worker, bridges, loaded UIs) for the dead project.
                     self.projects_state
                         .retain(|slug, _| live_slugs.contains(slug));
                     self.pending_opens
                         .retain(|_, slug| self.projects.iter().any(|p| &p.slug == slug));
+                    self.pending_list_sessions
+                        .retain(|_, slug| live_slugs.contains(slug));
                     self.pending_session_opens
                         .retain(|_, (slug, _)| live_slugs.contains(slug));
                     self.pending_starts
@@ -612,20 +546,49 @@ impl App {
                 }
                 ResponseOk::Deleted => {}
                 ResponseOk::Opened(endpoint) => {
-                    if let Some(slug) = pending_slug {
+                    if let Some(slug) = pending_open {
                         self.load_workflow_for(slug, endpoint);
                     }
                 }
                 ResponseOk::Stopped => {}
-                // Session-management responses land in Phase 4.3; the
-                // protocol surface exists today (variants present in
-                // ResponseOk) but the desktop still drives sessions
-                // through the per-project tier-2 worker for now.
-                ResponseOk::Workflows(_)
-                | ResponseOk::Sessions(_)
-                | ResponseOk::SessionStarted { .. }
-                | ResponseOk::SessionStopped
-                | ResponseOk::SessionOpened(_) => {}
+                ResponseOk::Workflows(list) => {
+                    self.workflows = list;
+                }
+                ResponseOk::Sessions(list) => {
+                    let Some(slug) = pending_list else {
+                        warn!("Sessions response without pending ListSessions");
+                        return;
+                    };
+                    let Some(entry) = self.entry_mut(&slug) else {
+                        return;
+                    };
+                    entry.sessions = list;
+                    let live: std::collections::HashSet<SessionId> =
+                        entry.sessions.iter().map(|s| s.id.clone()).collect();
+                    entry.loaded_sessions.retain(|sid, _| live.contains(sid));
+                    if let Some(active) = &entry.active_session
+                        && !live.contains(active)
+                    {
+                        entry.active_session = None;
+                    }
+                }
+                ResponseOk::SessionStarted { info, endpoint } => {
+                    let Some(slug) = pending_start else {
+                        warn!("SessionStarted response without pending StartSession");
+                        return;
+                    };
+                    let session_id = info.id.clone();
+                    self.upsert_session(&slug, info);
+                    self.load_session(slug, session_id, endpoint);
+                }
+                ResponseOk::SessionStopped => {}
+                ResponseOk::SessionOpened(endpoint) => {
+                    let Some((slug, session)) = pending_session_open else {
+                        warn!("SessionOpened response without pending OpenSession");
+                        return;
+                    };
+                    self.load_session(slug, session, endpoint);
+                }
             },
             Response::Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -642,133 +605,17 @@ impl App {
                     self.last_error = Some(e.to_string());
                 }
             }
-            // Session lifecycle events emitted by CP land in Phase 4.3,
-            // when the desktop replaces its per-project ProjWorker with
-            // direct CP-WS routing. Until then these are no-ops; CP also
-            // doesn't emit them yet (the orchestrator is Unimplemented).
-            CpEvent::SessionStarted { .. } | CpEvent::SessionEnded { .. } => {}
-        }
-    }
-
-    fn on_proj_update(&mut self, update: ProjUpdate) {
-        let ProjUpdate { slug, kind } = update;
-        match kind {
-            ProjUpdateKind::Connected => {
-                let _ = self.send_proj(&slug, ProjRequest::ListSessions);
+            CpEvent::SessionStarted { slug, info } => {
+                self.upsert_session(&slug, info);
             }
-            ProjUpdateKind::Disconnected => {
-                // Loaded session UIs run on their own connections; not
-                // affected by this chrome subscription's reconnect.
-            }
-            ProjUpdateKind::ConnectError(reason) => {
-                warn!(%slug, %reason, "chrome project subscription error (will retry)");
-            }
-            ProjUpdateKind::HandshakeRejected(reason) => {
-                self.last_error =
-                    Some(format!("project {slug}: handshake rejected — {reason}"));
-            }
-            ProjUpdateKind::Response { request_id, response } => {
-                self.on_proj_response(slug, request_id, response);
-            }
-            ProjUpdateKind::Broadcast(ev) => self.on_proj_broadcast(slug, ev),
-        }
-    }
-
-    fn on_proj_response(&mut self, slug: Slug, request_id: RequestId, resp: ProjResponse) {
-        let pending_open = self.pending_session_opens.remove(&request_id);
-        self.pending_starts.remove(&request_id);
-        match resp {
-            ProjResponse::Ok(ok) => match ok {
-                ProjResponseOk::Workflows(_) => {}
-                ProjResponseOk::Sessions(list) => {
-                    let Some(entry) = self.entry_mut(&slug) else {
-                        return;
-                    };
-                    entry.sessions = list;
-                    let live: std::collections::HashSet<SessionId> =
-                        entry.sessions.iter().map(|s| s.id.clone()).collect();
-                    entry.loaded_sessions.retain(|sid, _| live.contains(sid));
-                    if let Some(active) = &entry.active_session
-                        && !live.contains(active)
-                    {
+            CpEvent::SessionEnded { slug, session } => {
+                if let Some(entry) = self.entry_mut(&slug) {
+                    entry.sessions.retain(|s| s.id != session);
+                    entry.loaded_sessions.remove(&session);
+                    if entry.active_session.as_ref() == Some(&session) {
                         entry.active_session = None;
                     }
                 }
-                ProjResponseOk::Started(info) => {
-                    self.upsert_session(&slug, info.clone());
-                    self.request_open_session(&slug, info.id);
-                }
-                ProjResponseOk::Stopped => {}
-                ProjResponseOk::Opened(ep) => {
-                    let Some((s, session_id)) = pending_open else {
-                        warn!(%slug, "Opened response without pending session-open");
-                        return;
-                    };
-                    debug_assert_eq!(s, slug, "pending session-open slug mismatch");
-                    self.load_session(slug, session_id, ep);
-                }
-            },
-            ProjResponse::Err(err) => {
-                self.last_error = Some(format!("project {slug}: {err}"));
-            }
-        }
-    }
-
-    fn on_proj_broadcast(&mut self, slug: Slug, ev: ProjEvent_) {
-        match ev {
-            ProjEvent_::SessionStarted(info) => {
-                let already = self
-                    .entry(&slug)
-                    .is_some_and(|e| e.sessions.iter().any(|s| s.id == info.id));
-                self.upsert_session(&slug, info.clone());
-                if !already {
-                    self.request_open_session(&slug, info.id);
-                }
-            }
-            ProjEvent_::SessionEnded { id } => {
-                if let Some(entry) = self.entry_mut(&slug) {
-                    entry.sessions.retain(|s| s.id != id);
-                    entry.loaded_sessions.remove(&id);
-                    if entry.active_session.as_ref() == Some(&id) {
-                        entry.active_session = None;
-                    }
-                }
-            }
-            ProjEvent_::WorkflowBuildStarted { workflow, .. } => {
-                if let Some(entry) = self.entry_mut(&slug) {
-                    entry.build = Some(BuildStatus::Running {
-                        workflow,
-                        lines: Vec::new(),
-                    });
-                }
-            }
-            ProjEvent_::WorkflowBuildOutput { line, .. } => {
-                if let Some(entry) = self.entry_mut(&slug)
-                    && let Some(BuildStatus::Running { lines, .. }) = entry.build.as_mut()
-                {
-                    lines.push(line);
-                    if lines.len() > MAX_BUILD_LINES {
-                        let drop = lines.len() - MAX_BUILD_LINES;
-                        lines.drain(..drop);
-                    }
-                }
-            }
-            ProjEvent_::WorkflowBuildFinished { workflow, outcome, .. } => {
-                let Some(entry) = self.entry_mut(&slug) else {
-                    return;
-                };
-                let lines = match entry.build.take() {
-                    Some(BuildStatus::Running { lines, .. }) => lines,
-                    _ => Vec::new(),
-                };
-                entry.build = match outcome {
-                    BuildOutcome::Success => None,
-                    BuildOutcome::Failed { exit_code } => Some(BuildStatus::Failed {
-                        workflow,
-                        exit_code,
-                        lines,
-                    }),
-                };
             }
         }
     }
@@ -782,6 +629,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn request_open_session(&mut self, slug: &Slug, session: SessionId) {
         if self
             .entry(slug)
@@ -789,10 +637,12 @@ impl App {
         {
             return;
         }
-        let Some(id) =
-            self.send_proj(slug, ProjRequest::OpenSession { session: session.clone() })
-        else {
-            return;
+        let id = match self.send(Request::OpenSession {
+            slug: slug.clone(),
+            session: session.clone(),
+        }) {
+            Ok(id) => id,
+            Err(_) => return,
         };
         self.pending_session_opens
             .insert(id, (slug.clone(), session));
@@ -802,7 +652,7 @@ impl App {
         &mut self,
         slug: Slug,
         session: SessionId,
-        ep: lutin_project_protocol::SessionEndpoint,
+        ep: CpSessionEndpoint,
     ) {
         let workflow_id = default_workflow_id();
         let lib = match self.workflow_cache.load(&slug, &workflow_id) {
@@ -1225,34 +1075,6 @@ fn draw_main(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
         return intents;
     }
 
-    // Build progress while no session UI is loaded.
-    let build = app.entry(&slug).and_then(|e| e.build.clone());
-    if let Some(status) = build {
-        match status {
-            BuildStatus::Running { workflow, lines } => {
-                ui.label(
-                    RichText::new(format!("compiling workflow `{workflow}`…"))
-                        .color(theme().text.dim),
-                );
-                draw_build_log(ui, &lines);
-                return intents;
-            }
-            BuildStatus::Failed { workflow, exit_code, lines } => {
-                ui.label(
-                    RichText::new(format!(
-                        "workflow `{workflow}` failed to compile (exit {})",
-                        exit_code
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "?".into())
-                    ))
-                    .color(theme().text.dim),
-                );
-                draw_build_log(ui, &lines);
-                return intents;
-            }
-        }
-    }
-
     let has_loaded = app
         .entry(&slug)
         .is_some_and(|e| e.loaded.is_some());
@@ -1358,20 +1180,18 @@ fn draw_session_tabs(app: &App, slug: &Slug, ui: &mut egui::Ui) -> Vec<Intent> {
     intents
 }
 
-fn draw_build_log(ui: &mut egui::Ui, lines: &[String]) {
-    if lines.is_empty() {
-        return;
-    }
-    ui.add_space(8.0);
-    egui::ScrollArea::vertical()
-        .max_height(280.0)
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for line in lines {
-                ui.label(RichText::new(line).monospace().small().color(theme().text.dim));
-            }
-        });
+/// Phase 4.3 transitional dummy: workflow ProjectUi receives a
+/// `Transport` whose channels go nowhere. Sends are silently consumed
+/// by a parked receiver; reads return `None` immediately because the
+/// matching sender is dropped on the spot. The trait itself is being
+/// removed in Phase 6/cleanup.
+fn dummy_transport(tokio: &tokio::runtime::Handle) -> Transport {
+    let (send, mut send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // Park the receiver in a never-completing task so sends don't fail
+    // synchronously; the task just drains and drops.
+    tokio.spawn(async move { while send_rx.recv().await.is_some() {} });
+    let (_recv_tx, recv) = mpsc::unbounded_channel::<Vec<u8>>();
+    Transport { send, recv }
 }
 
 fn status_str(s: &ProjectStatus) -> &'static str {
