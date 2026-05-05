@@ -16,6 +16,7 @@ use std::process::Command;
 
 const ID_LABEL: &str = "lutin.workflow.id";
 const CDYLIB_LABEL: &str = "lutin.workflow.cdylib";
+const BUNDLE_LABEL: &str = "lutin.workflow.bundle";
 const DISPLAY_NAME_LABEL: &str = "lutin.workflow.display_name";
 const ICON_LABEL: &str = "lutin.workflow.icon";
 
@@ -83,18 +84,34 @@ pub fn list_installed() -> Vec<InstalledWorkflow> {
 /// `/bin/cat`. Stdout becomes the bytes; stderr surfaces any error.
 pub fn read_cdylib_bytes(image: &str) -> io::Result<(String, Vec<u8>)> {
     let meta = inspect_image(image)?;
+    let path = meta.cdylib_path.as_deref().ok_or_else(|| {
+        io::Error::other(format!("{image} missing label {CDYLIB_LABEL}"))
+    })?;
+    cat_image_path(image, path).map(|bytes| (meta.digest, bytes))
+}
+
+/// Read the workflow UI bundle (tar archive) out of an image. Same
+/// shape as `read_cdylib_bytes`; the path is declared by the
+/// `lutin.workflow.bundle` Docker label.
+pub fn read_bundle_bytes(image: &str) -> io::Result<(String, Vec<u8>)> {
+    let meta = inspect_image(image)?;
+    let path = meta.bundle_path.as_deref().ok_or_else(|| {
+        io::Error::other(format!("{image} missing label {BUNDLE_LABEL}"))
+    })?;
+    cat_image_path(image, path).map(|bytes| (meta.digest, bytes))
+}
+
+fn cat_image_path(image: &str, path: &str) -> io::Result<Vec<u8>> {
     let out = Command::new("docker")
-        .args(["run", "--rm", "--entrypoint", "/bin/cat", image, &meta.cdylib_path])
+        .args(["run", "--rm", "--entrypoint", "/bin/cat", image, path])
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
-            "docker run cat {}:{}: {}",
-            image,
-            meta.cdylib_path,
+            "docker run cat {image}:{path}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok((meta.digest, out.stdout))
+    Ok(out.stdout)
 }
 
 fn list_workflow_images() -> io::Result<Vec<String>> {
@@ -124,7 +141,13 @@ fn list_workflow_images() -> io::Result<Vec<String>> {
 
 struct ImageMeta {
     id: String,
-    cdylib_path: String,
+    /// `None` if the image omits the cdylib label. Required by
+    /// `read_cdylib_bytes`; optional during the bundle transition so
+    /// images that ship only a bundle still enumerate cleanly.
+    cdylib_path: Option<String>,
+    /// `None` if the image omits the bundle label. Required by
+    /// `read_bundle_bytes`.
+    bundle_path: Option<String>,
     digest: String,
     /// Empty if the image omits the label — caller picks a fallback.
     display_name: String,
@@ -144,6 +167,7 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
             &format!(
                 "{{{{index .Config.Labels \"{ID_LABEL}\"}}}}\n\
                  {{{{index .Config.Labels \"{CDYLIB_LABEL}\"}}}}\n\
+                 {{{{index .Config.Labels \"{BUNDLE_LABEL}\"}}}}\n\
                  {{{{.Id}}}}\n\
                  {{{{index .Config.Labels \"{DISPLAY_NAME_LABEL}\"}}}}\n\
                  {{{{index .Config.Labels \"{ICON_LABEL}\"}}}}"
@@ -160,6 +184,7 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
     let mut lines = text.lines();
     let id = lines.next().unwrap_or("").trim().to_owned();
     let cdylib_path = lines.next().unwrap_or("").trim().to_owned();
+    let bundle_path = lines.next().unwrap_or("").trim().to_owned();
     let digest = lines.next().unwrap_or("").trim().to_owned();
     let display_name = lines.next().unwrap_or("").trim().to_owned();
     let icon = lines.next().unwrap_or("").trim().to_owned();
@@ -168,9 +193,9 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
             "{image} missing required label {ID_LABEL}"
         )));
     }
-    if cdylib_path.is_empty() {
+    if cdylib_path.is_empty() && bundle_path.is_empty() {
         return Err(io::Error::other(format!(
-            "{image} missing required label {CDYLIB_LABEL}"
+            "{image} missing both {CDYLIB_LABEL} and {BUNDLE_LABEL}"
         )));
     }
     if digest.is_empty() {
@@ -178,7 +203,8 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
     }
     Ok(ImageMeta {
         id,
-        cdylib_path,
+        cdylib_path: (!cdylib_path.is_empty()).then_some(cdylib_path),
+        bundle_path: (!bundle_path.is_empty()).then_some(bundle_path),
         digest,
         display_name,
         icon,

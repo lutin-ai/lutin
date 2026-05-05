@@ -80,6 +80,10 @@ enum Command {
         id: WorkflowId,
         reply: oneshot::Sender<Response>,
     },
+    GetWorkflowBundle {
+        id: WorkflowId,
+        reply: oneshot::Sender<Response>,
+    },
 }
 
 #[derive(Clone)]
@@ -151,6 +155,7 @@ impl AppState {
                 reply,
             },
             Request::GetWorkflowCdylib { id } => Command::GetWorkflowCdylib { id, reply },
+            Request::GetWorkflowBundle { id } => Command::GetWorkflowBundle { id, reply },
         };
         if self.commands.send(cmd).await.is_err() {
             return Response::Err(ApiError::Supervisor("supervisor stopped".into()));
@@ -273,6 +278,12 @@ async fn handle_command(
                 let _ = reply.send(response);
             });
         }
+        Command::GetWorkflowBundle { id, reply } => {
+            tokio::task::spawn_blocking(move || {
+                let response = fetch_workflow_bundle(&id);
+                let _ = reply.send(response);
+            });
+        }
         Command::ListSessions { slug, reply } => {
             if !projects.iter().any(|p| p.info.slug == slug) {
                 let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
@@ -370,6 +381,26 @@ fn fetch_workflow_cdylib(id: &WorkflowId) -> Response {
         }),
         Err(e) => Response::Err(ApiError::Supervisor(format!(
             "read cdylib for {}: {e}",
+            id.as_str()
+        ))),
+    }
+}
+
+/// Bundle counterpart to `fetch_workflow_cdylib`. Runs on a blocking
+/// thread; ships the tarball verbatim — desktop unpacks.
+fn fetch_workflow_bundle(id: &WorkflowId) -> Response {
+    let images = workflow_images::list_installed();
+    let Some(inst) = images.iter().find(|i| i.id == id.as_str()) else {
+        return Response::Err(ApiError::WorkflowNotFound(id.clone()));
+    };
+    match workflow_images::read_bundle_bytes(&inst.image) {
+        Ok((digest, bytes)) => Response::Ok(ResponseOk::WorkflowBundle {
+            id: id.clone(),
+            digest,
+            bytes,
+        }),
+        Err(e) => Response::Err(ApiError::Supervisor(format!(
+            "read bundle for {}: {e}",
             id.as_str()
         ))),
     }

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "lutin-desktop-egui",
+  # "lutin-desktop-egui",  # dead — kept on disk during Tauri migration; re-add only if you need to compile-check it
   "lutin-desktop/src-tauri",
   "lutin-control-panel",
   "crates/*",

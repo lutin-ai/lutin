@@ -171,6 +171,14 @@ pub enum Request {
     GetWorkflowCdylib {
         id: WorkflowId,
     },
+    /// Fetch the static-asset bundle (tarball) for a workflow image.
+    /// Replaces `GetWorkflowCdylib` post-Phase-2 — the bundle ships an
+    /// HTML/JS plugin UI that runs in an iframe instead of an
+    /// in-process cdylib. Same caching strategy: desktop keys by
+    /// `digest` from `ListWorkflows` and only refetches on mismatch.
+    GetWorkflowBundle {
+        id: WorkflowId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,6 +208,15 @@ pub enum ResponseOk {
     /// time of the read; desktop persists it alongside the bytes so
     /// subsequent `ListWorkflows` digest comparisons can skip refetch.
     WorkflowCdylib {
+        id: WorkflowId,
+        digest: String,
+        bytes: Vec<u8>,
+    },
+    /// Reply to `GetWorkflowBundle`. `bytes` is a tar archive of the
+    /// plugin UI (root-level `lutin.workflow.json` + `index.html` + any
+    /// referenced assets). Desktop unpacks under its cache dir keyed
+    /// by `(workflow_id, digest)`.
+    WorkflowBundle {
         id: WorkflowId,
         digest: String,
         bytes: Vec<u8>,

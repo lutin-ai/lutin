@@ -3489,31 +3489,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lutin-desktop-egui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs 5.0.1",
- "eframe",
- "egui",
- "futures-util",
- "libloading 0.8.9",
- "lutin-control-protocol",
- "lutin-ids",
- "lutin-protocol",
- "lutin-ui",
- "lutin-workflow-ui",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "lutin-entities"
 version = "0.1.0"
 dependencies = [
