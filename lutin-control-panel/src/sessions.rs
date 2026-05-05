@@ -115,9 +115,11 @@ fn resolve_workflow_image(workflow: &WorkflowId) -> Result<String, SessionError>
 /// Enumerate installed workflow images. CP uses this to answer
 /// `Request::ListWorkflows`. `name`/`description` are derived from the
 /// image id today; richer metadata (e.g. via additional labels) is a
-/// future polish.
-pub fn list_workflows(global_config_dir: &Path) -> Vec<WorkflowInfo> {
-    workflow_images::install_all(global_config_dir)
+/// future polish. `digest` is the docker image id; the desktop uses it
+/// as the cache key for cdylib bytes fetched separately via
+/// `GetWorkflowCdylib`.
+pub fn list_workflows() -> Vec<WorkflowInfo> {
+    workflow_images::list_installed()
         .into_iter()
         .filter_map(|inst| {
             let id = WorkflowId::parse(&inst.id).ok()?;
@@ -125,6 +127,7 @@ pub fn list_workflows(global_config_dir: &Path) -> Vec<WorkflowInfo> {
                 id,
                 name: inst.id.clone(),
                 description: None,
+                digest: inst.digest,
             })
         })
         .collect()

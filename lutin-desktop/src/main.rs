@@ -15,18 +15,16 @@ fn main() -> anyhow::Result<()> {
     // and apply without restarting.
     let settings = DesktopSettings::load();
 
-    // Workflow cdylib lookup mirrors the control-panel's env vars so
-    // both agree on where the materialized workflow tree lives. The CP
-    // extracts each workflow image's cdylib to
-    // `<global>/workflows/<id>/lib<id>.so` (see workflow_images.rs);
-    // the desktop dlopens from the same location.
-    let config_root: PathBuf = std::env::var("LUTIN_CONFIG_ROOT")
-        .unwrap_or_else(|_| "/etc/lutin".into())
-        .into();
-    let global_config_dir: PathBuf = std::env::var("LUTIN_GLOBAL_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| lutin_storage::layout::global_config(&config_root));
-    let workflow_cache = WorkflowCache::new(global_config_dir.join("workflows"));
+    // Workflow cdylibs are streamed from the control-panel and cached
+    // locally as derived data. No env config — cache lives under
+    // `~/.cache/lutin/workflows` (or platform equivalent) and the
+    // control-panel is the single source of truth for which workflows
+    // exist and which bytes belong to each digest.
+    let cache_root: PathBuf = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lutin")
+        .join("workflows");
+    let workflow_cache = WorkflowCache::new(cache_root);
 
     // Multi-thread runtime: chrome runs egui on the main thread, the
     // tokio runtime drives the WS pump on its own threads. We hand a

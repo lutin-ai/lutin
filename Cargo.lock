@@ -2513,7 +2513,6 @@ dependencies = [
  "lutin-control-protocol",
  "lutin-ids",
  "lutin-protocol",
- "lutin-storage",
  "lutin-ui",
  "lutin-workflow-ui",
  "serde",

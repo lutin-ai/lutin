@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use lutin_control_panel::{SpawnConfig, Supervisor, defaults, run, workflow_images};
+use lutin_control_panel::{SpawnConfig, Supervisor, defaults, run};
 use lutin_keypair::load_or_create_keypair;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -33,9 +33,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| lutin_storage::layout::global_config(&config_root));
 
     defaults::seed(&global_config_dir)?;
-
-    let installed = workflow_images::install_all(&global_config_dir);
-    info!(count = installed.len(), "workflow cdylibs materialized from images");
 
     let config = SpawnConfig {
         projects_root: std::env::var("LUTIN_CP_PROJECTS_ROOT")

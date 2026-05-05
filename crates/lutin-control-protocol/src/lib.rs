@@ -87,12 +87,15 @@ pub struct ProjectInfo {
 
 /// Metadata about an installed workflow image, returned by
 /// `ListWorkflows`. Sourced from the workflow image's labels — see
-/// `lutin-control-panel/src/workflow_images.rs`.
+/// `lutin-control-panel/src/workflow_images.rs`. `digest` is the
+/// underlying Docker image id; the desktop uses it as a cache key
+/// for the cdylib bytes fetched via `GetWorkflowCdylib`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowInfo {
     pub id: WorkflowId,
     pub name: String,
     pub description: Option<String>,
+    pub digest: String,
 }
 
 /// One running or persisted session within a project. The session
@@ -155,6 +158,13 @@ pub enum Request {
         slug: Slug,
         session: SessionId,
     },
+    /// Fetch the cdylib bytes for a workflow image. The desktop caches
+    /// these by `digest` on its side and only requests when its cache
+    /// is missing or stale relative to the digest reported by
+    /// `ListWorkflows`.
+    GetWorkflowCdylib {
+        id: WorkflowId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +190,14 @@ pub enum ResponseOk {
     /// Reply to `OpenSession`: just an endpoint (the caller already has
     /// the `SessionInfo` from `ListSessions`).
     SessionOpened(SessionEndpoint),
+    /// Reply to `GetWorkflowCdylib`. `digest` matches the image at the
+    /// time of the read; desktop persists it alongside the bytes so
+    /// subsequent `ListWorkflows` digest comparisons can skip refetch.
+    WorkflowCdylib {
+        id: WorkflowId,
+        digest: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]

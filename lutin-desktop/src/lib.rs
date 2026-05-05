@@ -15,4 +15,4 @@ pub use settings::{ConnectionProfile, DesktopSettings};
 pub use cp::{
     CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token, TokenError, run as run_cp_worker,
 };
-pub use loader::{LoadError, WorkflowCache, WorkflowLibrary, workflow_so_path};
+pub use loader::{LoadError, WorkflowCache, WorkflowLibrary};

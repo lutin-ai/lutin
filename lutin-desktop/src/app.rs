@@ -14,7 +14,7 @@
 //! the focused session id, and the latest build status. Dropping the
 //! entry tears the lot down in the right order via Drop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egui::{Align, CentralPanel, Color32, Layout, RichText};
@@ -214,8 +214,9 @@ impl ChromeApi for RealChromeApi {
 }
 
 /// Bookkeeping for in-flight CP requests whose reply needs to be
-/// routed back to the originating UI action. Carries the slug (and any
-/// other context) the response will need.
+/// routed back to the originating UI action. Replies that don't need
+/// follow-up context (e.g. `WorkflowCdylib`, which is self-describing)
+/// don't go here.
 #[derive(Debug, Clone)]
 enum Pending {
     ListSessions(Slug),
@@ -228,6 +229,16 @@ impl Pending {
             Pending::ListSessions(s) | Pending::StartSession(s) => s,
         }
     }
+}
+
+/// A session whose `StartSession` reply arrived before the workflow
+/// cdylib did. Replayed when the cdylib install completes for the
+/// matching `workflow`.
+struct DeferredSession {
+    slug: Slug,
+    session: SessionId,
+    workflow: WorkflowId,
+    endpoint: CpSessionEndpoint,
 }
 
 pub struct App {
@@ -254,6 +265,14 @@ pub struct App {
     /// arrives. Replies that don't carry interesting context (e.g.
     /// `ListProjects`, `DeleteProject`) don't appear here.
     pending: HashMap<RequestId, Pending>,
+    /// Workflows for which a `GetWorkflowCdylib` is in flight. Guards
+    /// against firing a duplicate fetch while the first is still on
+    /// the wire.
+    inflight_cdylibs: HashSet<WorkflowId>,
+    /// Session loads whose `StartSession` reply landed before the
+    /// workflow cdylib was available. Drained when the cdylib install
+    /// completes.
+    pending_sessions: Vec<DeferredSession>,
 
     next_request_id: u64,
     /// Project currently focused in chrome's main pane.
@@ -306,6 +325,8 @@ impl App {
             workflow_cache,
             chrome_api: RealChromeApi { tx: chrome_intent_tx },
             pending: HashMap::new(),
+            inflight_cdylibs: HashSet::new(),
+            pending_sessions: Vec::new(),
             next_request_id: 1,
             active: None,
             new_slug: String::new(),
@@ -357,6 +378,8 @@ impl App {
         self.projects.clear();
         self.workflows.clear();
         self.pending.clear();
+        self.inflight_cdylibs.clear();
+        self.pending_sessions.clear();
         self.active = None;
         self.last_error = None;
 
@@ -378,49 +401,80 @@ impl App {
         id
     }
 
-    /// Attempt to dlopen the workflow `.so` and install a fresh
-    /// `ProjectEntry`. Always inserts an entry — even when the
-    /// workflow UI failed to load, chrome still tracks the project.
+    /// Open `slug` in chrome. Inserts an empty `ProjectEntry`
+    /// immediately (so the rest of the UI tracks it) and attempts to
+    /// build the workflow UI from cache. If the cdylib hasn't arrived
+    /// yet, the entry stays in its empty state and a fetch is fired;
+    /// `try_attach_workflow_ui` retries when the cdylib lands.
     fn load_workflow_for(&mut self, slug: Slug) {
+        self.projects_state.entry(slug.clone()).or_insert(ProjectEntry {
+            loaded: None,
+            sessions: Vec::new(),
+            loaded_sessions: HashMap::new(),
+            active_session: None,
+        });
         let workflow_id = default_workflow_id();
-        let loaded = match self.workflow_cache.load(&slug, &workflow_id) {
-            Ok(lib) => {
+        self.try_attach_workflow_ui(&slug, &workflow_id);
+        if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
+            self.pending.insert(id, Pending::ListSessions(slug));
+        }
+    }
+
+    /// Build the project UI from a cached cdylib if available, leave
+    /// the entry empty otherwise. Idempotent — if the entry already
+    /// has a `loaded` UI, this is a no-op. Fires a `GetWorkflowCdylib`
+    /// when the cdylib isn't cached and isn't already in flight.
+    fn try_attach_workflow_ui(&mut self, slug: &Slug, workflow: &WorkflowId) {
+        if self
+            .projects_state
+            .get(slug)
+            .is_some_and(|e| e.loaded.is_some())
+        {
+            return;
+        }
+        let Some(info) = self.workflow_for(workflow).cloned() else {
+            return;
+        };
+        match self.workflow_cache.try_load(workflow, &info.digest) {
+            Ok(Some(lib)) => {
                 let manifest = lib.workflow().manifest();
                 let transport = dummy_transport(&self.tokio);
-                // No per-project WS exists post-Phase-5. Placeholder
-                // endpoint kept for ProjectUi trait shape.
                 let ui_endpoint = UiProjectEndpoint {
                     slug: slug.clone(),
-                    workflow: workflow_id.clone(),
+                    workflow: workflow.clone(),
                     addr: "127.0.0.1:0".parse().unwrap(),
                     token: AuthToken::new(String::new()),
                 };
                 let no_op = self.tokio.spawn(async {});
                 let ui = lib.workflow().open_project(ui_endpoint, transport);
-                Some(LoadedProject {
-                    ui,
-                    _bridge: BridgeGuard(no_op.abort_handle()),
-                    _lib: lib,
-                    manifest,
-                })
+                if let Some(entry) = self.entry_mut(slug) {
+                    entry.loaded = Some(LoadedProject {
+                        ui,
+                        _bridge: BridgeGuard(no_op.abort_handle()),
+                        _lib: lib,
+                        manifest,
+                    });
+                }
+            }
+            Ok(None) => {
+                self.request_cdylib_if_needed(workflow);
             }
             Err(e) => {
                 self.last_error = Some(format!("workflow load failed: {e}"));
-                None
             }
-        };
+        }
+    }
 
-        self.projects_state.insert(
-            slug.clone(),
-            ProjectEntry {
-                loaded,
-                sessions: Vec::new(),
-                loaded_sessions: HashMap::new(),
-                active_session: None,
-            },
-        );
-        if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
-            self.pending.insert(id, Pending::ListSessions(slug));
+    fn workflow_for(&self, id: &WorkflowId) -> Option<&WorkflowInfo> {
+        self.workflows.iter().find(|w| &w.id == id)
+    }
+
+    fn request_cdylib_if_needed(&mut self, workflow: &WorkflowId) {
+        if self.inflight_cdylibs.contains(workflow) {
+            return;
+        }
+        if self.send(Request::GetWorkflowCdylib { id: workflow.clone() }).is_ok() {
+            self.inflight_cdylibs.insert(workflow.clone());
         }
     }
 
@@ -526,6 +580,56 @@ impl App {
                 ResponseOk::Deleted => {}
                 ResponseOk::Workflows(list) => {
                     self.workflows = list;
+                    // Prefetch every workflow whose cdylib isn't
+                    // already cached on disk for the digest CP just
+                    // reported. Cheap when up-to-date — `try_load`
+                    // returns the cached entry without a fetch.
+                    let workflows = self.workflows.clone();
+                    for w in &workflows {
+                        match self.workflow_cache.try_load(&w.id, &w.digest) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => self.request_cdylib_if_needed(&w.id),
+                            Err(e) => {
+                                self.last_error =
+                                    Some(format!("cache probe for {}: {e}", w.id.as_str()));
+                            }
+                        }
+                    }
+                }
+                ResponseOk::WorkflowCdylib { id, digest, bytes } => {
+                    self.inflight_cdylibs.remove(&id);
+                    if let Err(e) = self.workflow_cache.install(&id, &digest, &bytes) {
+                        self.last_error = Some(format!(
+                            "install cdylib for {}: {e}",
+                            id.as_str()
+                        ));
+                        return;
+                    }
+                    // Drain anything that was waiting on this workflow.
+                    let pending: Vec<DeferredSession> = self
+                        .pending_sessions
+                        .drain(..)
+                        .collect();
+                    let (ready, still_waiting): (Vec<_>, Vec<_>) =
+                        pending.into_iter().partition(|d| d.workflow == id);
+                    self.pending_sessions = still_waiting;
+                    for d in ready {
+                        self.load_session(d.slug, d.session, d.endpoint);
+                    }
+                    let opens: Vec<Slug> = self
+                        .projects_state
+                        .iter()
+                        .filter_map(|(slug, e)| {
+                            if e.loaded.is_none() {
+                                Some(slug.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    for slug in opens {
+                        self.try_attach_workflow_ui(&slug, &id);
+                    }
                 }
                 ResponseOk::Sessions(list) => {
                     let Some(Pending::ListSessions(slug)) = pending else {
@@ -603,8 +707,30 @@ impl App {
         ep: CpSessionEndpoint,
     ) {
         let workflow_id = default_workflow_id();
-        let lib = match self.workflow_cache.load(&slug, &workflow_id) {
-            Ok(lib) => lib,
+        let Some(info) = self.workflow_for(&workflow_id).cloned() else {
+            // Workflow list hasn't arrived yet — defer until it has.
+            self.pending_sessions.push(DeferredSession {
+                slug,
+                session,
+                workflow: workflow_id,
+                endpoint: ep,
+            });
+            return;
+        };
+        let lib = match self.workflow_cache.try_load(&workflow_id, &info.digest) {
+            Ok(Some(lib)) => lib,
+            Ok(None) => {
+                // Bytes not on disk yet; queue the load for after the
+                // cdylib install lands.
+                self.pending_sessions.push(DeferredSession {
+                    slug,
+                    session,
+                    workflow: workflow_id.clone(),
+                    endpoint: ep,
+                });
+                self.request_cdylib_if_needed(&workflow_id);
+                return;
+            }
             Err(e) => {
                 self.last_error = Some(format!("workflow load failed: {e}"));
                 return;
