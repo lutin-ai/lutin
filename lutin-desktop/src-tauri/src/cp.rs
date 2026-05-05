@@ -234,10 +234,6 @@ impl CpClient {
         self.worker = cfg.map(|cfg| spawn_worker(tokio, cfg, cmd_rx, evt_tx));
     }
 
-    pub fn has_worker(&self) -> bool {
-        self.worker.is_some()
-    }
-
     /// Send a command to the worker. Returns `Err` when the worker
     /// channel is closed (no worker spawned yet, or the task died).
     pub fn send(&self, cmd: CpCommand) -> Result<(), CpCommand> {

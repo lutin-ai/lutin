@@ -77,3 +77,14 @@ export interface DesktopSettings {
   default: string;
   connections: ConnectionProfile[];
 }
+
+// Mirrors Rust `ConnSnapshot` (lib.rs) — externally tagged on `kind`,
+// lowercase variants. The App store's connection state has the same
+// shape, so a `cp_status` invoke can hydrate it directly.
+export type ConnState =
+  | { kind: "noconfig" }
+  | { kind: "connecting" }
+  | { kind: "connected" }
+  | { kind: "disconnected" }
+  | { kind: "rejected"; reason: string }
+  | { kind: "error"; error: string };

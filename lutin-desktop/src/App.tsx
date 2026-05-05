@@ -31,8 +31,11 @@ function App() {
         onCpEvent: (event) => applyEvent(event),
       });
 
-      const has = await cpStatus();
-      setConn(has ? { kind: "connecting" } : { kind: "noconfig" });
+      // Hydrate from the authoritative snapshot last, AFTER the
+      // listener is attached. If a `cp:connected` event slipped past
+      // before subscribe ran, the snapshot still reflects it; if one
+      // fires after this read, the listener catches it.
+      setConn(await cpStatus());
     })();
 
     return () => { if (unlisten) unlisten(); };

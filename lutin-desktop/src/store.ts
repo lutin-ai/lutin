@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  ConnState,
   CpEvent,
   ProjectInfo,
   SessionInfo,
@@ -8,13 +9,9 @@ import type {
   DesktopSettings,
 } from "./types";
 
-export type ConnState =
-  | { kind: "connecting" }
-  | { kind: "connected" }
-  | { kind: "disconnected" }
-  | { kind: "rejected"; reason: string }
-  | { kind: "error"; error: string }
-  | { kind: "noconfig" };
+// Re-export so older imports keep working; the canonical home is now
+// `./types` so the Rust `ConnSnapshot` and the JS shape stay in sync.
+export type { ConnState };
 
 export interface AppView {
   kind: "settings" | "project";

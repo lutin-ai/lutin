@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ConnState,
   CpEvent,
   DesktopSettings,
   Request,
@@ -23,7 +24,7 @@ export async function cpSendOk(request: Request): Promise<ResponseOk> {
   throw new Error(`${errKey}: ${JSON.stringify(errVal)}`);
 }
 
-export async function cpStatus(): Promise<boolean> {
+export async function cpStatus(): Promise<ConnState> {
   return invoke("cp_status");
 }
 

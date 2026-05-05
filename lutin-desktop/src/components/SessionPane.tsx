@@ -6,8 +6,13 @@ import styles from "./SessionPane.module.css";
 
 interface Props { project: ProjectInfo }
 
+const EMPTY: never[] = [];
+
 export function SessionPane({ project }: Props) {
-  const sessions = useApp((s) => s.sessionsBySlug[project.slug] ?? []);
+  // Selector returns the stored slot directly; defaulting `?? []`
+  // inside the selector would allocate a fresh array every render
+  // and trip Zustand's snapshot equality check.
+  const sessions = useApp((s) => s.sessionsBySlug[project.slug]) ?? EMPTY;
   const setSessions = useApp((s) => s.setSessions);
   const selected = useApp((s) => s.selectedSession);
   const select = useApp((s) => s.selectSession);
