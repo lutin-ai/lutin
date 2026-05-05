@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use lutin_control_panel::{SpawnBackend, SpawnConfig, Supervisor, defaults, run};
+use lutin_control_panel::{SpawnBackend, SpawnConfig, Supervisor, defaults, run, workflow_images};
 use lutin_keypair::load_or_create_keypair;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -44,6 +44,13 @@ async fn main() -> anyhow::Result<()> {
     // protect existing user files). Workflow engines never write to
     // global, so this path is the sole writer.
     defaults::seed(&global_config_dir)?;
+
+    // Materialize workflow cdylibs from installed Docker images (new
+    // post-refactor source of truth). Logs and continues on failure —
+    // the legacy seed path above still produces source the project
+    // tier can build, so docker-less subprocess deployments still work.
+    let installed = workflow_images::install_all(&global_config_dir);
+    info!(count = installed.len(), "workflow cdylibs materialized from images");
 
     let backend = backend_from_env()?;
     let config = SpawnConfig {

@@ -5,6 +5,7 @@
 
 pub mod defaults;
 mod registry;
+pub mod workflow_images;
 
 use futures_util::{SinkExt, StreamExt};
 use lutin_auth::{

@@ -3,11 +3,17 @@
 target/
 **/target/
 
+# Per-machine runtime state (CP data dir, projects volumes, etc.).
+.local/
+local/
+.env
+
 # Editor / OS noise.
 .git/
 .idea/
 .vscode/
 *.swp
+*.swo
 .DS_Store
 
 # Local Claude state.

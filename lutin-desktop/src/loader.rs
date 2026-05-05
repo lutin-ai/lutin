@@ -9,13 +9,11 @@
 //! `WorkflowLibrary` and the field-drop order is load-bearing: the
 //! workflow drops first, then the library closes.
 //!
-//! Path layout (post-D): the control-panel seeds workflows into
-//! `<global_config_dir>/workflows/<id>/`, and the project tier
-//! cargo-builds them in place so the cdylib lands at
-//! `<global_config_dir>/workflows/<id>/target/<profile>/lib<id>.so`.
-//! Both desktop and project tier therefore agree on layout — the
-//! desktop reads the same `LUTIN_GLOBAL_CONFIG_DIR` /
-//! `LUTIN_WORKFLOW_PROFILE` env vars the CP/project use.
+//! Path layout: the control-panel materializes each installed workflow
+//! image's cdylib at `<global_config_dir>/workflows/<id>/lib<id>.so`
+//! (see `lutin-control-panel/src/workflow_images.rs`). The desktop
+//! reads `LUTIN_GLOBAL_CONFIG_DIR` to find that root and dlopens the
+//! .so directly — no cargo profile dir, no per-project staging.
 //!
 //! The cache key is `(slug, workflow)` rather than just `workflow` so
 //! that, in a future where workflows can be project-overridden,
@@ -48,7 +46,7 @@ impl WorkflowLibrary {
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error(
-        "dlopen {path}: {source} (start a session in this project to trigger the cargo build, or run `cargo build --release` in {path:?} if the .so is missing)"
+        "dlopen {path}: {source} (is the workflow's Docker image installed and has the control-panel had a chance to extract its cdylib?)"
     )]
     Dlopen {
         path: PathBuf,
@@ -63,17 +61,12 @@ pub enum LoadError {
     },
 }
 
-/// Where the cdylib for a workflow lives, given a workflows root and
-/// cargo profile dir. Slug isn't part of the path — workflows are
-/// global-tier in the seeded layout — but is kept in the cache key
+/// Where the cdylib for a workflow lives. Slug isn't part of the path —
+/// workflow images are global-tier — but is kept in the cache key
 /// for forward-compat with future per-project overrides.
-pub fn workflow_so_path(workflows_root: &Path, profile_dir: &str, workflow: &WorkflowId) -> PathBuf {
+pub fn workflow_so_path(workflows_root: &Path, workflow: &WorkflowId) -> PathBuf {
     let id = workflow.as_str();
-    workflows_root
-        .join(id)
-        .join("target")
-        .join(profile_dir)
-        .join(format!("lib{id}.so"))
+    workflows_root.join(id).join(format!("lib{id}.so"))
 }
 
 /// Cache of loaded workflow libraries, keyed by `(slug, workflow_id)`.
@@ -82,18 +75,16 @@ pub fn workflow_so_path(workflows_root: &Path, profile_dir: &str, workflow: &Wor
 pub struct WorkflowCache {
     libs: HashMap<(Slug, WorkflowId), Arc<WorkflowLibrary>>,
     workflows_root: PathBuf,
-    profile_dir: String,
 }
 
 impl WorkflowCache {
-    /// `workflows_root` is `<global_config_dir>/workflows`;
-    /// `profile_dir` is `"release"` or `"debug"` (matching the project
-    /// tier's `LUTIN_WORKFLOW_PROFILE`).
-    pub fn new(workflows_root: PathBuf, profile_dir: String) -> Self {
+    /// `workflows_root` is `<global_config_dir>/workflows`. The .so for
+    /// `<id>` is expected at `<workflows_root>/<id>/lib<id>.so` —
+    /// extracted from the workflow's Docker image by the control-panel.
+    pub fn new(workflows_root: PathBuf) -> Self {
         Self {
             libs: HashMap::new(),
             workflows_root,
-            profile_dir,
         }
     }
 
@@ -109,7 +100,7 @@ impl WorkflowCache {
         if let Some(existing) = self.libs.get(&key) {
             return Ok(Arc::clone(existing));
         }
-        let path = workflow_so_path(&self.workflows_root, &self.profile_dir, workflow);
+        let path = workflow_so_path(&self.workflows_root, workflow);
         // SAFETY: dlopen runs the cdylib's init code; we trust the
         // workflows we ship. Caller guarantees same-toolchain build
         // (see PLAN: "same-toolchain assumption").

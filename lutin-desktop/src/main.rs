@@ -15,20 +15,18 @@ fn main() -> anyhow::Result<()> {
     // and apply without restarting.
     let settings = DesktopSettings::load();
 
-    // Workflow cdylib lookup mirrors the control-panel/project-tier
-    // env vars so all three agree on where the seeded workflow tree
-    // lives. `<global>/workflows/<id>/target/<profile>/lib<id>.so` is
-    // produced by the project tier's cargo build; the desktop dlopens
-    // it from the same location.
+    // Workflow cdylib lookup mirrors the control-panel's env vars so
+    // both agree on where the materialized workflow tree lives. The CP
+    // extracts each workflow image's cdylib to
+    // `<global>/workflows/<id>/lib<id>.so` (see workflow_images.rs);
+    // the desktop dlopens from the same location.
     let config_root: PathBuf = std::env::var("LUTIN_CONFIG_ROOT")
         .unwrap_or_else(|_| "/etc/lutin".into())
         .into();
     let global_config_dir: PathBuf = std::env::var("LUTIN_GLOBAL_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| lutin_storage::layout::global_config(&config_root));
-    let profile_dir =
-        std::env::var("LUTIN_WORKFLOW_PROFILE").unwrap_or_else(|_| "release".into());
-    let workflow_cache = WorkflowCache::new(global_config_dir.join("workflows"), profile_dir);
+    let workflow_cache = WorkflowCache::new(global_config_dir.join("workflows"));
 
     // Multi-thread runtime: chrome runs egui on the main thread, the
     // tokio runtime drives the WS pump on its own threads. We hand a
