@@ -617,6 +617,15 @@ impl App {
                     }
                 }
                 ResponseOk::Stopped => {}
+                // Session-management responses land in Phase 4.3; the
+                // protocol surface exists today (variants present in
+                // ResponseOk) but the desktop still drives sessions
+                // through the per-project tier-2 worker for now.
+                ResponseOk::Workflows(_)
+                | ResponseOk::Sessions(_)
+                | ResponseOk::SessionStarted { .. }
+                | ResponseOk::SessionStopped
+                | ResponseOk::SessionOpened(_) => {}
             },
             Response::Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -633,6 +642,11 @@ impl App {
                     self.last_error = Some(e.to_string());
                 }
             }
+            // Session lifecycle events emitted by CP land in Phase 4.3,
+            // when the desktop replaces its per-project ProjWorker with
+            // direct CP-WS routing. Until then these are no-ops; CP also
+            // doesn't emit them yet (the orchestrator is Unimplemented).
+            CpEvent::SessionStarted { .. } | CpEvent::SessionEnded { .. } => {}
         }
     }
 

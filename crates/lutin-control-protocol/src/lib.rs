@@ -4,7 +4,7 @@
 //! `Frame::Payload { body }` carries `postcard(Request | Response)`,
 //! `Frame::Broadcast { body }` carries `postcard(Event)`.
 
-pub use lutin_auth::Slug;
+pub use lutin_auth::{SessionId, Slug, WorkflowId};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -106,6 +106,39 @@ pub struct ProjectEndpoint {
     pub project_pubkey: ProjectPubkey,
 }
 
+/// Metadata about an installed workflow image, returned by
+/// `ListWorkflows`. Sourced from the workflow image's labels — see
+/// `lutin-control-panel/src/workflow_images.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowInfo {
+    pub id: WorkflowId,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// One running or persisted session within a project. The session
+/// itself is a separate WS endpoint the desktop dials directly — see
+/// `SessionEndpoint`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: SessionId,
+    pub workflow: WorkflowId,
+}
+
+/// Where a started workflow session listens, and the token a client
+/// should present when connecting directly to it. Token is signed by
+/// the project keypair (CP holds it on behalf of each project) so the
+/// session container can verify it offline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionEndpoint {
+    pub addr: std::net::SocketAddr,
+    pub token: String,
+    /// The project pubkey the session container will use to verify the
+    /// `token` above. Returned alongside the endpoint so the desktop can
+    /// pin it (it's per-project, stable across sessions).
+    pub project_pubkey: ProjectPubkey,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Request {
     ListProjects,
@@ -122,6 +155,33 @@ pub enum Request {
     StopProject {
         slug: Slug,
     },
+    /// Globally installed workflow images. Workflows are not yet
+    /// per-project scoped; `slug` is reserved for forward-compat.
+    ListWorkflows,
+    /// Sessions known to CP for `slug` (running + persisted). CP is the
+    /// authoritative source post-Phase-4 — there is no per-project
+    /// supervisor maintaining this list.
+    ListSessions {
+        slug: Slug,
+    },
+    /// Spawn a new workflow-session container for `slug`, mint a
+    /// session-scoped token signed by the project keypair, and return
+    /// the bound addr + token via `ResponseOk::SessionStarted`.
+    StartSession {
+        slug: Slug,
+        workflow: WorkflowId,
+    },
+    /// Stop a running session (terminates its container).
+    StopSession {
+        slug: Slug,
+        session: SessionId,
+    },
+    /// Re-issue a token + endpoint for an already-running session.
+    /// Used when the desktop reconnects to a session it had open.
+    OpenSession {
+        slug: Slug,
+        session: SessionId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +197,18 @@ pub enum ResponseOk {
     Deleted,
     Opened(ProjectEndpoint),
     Stopped,
+    Workflows(Vec<WorkflowInfo>),
+    Sessions(Vec<SessionInfo>),
+    /// Reply to `StartSession` — carries the new session metadata plus
+    /// its WS endpoint so the desktop can dial in the same round-trip.
+    SessionStarted {
+        info: SessionInfo,
+        endpoint: SessionEndpoint,
+    },
+    SessionStopped,
+    /// Reply to `OpenSession`: just an endpoint (the caller already has
+    /// the `SessionInfo` from `ListSessions`).
+    SessionOpened(SessionEndpoint),
 }
 
 /// Why a project supervisor spawn failed. Lets clients branch on the
@@ -173,6 +245,10 @@ pub enum ApiError {
     SpawnFailed { kind: SpawnFailureKind, detail: String },
     #[error("supervisor: {0}")]
     Supervisor(String),
+    #[error("workflow not found: {0}")]
+    WorkflowNotFound(WorkflowId),
+    #[error("session not found: {0}")]
+    SessionNotFound(SessionId),
     #[error("unauthorized")]
     Unauthorized,
     #[error("not implemented yet")]
@@ -180,11 +256,15 @@ pub enum ApiError {
 }
 
 /// Server-pushed events, fanned out to every authenticated client.
+/// Session events carry `slug` so a single CP WS conn carries traffic
+/// for every project the client cares about; the client filters by slug.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Event {
     ProjectCreated(ProjectInfo),
     ProjectDeleted { slug: Slug },
     ProjectStatusChanged { slug: Slug, status: ProjectStatus },
+    SessionStarted { slug: Slug, info: SessionInfo },
+    SessionEnded { slug: Slug, session: SessionId },
 }
 
 #[derive(Debug, Error)]

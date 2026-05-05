@@ -340,6 +340,16 @@ impl AppState {
             Request::DeleteProject { slug } => Command::DeleteProject { slug, reply },
             Request::OpenProject { slug } => Command::OpenProject { slug, reply },
             Request::StopProject { slug } => Command::StopProject { slug, reply },
+            // Session-management surface lands in Phase 4.2; the
+            // protocol variants exist now so 4.3 can wire them up on the
+            // desktop without blocking on the orchestrator impl.
+            Request::ListWorkflows
+            | Request::ListSessions { .. }
+            | Request::StartSession { .. }
+            | Request::StopSession { .. }
+            | Request::OpenSession { .. } => {
+                return Response::Err(ApiError::Unimplemented);
+            }
         };
         if self.commands.send(cmd).await.is_err() {
             return Response::Err(ApiError::Supervisor("supervisor stopped".into()));
