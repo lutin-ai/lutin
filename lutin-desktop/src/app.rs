@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use egui::{Align, CentralPanel, Color32, Layout, RichText};
 use lutin_control_protocol::{
-    DisplayName, DisplayNameError, Event as CpEvent, ProjectInfo, ProjectStatus, Request, Response,
-    ResponseOk, SessionEndpoint as CpSessionEndpoint, SessionInfo, Slug, WorkflowInfo,
+    DisplayName, DisplayNameError, Event as CpEvent, ProjectInfo, Request, Response, ResponseOk,
+    SessionEndpoint as CpSessionEndpoint, SessionInfo, Slug, WorkflowInfo,
 };
 use lutin_ids::{SessionId, SlugError, WorkflowId};
 use lutin_ui::prelude::*;
@@ -213,6 +213,23 @@ impl ChromeApi for RealChromeApi {
     }
 }
 
+/// Bookkeeping for in-flight CP requests whose reply needs to be
+/// routed back to the originating UI action. Carries the slug (and any
+/// other context) the response will need.
+#[derive(Debug, Clone)]
+enum Pending {
+    ListSessions(Slug),
+    StartSession(Slug),
+}
+
+impl Pending {
+    fn slug(&self) -> &Slug {
+        match self {
+            Pending::ListSessions(s) | Pending::StartSession(s) => s,
+        }
+    }
+}
+
 pub struct App {
     /// Control-panel client. Owns the worker task + its channels;
     /// re-dialing on settings change goes through `cp.reconnect`.
@@ -233,12 +250,10 @@ pub struct App {
     workflow_cache: WorkflowCache,
     chrome_api: RealChromeApi,
 
-    /// Slug a `ListSessions` reply is for.
-    pending_list_sessions: HashMap<RequestId, Slug>,
-    /// `(slug, session)` an `OpenSession` reply is for.
-    pending_session_opens: HashMap<RequestId, (Slug, SessionId)>,
-    /// Slug a `StartSession` reply is for.
-    pending_starts: HashMap<RequestId, Slug>,
+    /// In-flight requests that need follow-up routing when the reply
+    /// arrives. Replies that don't carry interesting context (e.g.
+    /// `ListProjects`, `DeleteProject`) don't appear here.
+    pending: HashMap<RequestId, Pending>,
 
     next_request_id: u64,
     /// Project currently focused in chrome's main pane.
@@ -290,9 +305,7 @@ impl App {
             projects_state: HashMap::new(),
             workflow_cache,
             chrome_api: RealChromeApi { tx: chrome_intent_tx },
-            pending_list_sessions: HashMap::new(),
-            pending_session_opens: HashMap::new(),
-            pending_starts: HashMap::new(),
+            pending: HashMap::new(),
             next_request_id: 1,
             active: None,
             new_slug: String::new(),
@@ -343,9 +356,7 @@ impl App {
         self.projects_state.clear();
         self.projects.clear();
         self.workflows.clear();
-        self.pending_list_sessions.clear();
-        self.pending_session_opens.clear();
-        self.pending_starts.clear();
+        self.pending.clear();
         self.active = None;
         self.last_error = None;
 
@@ -409,7 +420,7 @@ impl App {
             },
         );
         if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
-            self.pending_list_sessions.insert(id, slug);
+            self.pending.insert(id, Pending::ListSessions(slug));
         }
     }
 
@@ -471,7 +482,7 @@ impl App {
                         workflow,
                     }) {
                         Ok(id) => {
-                            self.pending_starts.insert(id, project);
+                            self.pending.insert(id, Pending::StartSession(project));
                         }
                         Err(e) => {
                             self.last_error = Some(e.to_string());
@@ -492,34 +503,20 @@ impl App {
     }
 
     fn on_response(&mut self, request_id: RequestId, resp: Response) {
-        let pending_list = self.pending_list_sessions.remove(&request_id);
-        let pending_session_open = self.pending_session_opens.remove(&request_id);
-        let pending_start = self.pending_starts.remove(&request_id);
+        let pending = self.pending.remove(&request_id);
         match resp {
             Response::Ok(ok) => match ok {
                 ResponseOk::Projects(list) => {
                     self.projects = list;
-                    let live_slugs: std::collections::HashSet<Slug> = self
-                        .projects
-                        .iter()
-                        .filter(|p| {
-                            !matches!(p.status, ProjectStatus::Stopped | ProjectStatus::Failed)
-                        })
-                        .map(|p| p.slug.clone())
-                        .collect();
+                    let known: std::collections::HashSet<Slug> =
+                        self.projects.iter().map(|p| p.slug.clone()).collect();
                     if let Some(slug) = &self.active
-                        && !self.projects.iter().any(|p| &p.slug == slug)
+                        && !known.contains(slug)
                     {
                         self.active = None;
                     }
-                    self.projects_state
-                        .retain(|slug, _| live_slugs.contains(slug));
-                    self.pending_list_sessions
-                        .retain(|_, slug| live_slugs.contains(slug));
-                    self.pending_session_opens
-                        .retain(|_, (slug, _)| live_slugs.contains(slug));
-                    self.pending_starts
-                        .retain(|_, slug| live_slugs.contains(slug));
+                    self.projects_state.retain(|slug, _| known.contains(slug));
+                    self.pending.retain(|_, p| known.contains(p.slug()));
                 }
                 ResponseOk::Created(_) => {
                     self.new_slug.clear();
@@ -531,7 +528,7 @@ impl App {
                     self.workflows = list;
                 }
                 ResponseOk::Sessions(list) => {
-                    let Some(slug) = pending_list else {
+                    let Some(Pending::ListSessions(slug)) = pending else {
                         warn!("Sessions response without pending ListSessions");
                         return;
                     };
@@ -549,7 +546,7 @@ impl App {
                     }
                 }
                 ResponseOk::SessionStarted { info, endpoint } => {
-                    let Some(slug) = pending_start else {
+                    let Some(Pending::StartSession(slug)) = pending else {
                         warn!("SessionStarted response without pending StartSession");
                         return;
                     };
@@ -558,12 +555,8 @@ impl App {
                     self.load_session(slug, session_id, endpoint);
                 }
                 ResponseOk::SessionStopped => {}
-                ResponseOk::SessionOpened(endpoint) => {
-                    let Some((slug, session)) = pending_session_open else {
-                        warn!("SessionOpened response without pending OpenSession");
-                        return;
-                    };
-                    self.load_session(slug, session, endpoint);
+                ResponseOk::SessionOpened(_) => {
+                    warn!("SessionOpened response without pending OpenSession");
                 }
             },
             Response::Err(err) => {
@@ -601,25 +594,6 @@ impl App {
         if !entry.sessions.iter().any(|s| s.id == info.id) {
             entry.sessions.push(info);
         }
-    }
-
-    #[allow(dead_code)]
-    fn request_open_session(&mut self, slug: &Slug, session: SessionId) {
-        if self
-            .entry(slug)
-            .is_some_and(|e| e.loaded_sessions.contains_key(&session))
-        {
-            return;
-        }
-        let id = match self.send(Request::OpenSession {
-            slug: slug.clone(),
-            session: session.clone(),
-        }) {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        self.pending_session_opens
-            .insert(id, (slug.clone(), session));
     }
 
     fn load_session(
@@ -909,9 +883,7 @@ fn draw_left_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
                 for p in &app.projects {
                     let is_active = app.active.as_ref() == Some(&p.slug);
                     ui.horizontal(|ui| {
-                        let label =
-                            format!("{}  ·  {}", p.display_name.as_str(), status_str(&p.status));
-                        let mut btn = button::ghost(label).full_width();
+                        let mut btn = button::ghost(p.display_name.as_str()).full_width();
                         if is_active {
                             btn = btn.variant(lutin_ui::widget::button::Variant::Primary);
                         }
@@ -997,11 +969,6 @@ fn draw_right_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
                 .color(theme().text.dim)
                 .small(),
         );
-        ui.label(
-            RichText::new(format!("status: {}", status_str(&p.status)))
-                .color(theme().text.dim)
-                .small(),
-        );
         ui.add_space(8.0);
         if let Some(entry) = app.entry(slug) {
             ui.label(
@@ -1047,11 +1014,6 @@ fn draw_main(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
     ui.vertical(|ui| {
         if let Some(p) = &info {
             ui.label(RichText::new(p.display_name.as_str()).size(18.0).strong());
-            ui.label(
-                RichText::new(format!("status: {}", status_str(&p.status)))
-                    .color(theme().text.dim)
-                    .small(),
-            );
             ui.add_space(12.0);
         }
         ui.label(RichText::new("workflow UI not loaded").color(theme().text.dim));
@@ -1119,16 +1081,6 @@ fn dummy_transport(tokio: &tokio::runtime::Handle) -> Transport {
     tokio.spawn(async move { while send_rx.recv().await.is_some() {} });
     let (_recv_tx, recv) = mpsc::unbounded_channel::<Vec<u8>>();
     Transport { send, recv }
-}
-
-fn status_str(s: &ProjectStatus) -> &'static str {
-    match s {
-        ProjectStatus::Stopped => "stopped",
-        ProjectStatus::Starting => "starting",
-        ProjectStatus::Running => "running",
-        ProjectStatus::Stopping => "stopping",
-        ProjectStatus::Failed => "failed",
-    }
 }
 
 fn slug_error(e: &SlugError) -> String {

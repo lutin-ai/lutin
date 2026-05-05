@@ -80,19 +80,9 @@ impl ProjectPubkey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ProjectStatus {
-    Stopped,
-    Starting,
-    Running,
-    Stopping,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectInfo {
     pub slug: Slug,
     pub display_name: DisplayName,
-    pub status: ProjectStatus,
 }
 
 /// Metadata about an installed workflow image, returned by
@@ -204,10 +194,6 @@ pub enum ApiError {
     WorkflowNotFound(WorkflowId),
     #[error("session not found: {0}")]
     SessionNotFound(SessionId),
-    #[error("unauthorized")]
-    Unauthorized,
-    #[error("not implemented yet")]
-    Unimplemented,
 }
 
 /// Server-pushed events, fanned out to every authenticated client.
@@ -253,7 +239,6 @@ mod tests {
         let r = Response::Ok(ResponseOk::Created(ProjectInfo {
             slug: Slug::parse("foo").unwrap(),
             display_name: DisplayName::parse("Foo").unwrap(),
-            status: ProjectStatus::Stopped,
         }));
         assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
     }

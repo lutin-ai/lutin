@@ -91,6 +91,22 @@ identifier!(WorkflowId, WorkflowIdError, 64, "workflow id");
 // SessionId: opaque to clients; minted by the project supervisor.
 identifier!(SessionId, SessionIdError, 64, "session id");
 
+impl SessionId {
+    /// Build a `SessionId` from 16 random bytes, hex-encoded. Infallible
+    /// by construction — preferred over `parse(generated_hex_string)`
+    /// when the caller already has the raw bytes.
+    pub fn from_random_bytes(bytes: [u8; 16]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut buf = [0u8; 32];
+        for (i, b) in bytes.iter().enumerate() {
+            buf[i * 2] = HEX[(b >> 4) as usize];
+            buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+        }
+        // SAFETY: only ASCII hex digits written above.
+        SessionId(unsafe { String::from_utf8_unchecked(buf.to_vec()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +140,12 @@ mod tests {
     #[test]
     fn rejects_bad_char() {
         assert_eq!(Slug::parse("foo/bar"), Err(SlugError::BadChar('/')));
+    }
+
+    #[test]
+    fn session_id_from_random_bytes_is_hex32() {
+        let id = SessionId::from_random_bytes([0xab; 16]);
+        assert_eq!(id.as_str(), "abababababababababababababababab");
+        assert_eq!(SessionId::parse(id.as_str()).unwrap(), id);
     }
 }

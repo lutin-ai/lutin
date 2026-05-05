@@ -5,7 +5,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lutin_control_protocol::{DisplayName, ProjectInfo, ProjectStatus, Slug};
+use lutin_control_protocol::{DisplayName, ProjectInfo, Slug};
 use serde::{Deserialize, Serialize};
 
 use super::ProjectRecord;
@@ -37,17 +37,21 @@ pub fn load(data_dir: &Path) -> io::Result<Vec<ProjectRecord>> {
     };
     let file: File = toml::from_str(&text)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", p.display())))?;
-    Ok(file
-        .projects
+    file.projects
         .into_iter()
-        .map(|e| ProjectRecord {
-            info: ProjectInfo {
-                slug: e.slug,
-                display_name: e.display_name,
-                status: ProjectStatus::Stopped,
-            },
+        .map(|e| {
+            let keypair_path = data_dir.join(e.slug.as_str()).join(".lutin").join("keypair");
+            let signing = lutin_keypair::load_or_create_keypair(&keypair_path)
+                .map_err(io::Error::other)?;
+            Ok(ProjectRecord {
+                info: ProjectInfo {
+                    slug: e.slug,
+                    display_name: e.display_name,
+                },
+                signing,
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub fn save(data_dir: &Path, projects: &[ProjectRecord]) -> io::Result<()> {
@@ -81,8 +85,8 @@ mod tests {
             info: ProjectInfo {
                 slug: Slug::parse(slug).unwrap(),
                 display_name: DisplayName::parse(slug).unwrap(),
-                status: ProjectStatus::Stopped,
             },
+            signing: lutin_auth::generate_keypair().unwrap(),
         }
     }
 
@@ -95,6 +99,11 @@ mod tests {
     #[test]
     fn roundtrip() {
         let tmp = TempDir::new().unwrap();
+        // Pre-create the keypair file `load` expects to find for each entry.
+        let lutin_dir = tmp.path().join("alpha").join(".lutin");
+        std::fs::create_dir_all(&lutin_dir).unwrap();
+        lutin_keypair::load_or_create_keypair(&lutin_dir.join("keypair")).unwrap();
+
         save(tmp.path(), &[record("alpha")]).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.len(), 1);
@@ -111,6 +120,10 @@ mod tests {
             "[[project]]\nslug = \"old\"\ndisplay_name = \"Old\"\nlimits = { memory = \"1g\" }\n",
         )
         .unwrap();
+        let lutin_dir = tmp.path().join("old").join(".lutin");
+        std::fs::create_dir_all(&lutin_dir).unwrap();
+        lutin_keypair::load_or_create_keypair(&lutin_dir.join("keypair")).unwrap();
+
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].info.slug.as_str(), "old");

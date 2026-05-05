@@ -12,7 +12,6 @@
 //! `CreateProject`. The desktop receives addr + token + project pubkey
 //! and dials the container directly — CP doesn't proxy session traffic.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -21,7 +20,7 @@ use lutin_auth::{
     Scope, SessionId, SigningKey, Slug, Subject, Ttl, WorkflowId, mint_with_ttl,
     pubkey_to_string,
 };
-use lutin_control_protocol::{ProjectPubkey, SessionEndpoint, SessionInfo, WorkflowInfo};
+use lutin_control_protocol::{ApiError, ProjectPubkey, SessionEndpoint, SessionInfo, WorkflowInfo};
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -30,9 +29,20 @@ use crate::workflow_images;
 /// How long to wait for the workflow container to publish its handoff.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
 const SPAWN_POLL: Duration = Duration::from_millis(50);
-/// Sessions tokens live for 1h; desktop refreshes via `OpenSession` on
-/// reconnect. Same TTL the legacy project tier used.
+/// Session tokens live for 1h; desktop refreshes via `OpenSession` on reconnect.
 const TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+/// Prefix for `docker run --name`; full name is `{PREFIX}-{slug}-{session}`.
+const CONTAINER_PREFIX: &str = "lutin-session";
+
+impl From<SessionError> for ApiError {
+    fn from(e: SessionError) -> Self {
+        match e {
+            SessionError::WorkflowNotFound(id) => ApiError::WorkflowNotFound(id),
+            SessionError::SessionNotFound(id) => ApiError::SessionNotFound(id),
+            other => ApiError::Supervisor(other.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -59,6 +69,7 @@ pub enum SessionError {
 /// Live in-memory record of one running session container.
 #[derive(Debug, Clone)]
 pub struct RunningSession {
+    pub slug: Slug,
     pub info: SessionInfo,
     pub addr: SocketAddr,
     pub container_name: String,
@@ -66,9 +77,11 @@ pub struct RunningSession {
     pub project_pubkey: ProjectPubkey,
 }
 
-/// `Slug → Vec<RunningSession>`. Held in the CP supervisor's task-local
-/// state; not shared across threads.
-pub type SessionRegistry = HashMap<Slug, Vec<RunningSession>>;
+/// Flat list of every running session across all projects. Held in the
+/// CP supervisor's task-local state; N is small (one entry per active
+/// session container) so linear scans beat the indirection of a
+/// per-slug map.
+pub type SessionRegistry = Vec<RunningSession>;
 
 fn resolve_workflow_image(workflow: &WorkflowId) -> Result<String, SessionError> {
     // `docker image ls --filter label=<id>=<workflow>` returns repo:tag
@@ -121,15 +134,13 @@ pub async fn start_session(
     registry: &mut SessionRegistry,
     slug: &Slug,
     workflow: &WorkflowId,
+    signing: &SigningKey,
     projects_root: &Path,
     global_config_dir: &Path,
-    container_prefix: &str,
 ) -> Result<(RunningSession, SessionEndpoint), SessionError> {
     let image_ref = resolve_workflow_image(workflow)?;
     let project_dir = projects_root.join(slug.as_str());
     let lutin_dir = project_dir.join(".lutin");
-    let signing = lutin_keypair::load_or_create_keypair(&lutin_dir.join("keypair"))
-        .map_err(|e| SessionError::Io(std::io::Error::other(e)))?;
     let project_pubkey = ProjectPubkey::new(signing.verifying_key().to_bytes());
     let project_pubkey_b64 = pubkey_to_string(&signing.verifying_key());
 
@@ -144,7 +155,7 @@ pub async fn start_session(
     }
 
     let container_name = format!(
-        "{container_prefix}-{slug}-{session}",
+        "{CONTAINER_PREFIX}-{slug}-{session}",
         slug = slug.as_str(),
         session = session_id.as_str()
     );
@@ -238,7 +249,7 @@ pub async fn start_session(
         workflow: workflow.clone(),
     };
     let token = mint_session_token(
-        &signing,
+        signing,
         slug.clone(),
         workflow.clone(),
         session_id.clone(),
@@ -249,15 +260,13 @@ pub async fn start_session(
         project_pubkey: project_pubkey.clone(),
     };
     let running = RunningSession {
+        slug: slug.clone(),
         info: session_info,
         addr,
         container_name,
         project_pubkey,
     };
-    registry
-        .entry(slug.clone())
-        .or_default()
-        .push(running.clone());
+    registry.push(running.clone());
     Ok((running, endpoint))
 }
 
@@ -266,11 +275,11 @@ pub async fn stop_session(
     slug: &Slug,
     session: &SessionId,
 ) -> Result<(), SessionError> {
-    let entry = registry.get_mut(slug).and_then(|sessions| {
-        let idx = sessions.iter().position(|s| &s.info.id == session)?;
-        Some(sessions.swap_remove(idx))
-    });
-    let entry = entry.ok_or_else(|| SessionError::SessionNotFound(session.clone()))?;
+    let idx = registry
+        .iter()
+        .position(|s| &s.slug == slug && &s.info.id == session)
+        .ok_or_else(|| SessionError::SessionNotFound(session.clone()))?;
+    let entry = registry.swap_remove(idx);
     let out = Command::new("docker")
         .args(["rm", "-f", &entry.container_name])
         .output()
@@ -292,21 +301,14 @@ pub fn open_session(
     registry: &SessionRegistry,
     slug: &Slug,
     session: &SessionId,
-    projects_root: &Path,
+    signing: &SigningKey,
 ) -> Result<SessionEndpoint, SessionError> {
     let entry = registry
-        .get(slug)
-        .and_then(|s| s.iter().find(|s| &s.info.id == session))
+        .iter()
+        .find(|s| &s.slug == slug && &s.info.id == session)
         .ok_or_else(|| SessionError::SessionNotFound(session.clone()))?;
-    let signing = lutin_keypair::load_or_create_keypair(
-        &projects_root
-            .join(slug.as_str())
-            .join(".lutin")
-            .join("keypair"),
-    )
-    .map_err(|e| SessionError::Io(std::io::Error::other(e)))?;
     let token = mint_session_token(
-        &signing,
+        signing,
         slug.clone(),
         entry.info.workflow.clone(),
         entry.info.id.clone(),
@@ -320,28 +322,35 @@ pub fn open_session(
 
 pub fn list_sessions(registry: &SessionRegistry, slug: &Slug) -> Vec<SessionInfo> {
     registry
-        .get(slug)
-        .map(|sessions| sessions.iter().map(|s| s.info.clone()).collect())
-        .unwrap_or_default()
+        .iter()
+        .filter(|s| &s.slug == slug)
+        .map(|s| s.info.clone())
+        .collect()
 }
 
 /// Tear down every session container for a given slug — used when the
 /// project is deleted, and on supervisor shutdown.
 pub async fn stop_all_for_slug(registry: &mut SessionRegistry, slug: &Slug) {
-    if let Some(sessions) = registry.remove(slug) {
-        for s in sessions {
+    let mut i = 0;
+    while i < registry.len() {
+        if &registry[i].slug == slug {
+            let s = registry.swap_remove(i);
             let _ = Command::new("docker")
                 .args(["rm", "-f", &s.container_name])
                 .output()
                 .await;
+        } else {
+            i += 1;
         }
     }
 }
 
 pub async fn stop_all(registry: &mut SessionRegistry) {
-    let slugs: Vec<Slug> = registry.keys().cloned().collect();
-    for slug in slugs {
-        stop_all_for_slug(registry, &slug).await;
+    for s in registry.drain(..) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &s.container_name])
+            .output()
+            .await;
     }
 }
 
@@ -363,15 +372,11 @@ fn mint_session_token(
     )
 }
 
-/// 128-bit random session id, hex-encoded (32 chars). Same shape the
-/// legacy lutin-project tier used so on-disk state under
-/// `<projects_root>/<slug>/.lutin/sessions/<id>` keeps the same naming
-/// convention across the cutover.
+/// 128-bit random session id, hex-encoded (32 chars).
 fn mint_session_id() -> Result<SessionId, getrandom::Error> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)?;
-    let s: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(SessionId::parse(s).expect("hex32 is valid SessionId"))
+    Ok(SessionId::from_random_bytes(bytes))
 }
 
 async fn poll_handoff_addr(

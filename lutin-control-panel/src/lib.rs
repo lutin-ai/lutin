@@ -10,8 +10,8 @@ pub mod workflow_images;
 use futures_util::{SinkExt, StreamExt};
 use lutin_auth::{Scope, SigningKey, VerifyingKey, verify};
 use lutin_control_protocol::{
-    self as cp, ApiError, DisplayName, Event, ProjectInfo, ProjectStatus, Request, Response,
-    ResponseOk, SessionId, Slug, WorkflowId,
+    self as cp, ApiError, DisplayName, Event, ProjectInfo, Request, Response, ResponseOk,
+    SessionId, Slug, WorkflowId,
 };
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use std::path::{Path, PathBuf};
@@ -23,10 +23,13 @@ use tracing::warn;
 
 const CHANNEL_BUF: usize = 64;
 
-/// Server-side project record.
+/// Server-side project record. CP owns the per-project signing key
+/// in-memory; `start_session` / `open_session` mint tokens against it
+/// without re-reading disk.
 #[derive(Debug, Clone)]
 pub struct ProjectRecord {
     pub info: ProjectInfo,
+    pub signing: SigningKey,
 }
 
 /// Where to find per-project state. Lives in the supervisor task.
@@ -94,7 +97,7 @@ impl Supervisor {
         let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_BUF);
         let (ev_tx, _) = broadcast::channel(CHANNEL_BUF);
         let (sd_tx, sd_rx) = oneshot::channel();
-        let join = tokio::spawn(supervisor(cmd_rx, ev_tx.clone(), sd_rx, signing, config));
+        let join = tokio::spawn(supervisor(cmd_rx, ev_tx.clone(), sd_rx, config));
         let state = AppState {
             issuer,
             commands: cmd_tx,
@@ -158,7 +161,6 @@ async fn supervisor(
     mut rx: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
     mut shutdown: oneshot::Receiver<()>,
-    _signing: SigningKey,
     config: SpawnConfig,
 ) {
     let mut projects: Vec<ProjectRecord> = match registry::load(&config.projects_root) {
@@ -168,7 +170,7 @@ async fn supervisor(
             Vec::new()
         }
     };
-    let mut session_registry: sessions::SessionRegistry = std::collections::HashMap::new();
+    let mut session_registry: sessions::SessionRegistry = Vec::new();
 
     loop {
         tokio::select! {
@@ -207,19 +209,21 @@ async fn handle_command(
                 let _ = reply.send(Response::Err(ApiError::AlreadyExists(slug)));
                 return;
             }
-            if let Err(e) = init_project_storage(&config.projects_root, &slug) {
-                let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
-                    "init project storage for {}: {e}",
-                    slug.as_str()
-                ))));
-                return;
-            }
-            let info = ProjectInfo {
-                slug,
-                display_name,
-                status: ProjectStatus::Stopped,
+            let signing = match init_project_storage(&config.projects_root, &slug) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
+                        "init project storage for {}: {e}",
+                        slug.as_str()
+                    ))));
+                    return;
+                }
             };
-            projects.push(ProjectRecord { info: info.clone() });
+            let info = ProjectInfo { slug, display_name };
+            projects.push(ProjectRecord {
+                info: info.clone(),
+                signing,
+            });
             if let Err(e) = registry::save(&config.projects_root, projects) {
                 warn!(error = %e, "failed to persist project registry after create");
             }
@@ -268,18 +272,17 @@ async fn handle_command(
             workflow,
             reply,
         } => {
-            if !projects.iter().any(|p| p.info.slug == slug) {
+            let Some(record) = projects.iter().find(|p| p.info.slug == slug) else {
                 let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
                 return;
-            }
-            let container_prefix = "lutin-project-session";
+            };
             match sessions::start_session(
                 session_registry,
                 &slug,
                 &workflow,
+                &record.signing,
                 &config.projects_root,
                 &config.global_config_dir,
-                container_prefix,
             )
             .await
             {
@@ -294,14 +297,8 @@ async fn handle_command(
                         endpoint,
                     }));
                 }
-                Err(sessions::SessionError::WorkflowNotFound(id)) => {
-                    let _ = reply.send(Response::Err(ApiError::WorkflowNotFound(id)));
-                }
                 Err(e) => {
-                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
-                        "start session for {}: {e}",
-                        slug.as_str()
-                    ))));
+                    let _ = reply.send(Response::Err(e.into()));
                 }
             }
         }
@@ -318,13 +315,8 @@ async fn handle_command(
                     });
                     let _ = reply.send(Response::Ok(ResponseOk::SessionStopped));
                 }
-                Err(sessions::SessionError::SessionNotFound(id)) => {
-                    let _ = reply.send(Response::Err(ApiError::SessionNotFound(id)));
-                }
                 Err(e) => {
-                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
-                        "stop session: {e}"
-                    ))));
+                    let _ = reply.send(Response::Err(e.into()));
                 }
             }
         }
@@ -333,17 +325,16 @@ async fn handle_command(
             session,
             reply,
         } => {
-            match sessions::open_session(session_registry, &slug, &session, &config.projects_root) {
+            let Some(record) = projects.iter().find(|p| p.info.slug == slug) else {
+                let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
+                return;
+            };
+            match sessions::open_session(session_registry, &slug, &session, &record.signing) {
                 Ok(endpoint) => {
                     let _ = reply.send(Response::Ok(ResponseOk::SessionOpened(endpoint)));
                 }
-                Err(sessions::SessionError::SessionNotFound(id)) => {
-                    let _ = reply.send(Response::Err(ApiError::SessionNotFound(id)));
-                }
                 Err(e) => {
-                    let _ = reply.send(Response::Err(ApiError::Supervisor(format!(
-                        "open session: {e}"
-                    ))));
+                    let _ = reply.send(Response::Err(e.into()));
                 }
             }
         }
@@ -351,13 +342,13 @@ async fn handle_command(
 }
 
 /// Eagerly create the per-project on-disk layout and mint the project's
-/// signing keypair if absent.
-fn init_project_storage(projects_root: &Path, slug: &Slug) -> std::io::Result<()> {
+/// signing keypair if absent. Returns the loaded key so CP can hold it
+/// in memory rather than re-reading disk on every session op.
+fn init_project_storage(projects_root: &Path, slug: &Slug) -> std::io::Result<SigningKey> {
     let lutin_dir = projects_root.join(slug.as_str()).join(".lutin");
     std::fs::create_dir_all(&lutin_dir)?;
     let keypair_path = lutin_dir.join("keypair");
-    lutin_keypair::load_or_create_keypair(&keypair_path).map_err(std::io::Error::other)?;
-    Ok(())
+    lutin_keypair::load_or_create_keypair(&keypair_path).map_err(std::io::Error::other)
 }
 
 pub async fn run(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
