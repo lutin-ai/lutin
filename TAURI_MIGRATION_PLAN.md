@@ -283,69 +283,122 @@ narrowed subset based on the plugin's declared permissions. Chrome itself
 
 Each phase ends in a runnable state so we can stop at any of them.
 
-### Phase 1: Tauri skeleton, no plugins yet
+### Phase 1: Tauri skeleton, no plugins yet — **DONE**
 
-- **First action: verify `lutin-workflow-sdk` doesn't depend on
-  `lutin-workflow-ui`.** Quick `grep -rn workflow_ui crates/lutin-workflow-sdk/`.
-  If it does, untangle before starting (engine-side SDK shouldn't pull
-  in any UI types).
-- New `lutin-desktop` rewrite as a Tauri app. Keep crate name; replace
-  guts. **Use Tauri's standard layout** (don't invent your own — every
-  Tauri example assumes this):
-  ```
-  lutin-desktop/
-    src/                      React app
-      package.json
-      vite.config.ts
-      App.tsx, main.tsx, ...
-    src-tauri/                Rust core
-      Cargo.toml
-      tauri.conf.json
-      src/
-        main.rs
-        cp.rs                 (ported from current lutin-desktop)
-        bridge.rs             (ported from current lutin-desktop)
-        commands/             (Tauri command modules)
-  ```
-- Rust core wraps the existing `cp.rs` and `bridge.rs` in Tauri commands.
-- React app: project list, create/delete project, settings panel
-  (connection profiles), session tabs — but no workflow UI yet
-  (placeholder).
-- Verifies: connect to CP, list projects, create/start sessions, observe
-  events. Basically reproduces today's chrome minus workflow rendering.
-- Deliverable: app runs, can open a project, can `+ New` a chat session
-  (lands on a placeholder pane saying "plugin loading not implemented").
+Landed in `06ba305` + `8e8eeff`. Tauri standard layout under
+`lutin-desktop/{src,src-tauri}`, CP client wrapped in Tauri commands
+(`cp_send`, `cp_status`, `settings_get`, `settings_set`), React chrome
+with project list / create / delete / session tabs / settings, and
+session pane placeholder. `cp_status` returns a full `ConnSnapshot`
+(externally tagged JSON) so the React side hydrates without racing
+against the event listener attaching.
 
-### Phase 2: Plugin loading without native APIs
+### Phase 2: Plugin loading without native APIs — **MOSTLY DONE**
 
-- CP-side: replace `lutin.workflow.cdylib` with `lutin.workflow.bundle`
-  Docker label pointing at a tarball path inside the image (e.g.
-  `/workflow/ui.tar`). New CP command `GetWorkflowBundle` (parallel to
-  the existing `GetWorkflowCdylib`, which can stay during migration).
-- Desktop: bundle cache analogous to `WorkflowCache`, keyed by
-  `(workflow_id, digest)`, unpacks tarballs to disk under the user's
-  cache dir.
-- Tauri serves each plugin under its own custom protocol/origin (see
-  "Plugin isolation model"). Look up the Tauri 2 custom-protocol API
-  at the time you wire this up — URL forms differ by platform.
-- React renders one iframe per session, `src` = the plugin's origin
-  root.
-- Chrome React app serves a plugin bootstrap module on its own origin;
-  plugin's `index.html` imports it. After the iframe loads, chrome
-  posts an initial `MessagePort` message that the bootstrap uses to
-  back `window.lutin`. Initial surface: `send` / `onMessage` /
-  `notification.post`.
-- Origin → plugin_id registry on the Rust side: every command call
-  validated against the calling iframe's plugin permissions.
-- Workflow ↔ engine bytes pump: chrome maintains the existing per-session
-  WS to the engine; iframe ↔ chrome via `postMessage`; chrome ↔ engine
-  via the existing `bridge.rs` (or a slimmed equivalent).
-- Chat workflow rewrite: `workflows/chat/ui/` directory with React app,
-  Vite build, Dockerfile updated to copy `dist/` into `/workflow/ui/`
-  and tar it up at build time (or just COPY the directory; bundler
-  decision).
-- Deliverable: end-to-end chat working in iframe, streaming from engine,
-  via chrome's bytes pump.
+Done so far:
+
+- **CP** (`3e32827`): `Request::GetWorkflowBundle` + `Response::Ok::WorkflowBundle`,
+  `lutin.workflow.bundle` Docker label, `read_bundle_bytes` parallel to
+  `read_cdylib_bytes`. `inspect_image` accepts either the cdylib OR the
+  bundle label (not both required) so images can ship just the bundle
+  during transition. `lutin-desktop-egui` removed from workspace
+  members so its exhaustive `Response` match doesn't gate rebuilds.
+- **Bundle cache + plugin protocol** (`1d4c6d0`):
+  - `bundles::BundleCache` keyed by `(workflow_id, digest)`. Unpacks
+    tarballs under `app_cache_dir()/bundles/<id>/<short_digest>/`.
+    Path-traversal hardened.
+  - `plugin_protocol::SCHEME = "lutin-plugin"`, single scheme with the
+    workflow id in the **host** position (`lutin-plugin://chat/...`)
+    so each plugin gets a distinct browser origin. Windows/non-Windows
+    URL form hidden behind `plugin_protocol::url_for`.
+  - `workflow_open_plugin` Tauri command: ensures bundle unpacked
+    (fetches `GetWorkflowBundle` on cache miss), parses
+    `lutin.workflow.json`, returns `{ url, manifest }`.
+  - React `<PluginIframe>` resolves the URL, loads a sandboxed iframe,
+    handles cross-origin postMessage with the chrome origin.
+- **Engine bridge + bytes pump** (`5b75d45`):
+  - `bridge.rs`: per-session WS pump. Holds the session token (never
+    crosses to JS), runs Hello/HelloAck once, allocates `request_id`
+    for `Frame::Payload`, correlates replies via a pending map, fans
+    `Frame::Broadcast` bodies out to a `Vec<Channel<Vec<u8>>>` of
+    subscribers and drops dead ones on the next send. Ping/Pong stays
+    in-bridge.
+  - Tauri commands: `workflow_session_open` (calls CP `OpenSession`,
+    dials engine, stashes `BridgeHandle` keyed by session id),
+    `workflow_session_request`, `workflow_session_subscribe` (Tauri
+    `Channel<Vec<u8>>`), `workflow_session_close`. Token never
+    surfaces to JS.
+  - `cp_dispatch` helper extracted so Rust commands can call CP
+    without round-tripping through the JS invoke layer.
+  - `<PluginIframe>` proxies the bytes pump: iframe → chrome envelope
+    is `{ kind: "request" | "response" | "broadcast" | "notification",
+    request_id?, body }`. Chrome strips/wraps the `Frame` envelope so
+    iframes only see body bytes; chat & friends still ride postcard
+    end-to-end on those bytes.
+- **Chat plugin scaffolding** (`a348e9b`): `workflows/chat/ui/` with
+  React + Vite + bundled `lutin.ts` shim. Two-stage Dockerfile (UI
+  builder via `oven/bun`, tar at `/workflow/ui.tar`); image now ships
+  both `lutin.workflow.cdylib` and `lutin.workflow.bundle`. UI is a
+  stub that completes the handshake and renders session context.
+
+What's left for Phase 2:
+
+- **JS postcard codec** for chat's protocol (`ChatRequest`,
+  `ChatResponse = Result<ChatOk, ChatError>`, `ChatEvent`). No
+  canonical JS port exists. Options, in order of preference:
+  1. Hand-roll the postcard subset chat needs (varint, length-prefixed
+     strings, enum tags, `Vec<T>`, `Option<T>`). Manageable for the
+     chat surface; share as `workflows/chat/ui/src/postcard.ts` first,
+     extract to a workspace-level helper if a second plugin needs it.
+  2. Ship a translation layer in chrome that JSON-ifies the chat
+     protocol on the iframe boundary. Keeps the engine untouched but
+     means chrome grows chat-specific knowledge — bad fit for a
+     generic chrome.
+  3. Switch chat's wire format to JSON on a feature flag. Touches the
+     engine — explicitly excluded by the plan.
+  Go with (1).
+- **Real chat React UI**: composer, scrollback, persona indicator —
+  mirror today's egui surface (`workflows/chat/src/ui.rs`). The shim
+  is the only async boundary; rendering is plain React state driven
+  off `lutin.onBroadcast` events.
+- **Cross-origin chrome-hosted shim** (deferred but planned): plugins
+  currently ship their own copy of `lutin.ts`. Move it to a chrome-
+  served file (e.g. via a `lutin-shim` URI scheme handler that adds
+  `Access-Control-Allow-Origin: *`) so updates land in one place.
+- **Permission enforcement gates**. Today the iframe's
+  `notification.post` runs unconditionally chrome-side; once Phase 3
+  Tauri commands land (audio, hotkey, clipboard), chrome must check
+  the calling iframe's manifest before forwarding. The origin →
+  plugin_id registry is implicit today (host segment of the iframe
+  URL); make it explicit when the first capability ships.
+
+Phase 2 deliverable per the original plan was "end-to-end chat
+streaming through chrome's bytes pump". The wire is fully open;
+postcard-in-JS is the gating item between here and that demo.
+
+### Phase 2 lessons + decisions to lock in
+
+- **Iframe boundary is body bytes, not Frames.** Chrome strips the
+  `Frame::{Payload, Broadcast}` envelope; iframes only ever see
+  `body` bytes. Rationale: iframes don't need a JS postcard impl just
+  to peel the envelope, and chrome already owns request_id allocation.
+  This diverges slightly from `lutin-workflow-ui::Transport`, which
+  forwards full Frames — keep that contract for the legacy egui path
+  but don't replicate it in the iframe shim.
+- **Single `lutin-plugin` scheme, workflow id in host.** Cross-origin
+  isolation falls out of the host comparison; one scheme registration
+  covers every plugin. Don't register one scheme per plugin.
+- **Tauri Channel<T> for broadcast subscribers.** Each
+  `workflow_session_subscribe` invocation gets its own channel; the
+  bridge drops dead ones on the next send. Avoids needing a global
+  Tauri event channel for per-session broadcasts.
+- **Drop iframe on session switch.** `<PluginIframe>` is keyed by
+  session id, so switching tabs unmounts/remounts and the bridge
+  reopens. Acceptable cost (one Hello roundtrip); avoids sticky-state
+  bugs from session reuse.
+- **Ship cdylib + bundle in parallel.** Don't dual-source-of-truth in
+  the workflow code — chat's egui `ui.rs` keeps existing untouched
+  until Phase 4 cleanup; the bundle is its own source under `ui/`.
 
 ### Phase 3: Native capabilities
 
@@ -436,25 +489,40 @@ workflows/
 
 ## What to do first when context is fresh
 
-1. **Audit `lutin-workflow-sdk`.** `grep -rn workflow_ui crates/lutin-workflow-sdk/`.
-   If it imports anything UI-side, refactor before scaffolding the
-   Tauri app — engine-side SDK should not depend on UI types.
-2. **Scaffold via the Tauri CLI**, not `cargo new`. Use
-   `pnpm create tauri-app@latest` (or `bun create tauri-app`). Pick
-   React + TypeScript + Vite. Then port `cp.rs` / `bridge.rs` from
-   today's `lutin-desktop` into the generated `src-tauri/src/`. Crate
-   name in `src-tauri/Cargo.toml` stays `lutin-desktop`.
-3. **Lock the iframe origin model day 1.** Implement the per-plugin
-   custom-protocol registration *before* loading any real plugin —
-   even with one stub plugin. Cross-origin postMessage retrofitting
-   is painful.
-4. **Phase 1 first commit goal**: scaffolded Tauri app, the
-   `cp_connect` / `cp_send` / `cp_subscribe` commands working,
-   project list rendering, create/delete/select project working. No
-   plugin support yet (placeholder pane for the active session).
-5. **Don't delete** `crates/lutin-workflow-ui`, `crates/lutin-ui`, or
-   `workflows/chat/src/ui.rs` until Phase 2 lands. They're already
-   broken but their absence will mask compilation issues elsewhere
-   during the rebuild. Comment out the workspace members or remove
-   them from the workspace `members` list to skip compilation
-   without deleting.
+Phase 1 + most of Phase 2 are landed. To finish Phase 2:
+
+1. **JS postcard codec** in `workflows/chat/ui/src/postcard.ts`
+   covering chat's protocol surface. Reference is the Rust types in
+   `workflows/chat/src/lib.rs` (`ChatRequest`, `ChatOk`, `ChatError`,
+   `ChatEvent`, `SessionState`, `HistoricalMessage`, `TurnId`,
+   `FinishReason`). Verify against postcard's varint format
+   (`postcard::to_allocvec` with the standard flavour). Worth a
+   round-trip golden test that loads a captured `Frame::Broadcast`
+   body and asserts the JS decode matches.
+2. **Real chat UI in `workflows/chat/ui/src/`** — composer, scrollback,
+   persona indicator. State flows from `lutin.onBroadcast` callbacks
+   into a small reducer; `lutin.request(encode(SendMessage))` for
+   intents. Mirror the current egui shape (`workflows/chat/src/ui.rs`).
+3. **Smoke test**: rebuild the chat image
+   (`docker build -f workflows/chat/Dockerfile -t lutin-workflow-chat:dev .`),
+   wire CP to it, start a chat session in the desktop chrome, send a
+   message, see a streamed reply in the iframe.
+4. **Cross-origin chrome-hosted shim** (optional but cleaner): move
+   `lutin.ts` out of the chat bundle and serve it from chrome via a
+   `lutin-shim://localhost/shim.js` scheme handler with permissive
+   CORS. Plugin `index.html` imports it. One copy, no per-plugin
+   drift.
+
+Things to remember, learned the hard way:
+
+- **`tsc -b` writes `.js` next to source by default**; chat-ui uses
+  plain `tsc` + `noEmit: true` in `tsconfig.json`.
+- **Tauri serializes `Vec<u8>` as a JSON number array** in IPC. JS
+  side converts at the boundary (`Array.from(uint8)` outbound,
+  `Uint8Array.from(arr)` inbound). Hidden in `api.ts` helpers.
+- **Don't re-add `lutin-desktop-egui`** to the workspace members
+  list until Phase 4 — it has an exhaustive `Response` match that
+  trips on every new variant.
+- `crates/lutin-workflow-ui`, `crates/lutin-ui`, `workflows/chat/src/ui.rs`
+  remain on disk and compile via the chat crate's own workspace.
+  Don't delete until Phase 4.
