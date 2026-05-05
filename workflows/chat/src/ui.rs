@@ -5,32 +5,25 @@
 //! symbol; everything else hangs off the `Workflow` trait object it
 //! returns.
 //!
-//! Two UI surfaces:
-//!   * `ProjectUi` (LeftSidebar) — list of chat sessions, "new chat"
-//!     button.
-//!   * `SessionUi` (Main) — scrollback, composer, persona indicator.
+//! One UI surface: `SessionUi` (Main pane) — scrollback, composer,
+//! persona indicator. Project-level chrome (sidebar header, top-bar
+//! label, "+ New" button) lives in desktop now; this cdylib is only
+//! invoked once a session opens.
 //!
-//! State ownership follows message-passing-over-shared-state: each pump
-//! tokio task is the sole writer of its scope's state, publishing
-//! immutable `Arc<Snapshot>` values via `tokio::sync::watch`. UI render
-//! paths borrow the latest snapshot synchronously and clone the `Arc`
-//! (cheap). UI → pump intents (submit, cancel) flow through an
-//! `mpsc::UnboundedSender<UiIntent>` so the pump can mutate its owned
-//! state and republish.
-//!
-//! Cross-scope state (sidebar previews) is intentionally dropped in this
-//! pass: the project pump owns the session list (id + slug only); the
-//! session pump owns scrollback. Re-introducing previews would mean
-//! piping per-session preview snapshots out via a second `watch` and
-//! letting the project pump fan them in. Out of scope here.
+//! State ownership follows message-passing-over-shared-state: the
+//! session pump tokio task is the sole writer of session state,
+//! publishing immutable `Arc<SessionSnapshot>` values via
+//! `tokio::sync::watch`. UI render borrows the latest snapshot
+//! synchronously and clones the `Arc` (cheap). UI → pump intents
+//! (submit, cancel) flow through an `mpsc::UnboundedSender<SessionIntent>`
+//! so the pump can mutate its owned state and republish.
 
 use std::sync::Arc;
 
-use egui::{Align, Color32, Layout, RichText, ScrollArea, TextEdit};
+use egui::{Color32, RichText, ScrollArea, TextEdit};
 use lutin_protocol::{Frame, decode as frame_decode, encode as frame_encode};
 use lutin_workflow_ui::{
-    Manifest, ProjectCtx, ProjectEndpoint, SessionCtx, SessionEndpoint, Slot, Transport, Workflow,
-    WorkflowProjectUi, WorkflowSessionUi,
+    SessionCtx, SessionEndpoint, Transport, Workflow, WorkflowSessionUi,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -91,79 +84,18 @@ enum SessionIntent {
 // ─── Workflow root ───────────────────────────────────────────────────
 
 /// Top-level workflow object. Holds no shared mutable state — each
-/// `open_*` call hands its `Transport` to a fresh pump that owns its
-/// scope's state.
+/// `open_session` call hands its `Transport` to a fresh pump that owns
+/// the session's state.
 #[derive(Default)]
 pub struct ChatWorkflow {}
 
 impl Workflow for ChatWorkflow {
-    fn manifest(&self) -> Manifest {
-        Manifest {
-            display_name: "Chat".to_string(),
-            icon: '💬',
-            wants_right_sidebar: false,
-        }
-    }
-
-    fn open_project(
-        &self,
-        endpoint: ProjectEndpoint,
-        _transport: Transport,
-    ) -> Box<dyn WorkflowProjectUi> {
-        // The project-tier WS is gone post-refactor; chrome owns the
-        // session list now. We only need the slug+workflow for the
-        // "+ New" button in the sidebar slot.
-        Box::new(ProjectUi { endpoint })
-    }
-
     fn open_session(
         &self,
         endpoint: SessionEndpoint,
         transport: Transport,
     ) -> Box<dyn WorkflowSessionUi> {
         Box::new(SessionUi::new(endpoint, transport))
-    }
-}
-
-// ─── Project-scoped UI ───────────────────────────────────────────────
-
-/// Project-scoped UI. Stripped to the minimum: a "+ New" button plus
-/// the workflow header. The session list itself is owned by chrome
-/// (lutin-desktop pulls it from CP), not by this workflow — the project
-/// tier that used to publish broadcasts here is gone. The trait is kept
-/// so chrome can still locate the workflow + slug for the start-session
-/// intent it raises against `ChromeApi`.
-struct ProjectUi {
-    endpoint: ProjectEndpoint,
-}
-
-impl WorkflowProjectUi for ProjectUi {
-    fn render(&mut self, slot: Slot, ctx: ProjectCtx<'_>, ui: &mut egui::Ui) {
-        match slot {
-            Slot::LeftSidebar => self.render_sidebar(ctx, ui),
-            Slot::TopBar => {
-                ui.label(RichText::new(format!("chat — {}", self.endpoint.slug)).strong());
-            }
-            Slot::RightSidebar | Slot::Main => {}
-        }
-    }
-}
-
-impl ProjectUi {
-    fn render_sidebar(&mut self, ctx: ProjectCtx<'_>, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Sessions");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("+ New").clicked() {
-                        ctx.chrome
-                            .start_session(&self.endpoint.slug, &self.endpoint.workflow);
-                    }
-                });
-            });
-            ui.separator();
-            ui.label(RichText::new("(session list rendered by chrome)").weak());
-        });
     }
 }
 
@@ -206,11 +138,7 @@ impl SessionUi {
 }
 
 impl WorkflowSessionUi for SessionUi {
-    fn render(&mut self, slot: Slot, _ctx: SessionCtx<'_>, ui: &mut egui::Ui) {
-        if !matches!(slot, Slot::Main) {
-            return;
-        }
-
+    fn render(&mut self, _ctx: SessionCtx<'_>, ui: &mut egui::Ui) {
         let snap: Arc<SessionSnapshot> = self.rx.borrow().clone();
 
         ui.horizontal(|ui| {
@@ -277,7 +205,15 @@ fn spawn_session_pump(
     tx: watch::Sender<Arc<SessionSnapshot>>,
     mut intents: mpsc::UnboundedReceiver<SessionIntent>,
 ) {
-    tokio::spawn(async move {
+    // Route the pump through chrome's `Spawner` rather than
+    // `tokio::spawn` / `Handle::spawn`. The cdylib statically links
+    // its own copy of tokio with separate statics, and calling tokio
+    // runtime APIs here corrupts those (state-dependent UB — first
+    // session works, second segfaults). The Spawner's `tokio::spawn`
+    // call is compiled into chrome and runs against desktop's tokio
+    // statics. See the `lutin-workflow-ui` crate doc.
+    let spawner = transport.spawner.clone();
+    spawner.spawn(Box::pin(async move {
         let mut state = SessionSnapshot::default();
         let counter = std::sync::atomic::AtomicU64::new(1);
         let send = transport.send.clone();
@@ -349,7 +285,7 @@ fn spawn_session_pump(
                 return; // UI dropped its receiver
             }
         }
-    });
+    }));
 }
 
 /// Pure mutator over `&mut SessionSnapshot`. Returns true iff the
@@ -487,6 +423,8 @@ fn try_send_chat_request(
 /// `libloading::Library::get(b"create_workflow")`.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn create_workflow() -> Box<dyn Workflow> {
+    let probe = lutin_workflow_ui::typeid_probe();
+    eprintln!("[chat-cdylib] typeid_probe = {probe:?}");
     Box::new(ChatWorkflow::default())
 }
 

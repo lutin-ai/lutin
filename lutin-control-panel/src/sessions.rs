@@ -113,11 +113,11 @@ fn resolve_workflow_image(workflow: &WorkflowId) -> Result<String, SessionError>
 }
 
 /// Enumerate installed workflow images. CP uses this to answer
-/// `Request::ListWorkflows`. `name`/`description` are derived from the
-/// image id today; richer metadata (e.g. via additional labels) is a
-/// future polish. `digest` is the docker image id; the desktop uses it
-/// as the cache key for cdylib bytes fetched separately via
-/// `GetWorkflowCdylib`.
+/// `Request::ListWorkflows`. `display_name`/`icon` come from
+/// `lutin.workflow.display_name` / `lutin.workflow.icon` Docker
+/// labels (with fallbacks applied in `workflow_images`). `digest` is
+/// the docker image id; the desktop uses it as the cache key for
+/// cdylib bytes fetched separately via `GetWorkflowCdylib`.
 pub fn list_workflows() -> Vec<WorkflowInfo> {
     workflow_images::list_installed()
         .into_iter()
@@ -125,8 +125,8 @@ pub fn list_workflows() -> Vec<WorkflowInfo> {
             let id = WorkflowId::parse(&inst.id).ok()?;
             Some(WorkflowInfo {
                 id,
-                name: inst.id.clone(),
-                description: None,
+                display_name: inst.display_name,
+                icon: inst.icon,
                 digest: inst.digest,
             })
         })

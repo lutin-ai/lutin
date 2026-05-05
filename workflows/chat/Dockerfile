@@ -59,6 +59,8 @@ COPY --from=builder /build/workflows/chat/target/release/libchat.so  /workflow/l
 
 LABEL lutin.workflow.id="chat"
 LABEL lutin.workflow.cdylib="/workflow/lib.so"
+LABEL lutin.workflow.display_name="Chat"
+LABEL lutin.workflow.icon="💬"
 
 # Default to a non-privileged uid; CP overrides with `--user $(id -u):$(id -g)`
 # at run-time so files written into the bind-mounted /project volume are

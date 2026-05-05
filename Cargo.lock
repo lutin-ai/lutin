@@ -2501,7 +2501,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lutin-desktop"
+name = "lutin-desktop-egui"
 version = "0.1.0"
 dependencies = [
  "anyhow",

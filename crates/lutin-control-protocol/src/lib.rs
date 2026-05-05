@@ -90,11 +90,17 @@ pub struct ProjectInfo {
 /// `lutin-control-panel/src/workflow_images.rs`. `digest` is the
 /// underlying Docker image id; the desktop uses it as a cache key
 /// for the cdylib bytes fetched via `GetWorkflowCdylib`.
+///
+/// `display_name` and `icon` come from `lutin.workflow.display_name`
+/// / `lutin.workflow.icon` Docker labels and feed chrome's sidebar
+/// + top-bar rendering. Chrome reads these from CP rather than from
+/// the cdylib so it can decorate the chrome before the cdylib is
+/// loaded (sessions trigger the dlopen).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowInfo {
     pub id: WorkflowId,
-    pub name: String,
-    pub description: Option<String>,
+    pub display_name: String,
+    pub icon: String,
     pub digest: String,
 }
 

@@ -16,6 +16,8 @@ use std::process::Command;
 
 const ID_LABEL: &str = "lutin.workflow.id";
 const CDYLIB_LABEL: &str = "lutin.workflow.cdylib";
+const DISPLAY_NAME_LABEL: &str = "lutin.workflow.display_name";
+const ICON_LABEL: &str = "lutin.workflow.icon";
 
 #[derive(Debug, Clone)]
 pub struct InstalledWorkflow {
@@ -25,6 +27,12 @@ pub struct InstalledWorkflow {
     /// image; changes when the image is rebuilt. Desktop uses it as the
     /// cdylib cache key.
     pub digest: String,
+    /// Falls back to `id` when the image omits the label.
+    pub display_name: String,
+    /// Falls back to a neutral placeholder when the image omits the
+    /// label. Stored as `String` rather than `char` because emoji can
+    /// span multiple codepoints (ZWJ sequences).
+    pub icon: String,
 }
 
 /// Enumerate every workflow image installed on the local docker daemon.
@@ -41,11 +49,25 @@ pub fn list_installed() -> Vec<InstalledWorkflow> {
     images
         .into_iter()
         .filter_map(|image| match inspect_image(&image) {
-            Ok(meta) => Some(InstalledWorkflow {
-                id: meta.id,
-                image,
-                digest: meta.digest,
-            }),
+            Ok(meta) => {
+                let display_name = if meta.display_name.is_empty() {
+                    meta.id.clone()
+                } else {
+                    meta.display_name
+                };
+                let icon = if meta.icon.is_empty() {
+                    "🧩".to_owned()
+                } else {
+                    meta.icon
+                };
+                Some(InstalledWorkflow {
+                    id: meta.id,
+                    image,
+                    digest: meta.digest,
+                    display_name,
+                    icon,
+                })
+            }
             Err(e) => {
                 tracing::warn!(image = %image, error = %e, "workflow image inspect failed");
                 None
@@ -104,9 +126,15 @@ struct ImageMeta {
     id: String,
     cdylib_path: String,
     digest: String,
+    /// Empty if the image omits the label — caller picks a fallback.
+    display_name: String,
+    /// Empty if the image omits the label — caller picks a fallback.
+    icon: String,
 }
 
 fn inspect_image(image: &str) -> io::Result<ImageMeta> {
+    // `index` returns the empty string for missing keys, so optional
+    // labels show up as blank lines rather than aborting the inspect.
     let out = Command::new("docker")
         .args([
             "image",
@@ -114,7 +142,11 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
             image,
             "--format",
             &format!(
-                "{{{{index .Config.Labels \"{ID_LABEL}\"}}}}\n{{{{index .Config.Labels \"{CDYLIB_LABEL}\"}}}}\n{{{{.Id}}}}"
+                "{{{{index .Config.Labels \"{ID_LABEL}\"}}}}\n\
+                 {{{{index .Config.Labels \"{CDYLIB_LABEL}\"}}}}\n\
+                 {{{{.Id}}}}\n\
+                 {{{{index .Config.Labels \"{DISPLAY_NAME_LABEL}\"}}}}\n\
+                 {{{{index .Config.Labels \"{ICON_LABEL}\"}}}}"
             ),
         ])
         .output()?;
@@ -129,6 +161,8 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
     let id = lines.next().unwrap_or("").trim().to_owned();
     let cdylib_path = lines.next().unwrap_or("").trim().to_owned();
     let digest = lines.next().unwrap_or("").trim().to_owned();
+    let display_name = lines.next().unwrap_or("").trim().to_owned();
+    let icon = lines.next().unwrap_or("").trim().to_owned();
     if id.is_empty() {
         return Err(io::Error::other(format!(
             "{image} missing required label {ID_LABEL}"
@@ -146,5 +180,7 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
         id,
         cdylib_path,
         digest,
+        display_name,
+        icon,
     })
 }

@@ -19,7 +19,8 @@ use anyhow::{Context as _, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use lutin_ids::Slug;
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
-use lutin_workflow_ui::{AuthToken, Transport};
+use lutin_workflow_ui::{AuthToken, Spawner, Transport, WorkflowFuture};
+use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -41,16 +42,40 @@ pub struct BridgeEndpoints {
     in_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
+/// Spawner that routes every workflow-supplied future through the
+/// chrome's tokio handle. The actual `tokio::spawn` call is compiled
+/// into chrome (this crate), so it executes against desktop's tokio
+/// statics rather than the cdylib's — see the `lutin-workflow-ui`
+/// crate doc for why that matters.
+pub struct ChromeSpawner {
+    handle: tokio::runtime::Handle,
+}
+
+impl ChromeSpawner {
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self { handle }
+    }
+}
+
+impl Spawner for ChromeSpawner {
+    fn spawn(&self, fut: WorkflowFuture) {
+        self.handle.spawn(fut);
+    }
+}
+
 /// Build a `Transport` for the workflow + the chrome-side
 /// `BridgeEndpoints` that feed it. The two halves are paired by mpsc
-/// channels; dropping either end tears the pair down.
-pub fn make_transport_pair() -> (Transport, BridgeEndpoints) {
+/// channels; dropping either end tears the pair down. `spawner` is
+/// the chrome-supplied executor the workflow must route its pump
+/// future through.
+pub fn make_transport_pair(spawner: Arc<dyn Spawner>) -> (Transport, BridgeEndpoints) {
     let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     (
         Transport {
             send: out_tx,
             recv: in_rx,
+            spawner,
         },
         BridgeEndpoints { out_rx, in_tx },
     )

@@ -1,18 +1,18 @@
 //! Desktop chrome — top-level egui app.
 //!
-//! Owns the four-slot layout (LeftSidebar / TopBar / RightSidebar /
-//! Main) and the project picker. C2: when a project opens, dlopens
-//! its workflow `.so`, builds a `Transport` paired to a tier-2 WS
-//! bridge, and delegates the relevant slots to the workflow's
-//! `WorkflowProjectUi`. C3: real `ChromeApi`, session lifecycle (mint
-//! `WorkflowSessionUi`s for each active session, render via Main slot
-//! with a chrome-owned tab strip), workflow build progress.
+//! Owns the chrome layout (top bar + left sidebar with project list and
+//! per-project session list + right details panel + main pane) and the
+//! project picker. Workflow cdylibs only render into the Main pane via
+//! one `WorkflowSessionUi` per open session; every other surface
+//! (sidebar header/icon, "+ New" button, session tabs, top-bar label)
+//! is owned by chrome and parameterised from `WorkflowInfo`
+//! (display_name, icon) reported by CP — chrome can decorate before
+//! the cdylib has been dlopened.
 //!
 //! All per-opened-project state lives in `App::projects_state` keyed
-//! by `Slug`. One entry owns the chrome's tier-2 worker, the loaded
-//! project UI (if any), the session list, every loaded session UI,
-//! the focused session id, and the latest build status. Dropping the
-//! entry tears the lot down in the right order via Drop.
+//! by `Slug`. One entry owns the session list, every loaded session
+//! UI, and the focused session id. Dropping the entry tears down the
+//! session UIs and their WS bridges in the right order via Drop.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,14 +26,12 @@ use lutin_ids::{SessionId, SlugError, WorkflowId};
 use lutin_ui::prelude::*;
 use lutin_ui::widget::{button, panel, text_input};
 use lutin_workflow_ui::{
-    AuthToken, ChromeApi, ProjectCtx, ProjectEndpoint as UiProjectEndpoint,
-    SessionCtx, SessionEndpoint as UiSessionEndpoint, Slot, Transport, WorkflowProjectUi,
-    WorkflowSessionUi,
+    AuthToken, ChromeApi, SessionCtx, SessionEndpoint as UiSessionEndpoint, WorkflowSessionUi,
 };
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::bridge::{self, make_transport_pair};
+use crate::bridge::{self, ChromeSpawner, make_transport_pair};
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
 use crate::loader::{WorkflowCache, WorkflowLibrary};
 use crate::settings::DesktopSettings;
@@ -109,6 +107,10 @@ pub enum Intent {
     EditNewDisplay(String),
     SetFormError(String),
     ClearFormError,
+    StartSession {
+        slug: Slug,
+        workflow: WorkflowId,
+    },
     ActivateSession {
         slug: Slug,
         session: SessionId,
@@ -135,14 +137,6 @@ fn connection_usable(settings: &DesktopSettings) -> bool {
         .is_some_and(|c| !c.addr.trim().is_empty() && !c.token.trim().is_empty())
 }
 
-struct LoadedProject {
-    ui: Box<dyn WorkflowProjectUi>,
-    /// Aborts the workflow's WS bridge task on drop.
-    _bridge: BridgeGuard,
-    _lib: Arc<WorkflowLibrary>,
-    manifest: lutin_workflow_ui::Manifest,
-}
-
 struct LoadedSession {
     ui: Box<dyn WorkflowSessionUi>,
     /// Aborts the session's WS bridge task on drop.
@@ -159,12 +153,9 @@ impl Drop for BridgeGuard {
     }
 }
 
-/// Everything chrome owns about one opened project. Dropping the entry
-/// tears the whole subtree down: workflow UI → workflow bridge,
-/// session UIs → session bridges.
+/// Everything chrome owns about one opened project. Dropping the
+/// entry tears down every loaded session UI (and its WS bridge).
 struct ProjectEntry {
-    /// `None` when the workflow `.so` failed to dlopen.
-    loaded: Option<LoadedProject>,
     /// Sessions reported by CP (mirrors `ListSessions` +
     /// `SessionStarted`/`SessionEnded` broadcasts).
     sessions: Vec<SessionInfo>,
@@ -175,10 +166,6 @@ struct ProjectEntry {
 }
 
 pub enum ChromeIntent {
-    StartSession {
-        project: Slug,
-        workflow: WorkflowId,
-    },
     ActivateSession {
         project: Slug,
         session: SessionId,
@@ -186,22 +173,16 @@ pub enum ChromeIntent {
     Notify(String),
 }
 
-/// Real `ChromeApi` impl handed to every `WorkflowProjectUi` /
-/// `WorkflowSessionUi`. Calls are non-blocking — they push onto an mpsc
-/// the App drains during its frame loop. Cheaply cloneable (it's just a
-/// sender) so the App hands a fresh clone to each render context.
+/// Real `ChromeApi` impl handed to every `WorkflowSessionUi`. Calls
+/// are non-blocking — they push onto an mpsc the App drains during
+/// its frame loop. Cheaply cloneable (it's just a sender) so the App
+/// hands a fresh clone to each render context.
 #[derive(Clone)]
 struct RealChromeApi {
     tx: mpsc::UnboundedSender<ChromeIntent>,
 }
 
 impl ChromeApi for RealChromeApi {
-    fn start_session(&self, project: &Slug, workflow: &WorkflowId) {
-        let _ = self.tx.send(ChromeIntent::StartSession {
-            project: project.clone(),
-            workflow: workflow.clone(),
-        });
-    }
     fn activate_session(&self, project: &Slug, session: &SessionId) {
         let _ = self.tx.send(ChromeIntent::ActivateSession {
             project: project.clone(),
@@ -402,66 +383,18 @@ impl App {
     }
 
     /// Open `slug` in chrome. Inserts an empty `ProjectEntry`
-    /// immediately (so the rest of the UI tracks it) and attempts to
-    /// build the workflow UI from cache. If the cdylib hasn't arrived
-    /// yet, the entry stays in its empty state and a fetch is fired;
-    /// `try_attach_workflow_ui` retries when the cdylib lands.
-    fn load_workflow_for(&mut self, slug: Slug) {
+    /// immediately (so the rest of the UI tracks it) and asks CP for
+    /// the session list. Cdylibs are dlopened lazily when a session
+    /// opens — chrome's per-project decoration (icon, label, "+ New"
+    /// button) reads from `WorkflowInfo` and doesn't need the cdylib.
+    fn open_project(&mut self, slug: Slug) {
         self.projects_state.entry(slug.clone()).or_insert(ProjectEntry {
-            loaded: None,
             sessions: Vec::new(),
             loaded_sessions: HashMap::new(),
             active_session: None,
         });
-        let workflow_id = default_workflow_id();
-        self.try_attach_workflow_ui(&slug, &workflow_id);
         if let Ok(id) = self.send(Request::ListSessions { slug: slug.clone() }) {
             self.pending.insert(id, Pending::ListSessions(slug));
-        }
-    }
-
-    /// Build the project UI from a cached cdylib if available, leave
-    /// the entry empty otherwise. Idempotent — if the entry already
-    /// has a `loaded` UI, this is a no-op. Fires a `GetWorkflowCdylib`
-    /// when the cdylib isn't cached and isn't already in flight.
-    fn try_attach_workflow_ui(&mut self, slug: &Slug, workflow: &WorkflowId) {
-        if self
-            .projects_state
-            .get(slug)
-            .is_some_and(|e| e.loaded.is_some())
-        {
-            return;
-        }
-        let Some(info) = self.workflow_for(workflow).cloned() else {
-            return;
-        };
-        match self.workflow_cache.try_load(workflow, &info.digest) {
-            Ok(Some(lib)) => {
-                let manifest = lib.workflow().manifest();
-                let transport = dummy_transport(&self.tokio);
-                let ui_endpoint = UiProjectEndpoint {
-                    slug: slug.clone(),
-                    workflow: workflow.clone(),
-                    addr: "127.0.0.1:0".parse().unwrap(),
-                    token: AuthToken::new(String::new()),
-                };
-                let no_op = self.tokio.spawn(async {});
-                let ui = lib.workflow().open_project(ui_endpoint, transport);
-                if let Some(entry) = self.entry_mut(slug) {
-                    entry.loaded = Some(LoadedProject {
-                        ui,
-                        _bridge: BridgeGuard(no_op.abort_handle()),
-                        _lib: lib,
-                        manifest,
-                    });
-                }
-            }
-            Ok(None) => {
-                self.request_cdylib_if_needed(workflow);
-            }
-            Err(e) => {
-                self.last_error = Some(format!("workflow load failed: {e}"));
-            }
         }
     }
 
@@ -530,19 +463,6 @@ impl App {
     fn drain_chrome_intents(&mut self) {
         while let Ok(intent) = self.chrome_intent_rx.try_recv() {
             match intent {
-                ChromeIntent::StartSession { project, workflow } => {
-                    match self.send(Request::StartSession {
-                        slug: project.clone(),
-                        workflow,
-                    }) {
-                        Ok(id) => {
-                            self.pending.insert(id, Pending::StartSession(project));
-                        }
-                        Err(e) => {
-                            self.last_error = Some(e.to_string());
-                        }
-                    }
-                }
                 ChromeIntent::ActivateSession { project, session } => {
                     if let Some(entry) = self.entry_mut(&project) {
                         entry.active_session = Some(session);
@@ -552,6 +472,20 @@ impl App {
                 ChromeIntent::Notify(body) => {
                     self.notification = Some(body);
                 }
+            }
+        }
+    }
+
+    fn start_session(&mut self, slug: Slug, workflow: WorkflowId) {
+        match self.send(Request::StartSession {
+            slug: slug.clone(),
+            workflow,
+        }) {
+            Ok(id) => {
+                self.pending.insert(id, Pending::StartSession(slug));
+            }
+            Err(e) => {
+                self.last_error = Some(e.to_string());
             }
         }
     }
@@ -615,20 +549,6 @@ impl App {
                     self.pending_sessions = still_waiting;
                     for d in ready {
                         self.load_session(d.slug, d.session, d.endpoint);
-                    }
-                    let opens: Vec<Slug> = self
-                        .projects_state
-                        .iter()
-                        .filter_map(|(slug, e)| {
-                            if e.loaded.is_none() {
-                                Some(slug.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    for slug in opens {
-                        self.try_attach_workflow_ui(&slug, &id);
                     }
                 }
                 ResponseOk::Sessions(list) => {
@@ -737,7 +657,9 @@ impl App {
             }
         };
 
-        let (transport, bridge_endpoints) = make_transport_pair();
+        let spawner: Arc<dyn lutin_workflow_ui::Spawner> =
+            Arc::new(ChromeSpawner::new(self.tokio.clone()));
+        let (transport, bridge_endpoints) = make_transport_pair(spawner);
         let token = AuthToken::new(ep.token.clone());
         let ui_endpoint = UiSessionEndpoint {
             project: slug.clone(),
@@ -777,7 +699,10 @@ impl App {
                     self.active = Some(slug);
                 }
                 Intent::OpenProject(slug) => {
-                    self.load_workflow_for(slug);
+                    self.open_project(slug);
+                }
+                Intent::StartSession { slug, workflow } => {
+                    self.start_session(slug, workflow);
                 }
                 Intent::DeleteProject(slug) => {
                     if let Err(e) = self.send(Request::DeleteProject { slug }) {
@@ -832,31 +757,13 @@ impl eframe::App for App {
                 intents.extend(draw_left_sidebar(self, ui));
             });
 
-        let active_wants_right = self
-            .active
-            .clone()
-            .and_then(|s| {
-                self.entry(&s)
-                    .and_then(|e| e.loaded.as_ref().map(|lp| lp.manifest.wants_right_sidebar))
-            })
-            .unwrap_or(false);
-        if active_wants_right {
-            egui::Panel::right("chrome-right")
-                .resizable(true)
-                .default_size(260.0)
-                .min_size(200.0)
-                .show_inside(ui, |ui| {
-                    self.render_workflow_slot(Slot::RightSidebar, ui);
-                });
-        } else {
-            egui::Panel::right("chrome-right")
-                .resizable(true)
-                .default_size(260.0)
-                .min_size(200.0)
-                .show_inside(ui, |ui| {
-                    intents.extend(draw_right_sidebar(self, ui));
-                });
-        }
+        egui::Panel::right("chrome-right")
+            .resizable(true)
+            .default_size(260.0)
+            .min_size(200.0)
+            .show_inside(ui, |ui| {
+                intents.extend(draw_right_sidebar(self, ui));
+            });
 
         CentralPanel::default().show_inside(ui, |ui| {
             if self.view_mode == ViewMode::Settings {
@@ -900,28 +807,8 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn render_workflow_slot(&mut self, slot: Slot, ui: &mut egui::Ui) {
-        let Some(slug) = self.active.clone() else {
-            return;
-        };
-        let chrome = self.chrome_api.clone();
-        let Some(entry) = self.entry_mut(&slug) else {
-            return;
-        };
-        let active_session = entry.active_session.clone();
-        let Some(loaded) = entry.loaded.as_mut() else {
-            return;
-        };
-        let ctx = ProjectCtx {
-            chrome: &chrome,
-            slug: &slug,
-            active_session: active_session.as_ref(),
-        };
-        loaded.ui.render(slot, ctx, ui);
-    }
-
     /// Render the active project's session UI (if any) into the Main
-    /// slot. Returns true iff a session UI rendered.
+    /// pane. Returns true iff a session UI rendered.
     fn render_session_main(&mut self, ui: &mut egui::Ui) -> bool {
         let Some(slug) = self.active.clone() else {
             return false;
@@ -941,8 +828,16 @@ impl App {
             slug: &slug,
             session: &session,
         };
-        loaded.ui.render(Slot::Main, ctx, ui);
+        loaded.ui.render(ctx, ui);
         true
+    }
+
+    /// Lookup `WorkflowInfo` (icon + display name) for the workflow
+    /// id chrome uses for a given project. Returns `None` while CP's
+    /// `ListWorkflows` reply is still in flight.
+    fn workflow_info_for(&self, _slug: &Slug) -> Option<&WorkflowInfo> {
+        let id = default_workflow_id();
+        self.workflow_for(&id)
     }
 }
 
@@ -964,7 +859,11 @@ fn draw_top_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
             );
         }
         ui.add_space(16.0);
-        app.render_workflow_slot(Slot::TopBar, ui);
+        if let Some(slug) = &app.active
+            && let Some(info) = app.workflow_info_for(slug)
+        {
+            ui.label(RichText::new(format!("{} {} — {}", info.icon, info.display_name, slug)).strong());
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (label, variant) = match app.view_mode {
                 ViewMode::Projects => ("Settings", lutin_ui::widget::button::Variant::Ghost),
@@ -1072,7 +971,63 @@ fn draw_left_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
         });
     ui.add_space(12.0);
     ui.separator();
-    app.render_workflow_slot(Slot::LeftSidebar, ui);
+    intents.extend(draw_project_sessions_panel(app, ui));
+    intents
+}
+
+/// Per-project session list + "+ New" button for the active project.
+/// Lives in the left sidebar under the projects panel; chrome owns
+/// this directly (the workflow cdylib only renders the Main pane).
+fn draw_project_sessions_panel(app: &App, ui: &mut egui::Ui) -> Vec<Intent> {
+    let mut intents = Vec::new();
+    let Some(slug) = app.active.clone() else {
+        return intents;
+    };
+    let info = app.workflow_info_for(&slug);
+    let workflow_id = default_workflow_id();
+    let header = match info {
+        Some(i) => format!("{} {}", i.icon, i.display_name),
+        None => "Sessions".to_owned(),
+    };
+    panel::Panel::new()
+        .header(header.as_str())
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(button::primary("+ New").small()).clicked() {
+                        intents.push(Intent::StartSession {
+                            slug: slug.clone(),
+                            workflow: workflow_id.clone(),
+                        });
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            let Some(entry) = app.entry(&slug) else {
+                return;
+            };
+            if entry.sessions.is_empty() {
+                ui.label(
+                    RichText::new("no sessions yet")
+                        .color(theme().text.dim)
+                        .small(),
+                );
+                return;
+            }
+            for s in &entry.sessions {
+                let is_active = entry.active_session.as_ref() == Some(&s.id);
+                let mut btn = button::ghost(s.id.to_string()).full_width();
+                if is_active {
+                    btn = btn.variant(lutin_ui::widget::button::Variant::Primary);
+                }
+                if ui.add(btn).clicked() {
+                    intents.push(Intent::ActivateSession {
+                        slug: slug.clone(),
+                        session: s.id.clone(),
+                    });
+                }
+            }
+        });
     intents
 }
 
@@ -1128,21 +1083,16 @@ fn draw_main(app: &mut App, ui: &mut egui::Ui) -> Vec<Intent> {
         return intents;
     }
 
-    let has_loaded = app
-        .entry(&slug)
-        .is_some_and(|e| e.loaded.is_some());
-    if has_loaded {
-        app.render_workflow_slot(Slot::Main, ui);
-        return intents;
-    }
-
     let info = app.projects.iter().find(|p| p.slug == slug).cloned();
     ui.vertical(|ui| {
         if let Some(p) = &info {
             ui.label(RichText::new(p.display_name.as_str()).size(18.0).strong());
             ui.add_space(12.0);
         }
-        ui.label(RichText::new("workflow UI not loaded").color(theme().text.dim));
+        ui.label(
+            RichText::new("Pick a session from the sidebar, or start a new one.")
+                .color(theme().text.dim),
+        );
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             if ui.add(button::danger("Delete")).clicked()
@@ -1193,20 +1143,6 @@ fn draw_session_tabs(app: &App, slug: &Slug, ui: &mut egui::Ui) -> Vec<Intent> {
         }
     });
     intents
-}
-
-/// Phase 4.3 transitional dummy: workflow ProjectUi receives a
-/// `Transport` whose channels go nowhere. Sends are silently consumed
-/// by a parked receiver; reads return `None` immediately because the
-/// matching sender is dropped on the spot. The trait itself is being
-/// removed in Phase 6/cleanup.
-fn dummy_transport(tokio: &tokio::runtime::Handle) -> Transport {
-    let (send, mut send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    // Park the receiver in a never-completing task so sends don't fail
-    // synchronously; the task just drains and drops.
-    tokio.spawn(async move { while send_rx.recv().await.is_some() {} });
-    let (_recv_tx, recv) = mpsc::unbounded_channel::<Vec<u8>>();
-    Transport { send, recv }
 }
 
 fn slug_error(e: &SlugError) -> String {

@@ -158,6 +158,8 @@ impl WorkflowCache {
 }
 
 fn open_workflow(path: &Path) -> Result<WorkflowLibrary, LoadError> {
+    let probe = lutin_workflow_ui::typeid_probe();
+    eprintln!("[desktop]      typeid_probe = {probe:?}");
     // SAFETY: dlopen runs the cdylib's init code; we trust workflows
     // shipped via images vetted by the control-panel.
     let lib = unsafe {

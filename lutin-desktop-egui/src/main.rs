@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use lutin_desktop::{App, DesktopSettings, WorkflowCache};
+use lutin_desktop_egui::{App, DesktopSettings, WorkflowCache};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
