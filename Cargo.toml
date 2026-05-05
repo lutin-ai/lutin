@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["lutin-desktop-egui", "lutin-control-panel", "crates/*"]
+members = [
+  "lutin-desktop-egui",
+  "lutin-desktop/src-tauri",
+  "lutin-control-panel",
+  "crates/*",
+]
 
 [workspace.package]
 edition = "2024"
