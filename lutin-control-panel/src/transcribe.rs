@@ -12,18 +12,18 @@
 //! deserializes into the closed enum so a malicious payload can't
 //! pivot to arbitrary files or hosts.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use futures_util::StreamExt;
 use lutin_control_protocol::{BeamSize, WhisperConfig, WhisperModel};
 use tokio::fs;
 use tracing::{info, warn};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
+
+use crate::downloads::download_to;
 
 /// File-on-disk + remote URL pairing for each `WhisperModel` variant.
 /// Kept in CP rather than the protocol crate because the URL is a
@@ -78,52 +78,9 @@ pub async fn ensure_model(global_config_dir: &Path, model: WhisperModel) -> Resu
         .await
         .with_context(|| format!("create {}", dir.display()))?;
     info!(model = ?model, url = url(model), "downloading whisper model");
-    download_streaming(url(model), &path).await?;
+    download_to(url(model), &path).await?;
     info!(model = ?model, path = %path.display(), "whisper model ready");
     Ok(path)
-}
-
-async fn download_streaming(src: &str, dest: &Path) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60 * 30))
-        .build()?;
-    let response = client.get(src).send().await?.error_for_status()?;
-    let total = response.content_length();
-    let tmp = PathBuf::from(format!("{}.tmp", dest.display()));
-    let tmp_for_open = tmp.clone();
-    let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8);
-    let writer_task = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
-        let mut file = std::fs::File::create(&tmp_for_open)?;
-        let mut written = 0u64;
-        while let Some(chunk) = writer_rx.blocking_recv() {
-            file.write_all(&chunk)?;
-            written += chunk.len() as u64;
-        }
-        file.sync_all()?;
-        Ok(written)
-    });
-
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if writer_tx.send(chunk).await.is_err() {
-            break;
-        }
-    }
-    drop(writer_tx);
-    let written = writer_task
-        .await
-        .map_err(|e| anyhow!("download writer panicked: {e}"))??;
-
-    if let Some(expected) = total
-        && written != expected
-    {
-        return Err(anyhow!(
-            "size mismatch: expected {expected}, wrote {written}"
-        ));
-    }
-    fs::rename(&tmp, dest).await?;
-    Ok(())
 }
 
 /// One-shot whisper.cpp log silencer. Call exactly once at startup —

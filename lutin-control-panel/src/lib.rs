@@ -3,6 +3,7 @@
 //! signing key.
 
 pub mod defaults;
+mod downloads;
 mod registry;
 pub mod session_index;
 pub mod session_summary;
