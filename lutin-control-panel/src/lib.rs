@@ -213,7 +213,7 @@ impl AppState {
                 return Response::Ok(ResponseOk::TranscriptionCancelled);
             }
             Request::EnsureTtsBackend { backend } => {
-                return self.handle_ensure_tts_backend(backend).await;
+                return self.handle_ensure_tts_backend(&backend).await;
             }
             Request::OpenTtsStream { backend } => {
                 return self.handle_open_tts_stream(backend);
@@ -223,7 +223,7 @@ impl AppState {
                 text,
                 speed,
             } => {
-                return self.handle_speak_tts(stream_id, text, speed);
+                return self.handle_speak_tts(stream_id, &text, speed);
             }
             Request::CancelTts { stream_id } => {
                 return self.handle_cancel_tts(stream_id);
@@ -361,7 +361,7 @@ impl AppState {
         }
     }
 
-    async fn handle_ensure_tts_backend(&self, backend: TtsBackend) -> Response {
+    async fn handle_ensure_tts_backend(&self, backend: &TtsBackend) -> Response {
         match self.tts_backends.ensure(backend).await {
             Ok(()) => Response::Ok(ResponseOk::TtsBackendReady),
             Err(e) => Response::Err(ApiError::TtsBackendUnavailable(format!("{e:#}"))),
@@ -378,7 +378,7 @@ impl AppState {
         }
     }
 
-    fn handle_speak_tts(&self, stream_id: TtsStreamId, text: String, speed: TtsSpeed) -> Response {
+    fn handle_speak_tts(&self, stream_id: TtsStreamId, text: &str, speed: TtsSpeed) -> Response {
         if text.len() > MAX_TEXT_LEN {
             return Response::Err(ApiError::TtsLimit(TtsLimit::TextTooLong {
                 got: text.len(),
@@ -389,9 +389,7 @@ impl AppState {
             return Response::Err(ApiError::TtsStreamNotFound(stream_id));
         };
         let TtsBackend::Orpheus { voice, .. } = backend;
-        let voice_token = tts::voice_token(voice);
-        let wire_id = lutin_tts::StreamId(stream_id.0 as u64);
-        if !service.speak(wire_id, &text, voice_token, speed.as_f32()) {
+        if !service.speak(tts::to_worker_id(stream_id), text, tts::voice_token(voice), speed.as_f32()) {
             return Response::Err(ApiError::TtsSynthesis(
                 "tts service rejected speak request".into(),
             ));
@@ -401,16 +399,14 @@ impl AppState {
 
     fn handle_cancel_tts(&self, stream_id: TtsStreamId) -> Response {
         if let Some((service, _)) = self.tts_streams.lookup(stream_id) {
-            service.cancel(lutin_tts::StreamId(stream_id.0 as u64));
+            service.cancel(tts::to_worker_id(stream_id));
         }
         Response::Ok(ResponseOk::TtsCancelled)
     }
 
     fn handle_close_tts_stream(&self, stream_id: TtsStreamId) -> Response {
         if let Some(stream) = self.tts_streams.take(stream_id) {
-            stream
-                .service
-                .close(lutin_tts::StreamId(stream_id.0 as u64));
+            stream.service.close(tts::to_worker_id(stream_id));
         }
         Response::Ok(ResponseOk::TtsStreamClosed)
     }
@@ -426,12 +422,22 @@ async fn tts_sink_pump(
 ) {
     while let Some(ev) = rx.recv().await {
         let frame = match ev {
-            TtsEvent::Audio { stream_id, chunk } => Event::TtsAudio {
-                stream_id: TtsStreamId(stream_id.0 as u32),
-                chunk,
+            TtsEvent::Audio { stream_id, chunk } => match tts::from_worker_id(stream_id) {
+                Some(wire) => Event::TtsAudio {
+                    stream_id: wire,
+                    chunk,
+                },
+                None => {
+                    warn!(?stream_id, "tts audio for out-of-range worker id; dropping");
+                    continue;
+                }
             },
-            TtsEvent::Finished { stream_id } => Event::TtsFinished {
-                stream_id: TtsStreamId(stream_id.0 as u32),
+            TtsEvent::Finished { stream_id } => match tts::from_worker_id(stream_id) {
+                Some(wire) => Event::TtsFinished { stream_id: wire },
+                None => {
+                    warn!(?stream_id, "tts finished for out-of-range worker id; dropping");
+                    continue;
+                }
             },
         };
         // Broadcast `send` only fails when there are zero receivers;

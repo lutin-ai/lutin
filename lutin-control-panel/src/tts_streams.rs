@@ -6,6 +6,7 @@
 //! `lutin_tts::StreamId(u64)` at the boundary into the service so
 //! there's no second mapping to keep in sync.
 
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use lutin_control_protocol::{TtsBackend, TtsLimit, TtsStreamId};
@@ -26,7 +27,11 @@ pub struct Stream {
 }
 
 struct Inner {
-    next_id: u32,
+    /// `NonZeroU32` so the wrap-and-skip-zero invariant lives in the
+    /// type rather than a `.max(1)` trick on every allocation. Wire
+    /// ids stay non-zero, leaving 0 free as an "unset" sentinel if
+    /// future protocol code wants one.
+    next_id: NonZeroU32,
     streams: Vec<Stream>,
 }
 
@@ -39,7 +44,7 @@ impl TtsStreamRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                next_id: 1,
+                next_id: NonZeroU32::new(1).expect("1 != 0"),
                 streams: Vec::new(),
             })),
         }
@@ -59,10 +64,15 @@ impl TtsStreamRegistry {
                 max: MAX_OPEN_STREAMS,
             });
         }
-        let id = TtsStreamId(inner.next_id);
-        // `wrapping_add(_).max(1)` keeps id 0 reserved for a future
-        // "unset" sentinel; same trick the transcription registry uses.
-        inner.next_id = inner.next_id.wrapping_add(1).max(1);
+        let id = TtsStreamId(inner.next_id.get());
+        // Wrap past `u32::MAX` lands on `1`, not `0`, keeping the
+        // `NonZeroU32` invariant. `MAX_OPEN_STREAMS` is 32 and ids
+        // never get reused while live, so the once-per-2³² wrap is
+        // comfortably outside any realistic open-set.
+        inner.next_id = inner
+            .next_id
+            .checked_add(1)
+            .unwrap_or(NonZeroU32::new(1).expect("1 != 0"));
         inner.streams.push(Stream {
             id,
             backend,
