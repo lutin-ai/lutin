@@ -15,12 +15,16 @@ mod overlay;
 mod plugin_protocol;
 mod settings;
 mod shim_protocol;
+mod tts_dispatch;
+mod tts_playback;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lutin_control_protocol::{Request, Response, ResponseOk, SessionId, Slug, WorkflowId};
+use lutin_control_protocol::{
+    Event as CpEvent, Request, Response, ResponseOk, SessionId, Slug, WorkflowId,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
@@ -28,6 +32,7 @@ use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use crate::audio::Capture;
+use crate::tts_playback::TtsPlayback;
 use crate::bridge::{BridgeCmd, BridgeHandle, EngineBytes};
 use crate::bundles::BundleCache;
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
@@ -137,6 +142,12 @@ struct AppState {
     /// for that workflow id. `None` while no plugin iframe is mounted
     /// (e.g. on the Settings tab).
     pub active_session: Mutex<Option<ActiveSession>>,
+    /// TTS playback. Mirrors `audio` in lifecycle — built once at
+    /// startup and held for the app's lifetime so the cpal output
+    /// stream's control thread is constructed exactly once. `None` if
+    /// no output device is available; TTS commands then surface a
+    /// device-unavailable error rather than panicking.
+    pub tts_playback: TtsPlaybackHandle,
 }
 
 /// What the React side reports about the iframe currently in front.
@@ -180,6 +191,54 @@ impl AudioHandle {
     pub fn stop(&self) {
         if let Some(c) = &self.0 {
             c.stop();
+        }
+    }
+}
+
+/// Mirror of `AudioHandle` for the playback side: keeps every call
+/// site infallible and makes the no-output-device case a logged
+/// no-op instead of a panic. CP-side audio chunks for streams whose
+/// playback didn't initialise are silently dropped on enqueue.
+pub struct TtsPlaybackHandle(Option<TtsPlayback>);
+
+impl TtsPlaybackHandle {
+    pub fn new() -> Self {
+        match TtsPlayback::new() {
+            Ok(p) => Self(Some(p)),
+            Err(e) => {
+                warn!(error = %e, "tts playback unavailable; audio chunks will be dropped");
+                Self(None)
+            }
+        }
+    }
+
+    pub fn register(&self, stream_id: lutin_control_protocol::TtsStreamId, session: SessionId) {
+        if let Some(p) = &self.0 {
+            p.register(stream_id, session);
+        }
+    }
+
+    pub fn enqueue(&self, stream_id: lutin_control_protocol::TtsStreamId, chunk: &[u8]) {
+        if let Some(p) = &self.0 {
+            p.enqueue(stream_id, chunk);
+        }
+    }
+
+    pub fn cancel(&self, stream_id: lutin_control_protocol::TtsStreamId) {
+        if let Some(p) = &self.0 {
+            p.cancel(stream_id);
+        }
+    }
+
+    pub fn unregister(&self, stream_id: lutin_control_protocol::TtsStreamId) {
+        if let Some(p) = &self.0 {
+            p.unregister(stream_id);
+        }
+    }
+
+    pub fn set_active_session(&self, active: Option<&SessionId>) {
+        if let Some(p) = &self.0 {
+            p.set_active_session(active);
         }
     }
 }
@@ -551,6 +610,12 @@ fn keybind_backend(state: State<'_, AppState>) -> KeybindBackendInfo {
 /// per-session transcription delivery.
 #[tauri::command]
 fn set_active_session(state: State<'_, AppState>, active: Option<ActiveSession>) {
+    // Mirror the change to the playback module so it can drop queued
+    // audio for streams bound to the previously-active session — held
+    // audio after a context switch is worse than losing it.
+    state
+        .tts_playback
+        .set_active_session(active.as_ref().map(|a| &a.session));
     *state.active_session.lock().expect("active_session poisoned") = active;
 }
 
@@ -671,7 +736,20 @@ async fn drain_updates(
                 set_conn(&state, ConnSnapshot::Error { error: err.clone() });
                 emit(&app, "cp:connect-error", err);
             }
-            CpUpdate::Broadcast(event) => emit(&app, "cp:event", event),
+            CpUpdate::Broadcast(event) => match event {
+                // Audio bytes stay Rust-side: serialising a chunk
+                // through the JS boundary as a JSON number array
+                // would inflate it ~5×, and JS has nothing useful
+                // to do with raw PCM. Route straight to the cpal
+                // playback queue instead.
+                CpEvent::TtsAudio { stream_id, chunk } => {
+                    state.tts_playback.enqueue(stream_id, &chunk);
+                }
+                // Other events (including `TtsFinished`, which is
+                // the workflow's cue to speak the next sentence)
+                // pass through to JS as-is.
+                other => emit(&app, "cp:event", other),
+            },
         }
     }
 }
@@ -739,6 +817,7 @@ pub fn run() {
         active_ptt: Mutex::new(None),
         active_session: Mutex::new(None),
         keybind_backend: OnceLock::new(),
+        tts_playback: TtsPlaybackHandle::new(),
     };
 
     tauri::Builder::default()
@@ -819,6 +898,11 @@ pub fn run() {
             keybind_backend,
             overlay::overlay_test,
             overlay::overlay_current_phase,
+            tts_dispatch::tts_ensure_backend,
+            tts_dispatch::tts_open_stream,
+            tts_dispatch::tts_speak,
+            tts_dispatch::tts_cancel,
+            tts_dispatch::tts_close_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

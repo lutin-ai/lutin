@@ -768,6 +768,14 @@ impl fmt::Display for TranscriptionLimit {
     }
 }
 
+/// Sample rate (Hz) of every PCM chunk carried by `Event::TtsAudio`,
+/// regardless of TTS backend. Today's only backend (Orpheus + SNAC)
+/// is fixed at 24 kHz; future backends are expected to resample to
+/// match before emitting on the wire. Chunk format is mono i16
+/// little-endian — consumers (the desktop playback module, any
+/// future cloud bridge) resample from this rate at their boundary.
+pub const TTS_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
+
 /// Server-pushed events, fanned out to every authenticated client.
 /// Session events carry `slug` so a single CP WS conn carries traffic
 /// for every project the client cares about; the client filters by slug.
@@ -779,8 +787,8 @@ pub enum Event {
     SessionEnded { slug: Slug, session: SessionId },
     /// Synthesised audio frame for an open TTS stream. Broadcast —
     /// every authenticated client receives it; clients filter by the
-    /// `stream_id` they own. `chunk` is raw PCM (24 kHz mono i16
-    /// little-endian for the Orpheus backend).
+    /// `stream_id` they own. `chunk` is raw PCM (mono i16 little-
+    /// endian) at `TTS_AUDIO_SAMPLE_RATE_HZ`.
     TtsAudio {
         stream_id: TtsStreamId,
         chunk: Vec<u8>,

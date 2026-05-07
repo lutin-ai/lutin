@@ -26,7 +26,23 @@ API later without churning callers.
   whisper + TTS share one downloader. `MAX_TEXT_LEN = 4096`
   enforced at `SpeakTts`. Voice enum → backend token mapping
   lives in `tts::voice_token` at the CP boundary.
-- **Slice 4 — desktop playback.** Pending.
+- **Slice 4 — desktop playback. DONE.** New `tts_playback.rs`
+  module owns the cpal output stream on a dedicated control thread
+  (mirrors `audio.rs`'s !Send Stream pattern), per-stream
+  `VecDeque<f32>` queues at device rate with linear-resampler carry
+  state (`resample_pos`, `last_sample`) so chunk-seam aliasing is
+  avoided. Resample-on-enqueue (not in callback) so the audio
+  callback only mixes + clamps. `set_active_session` drops queues
+  for streams bound to the previously-active session; chunks
+  arriving for non-active sessions are dropped on enqueue with a
+  rate-limited debug log. New `tts_dispatch.rs` exposes
+  `tts_ensure_backend` / `tts_open_stream` / `tts_speak` /
+  `tts_cancel` / `tts_close_stream` Tauri commands. `tts_cancel`
+  drains the local queue *before* the CP round-trip so no tail
+  audio plays after a stop. `Event::TtsAudio` is intercepted in
+  `drain_updates` and routed to playback — never crosses the JS
+  boundary; `Event::TtsFinished` is forwarded so workflows know
+  synthesis ended. Capability gate is deferred to slice 5.
 - **Slice 5 — workflow shim + capability.** Pending.
 
 ## Locked-in design choices
