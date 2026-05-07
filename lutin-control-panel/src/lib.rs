@@ -8,14 +8,17 @@ pub mod session_index;
 pub mod session_summary;
 pub mod sessions;
 mod settings_io;
+pub mod transcribe;
+pub mod transcription_streams;
 pub mod workflow_images;
 
 use futures_util::{SinkExt, StreamExt};
 use lutin_auth::{Scope, SigningKey, VerifyingKey, verify};
 use lutin_control_protocol::{
-    self as cp, ApiError, DisplayName, Event, ProjectInfo, Request, Response, ResponseOk,
-    SessionId, Slug, WorkflowId,
+    self as cp, ApiError, DisplayName, Event, MonoPcm16k, ProjectInfo, Request, Response,
+    ResponseOk, SessionId, Slug, TranscriptionStreamId, WhisperConfig, WorkflowId,
 };
+use std::sync::Arc;
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use std::path::{Path, PathBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -107,6 +110,12 @@ pub struct AppState {
     pub issuer: VerifyingKey,
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
+    /// Streaming-transcription registry. Lives outside the supervisor
+    /// task because chunk appends are independent of project state and
+    /// shouldn't serialise behind every other CP command — and because
+    /// `FinishTranscription` runs whisper for several seconds, which
+    /// would block the whole supervisor if routed through it.
+    transcription: transcription_streams::TranscriptionRegistry,
 }
 
 pub struct Supervisor {
@@ -121,11 +130,20 @@ impl Supervisor {
         let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_BUF);
         let (ev_tx, _) = broadcast::channel(CHANNEL_BUF);
         let (sd_tx, sd_rx) = oneshot::channel();
+        // CP-global whisper context. Process-wide singleton so a
+        // second connection (or a re-press during finish) reuses the
+        // already-loaded model instead of rebuilding it.
+        transcribe::install_log_callback();
+        let transcriber = Arc::new(transcribe::WhisperTranscriber::new(
+            config.global_config_dir.clone(),
+        ));
+        let transcription = transcription_streams::TranscriptionRegistry::new(transcriber);
         let join = tokio::spawn(supervisor(cmd_rx, ev_tx.clone(), sd_rx, config));
         let state = AppState {
             issuer,
             commands: cmd_tx,
             events: ev_tx,
+            transcription,
         };
         Self {
             state,
@@ -144,6 +162,26 @@ impl Supervisor {
 
 impl AppState {
     async fn dispatch(&self, req: Request) -> Response {
+        // Handle transcription RPCs directly without going through
+        // the supervisor — each connection has its own task, and
+        // routing inference through a serialised command queue would
+        // make a single PTT block every other CP request.
+        match req {
+            Request::OpenTranscription { config } => {
+                return self.handle_open_transcription(config);
+            }
+            Request::TranscribeChunk { stream_id, samples } => {
+                return self.handle_transcribe_chunk(stream_id, samples);
+            }
+            Request::FinishTranscription { stream_id } => {
+                return self.handle_finish_transcription(stream_id).await;
+            }
+            Request::CancelTranscription { stream_id } => {
+                self.transcription.cancel(stream_id);
+                return Response::Ok(ResponseOk::TranscriptionCancelled);
+            }
+            _ => {}
+        }
         let (reply, rx) = oneshot::channel();
         let cmd = match req {
             Request::ListProjects => Command::ListProjects { reply },
@@ -183,6 +221,12 @@ impl AppState {
             Request::GetWorkflowBundle { id } => Command::GetWorkflowBundle { id, reply },
             Request::ListProviders => Command::ListProviders { reply },
             Request::SetProviders { providers } => Command::SetProviders { providers, reply },
+            Request::OpenTranscription { .. }
+            | Request::TranscribeChunk { .. }
+            | Request::FinishTranscription { .. }
+            | Request::CancelTranscription { .. } => {
+                unreachable!("transcription requests are handled before this match");
+            }
         };
         if self.commands.send(cmd).await.is_err() {
             return Response::Err(ApiError::Supervisor("supervisor stopped".into()));
@@ -190,6 +234,74 @@ impl AppState {
         match rx.await {
             Ok(r) => r,
             Err(_) => Response::Err(ApiError::Supervisor("supervisor dropped reply".into())),
+        }
+    }
+
+    fn handle_open_transcription(&self, config: WhisperConfig) -> Response {
+        let model = config.model;
+        let stream_id = match self.transcription.open(config) {
+            Ok(id) => id,
+            Err(limit) => return Response::Err(ApiError::TranscriptionLimit(limit)),
+        };
+        // Kick off model warmup so by the time the user finishes
+        // talking the context is loaded. Failures are non-fatal —
+        // `FinishTranscription` re-runs `ensure_ctx` and surfaces any
+        // real error there.
+        let transcriber = self.transcription.transcriber().clone();
+        tokio::spawn(async move {
+            if let Err(e) = transcriber.warmup(model).await {
+                warn!(error = %e, "whisper warmup after OpenTranscription failed");
+            }
+        });
+        Response::Ok(ResponseOk::TranscriptionOpened { stream_id })
+    }
+
+    fn handle_transcribe_chunk(
+        &self,
+        stream_id: TranscriptionStreamId,
+        samples: MonoPcm16k,
+    ) -> Response {
+        match self.transcription.append(stream_id, samples.as_slice()) {
+            Ok(transcription_streams::AppendOutcome::Appended) => {
+                Response::Ok(ResponseOk::ChunkAccepted)
+            }
+            Ok(transcription_streams::AppendOutcome::StreamNotFound) => {
+                Response::Err(ApiError::TranscriptionStreamNotFound(stream_id))
+            }
+            Err(limit) => Response::Err(ApiError::TranscriptionLimit(limit)),
+        }
+    }
+
+    async fn handle_finish_transcription(&self, stream_id: TranscriptionStreamId) -> Response {
+        let Some(stream) = self.transcription.take(stream_id) else {
+            return Response::Err(ApiError::TranscriptionStreamNotFound(stream_id));
+        };
+        match self
+            .transcription
+            .transcriber()
+            .transcribe(stream.samples, &stream.config)
+            .await
+        {
+            Ok(text) => Response::Ok(ResponseOk::Transcription { text }),
+            Err(e) => {
+                // Distinguish model-availability errors from inference
+                // errors so the desktop can surface different messages
+                // and decide whether retrying makes sense. The error
+                // chain from `ensure_model` runs through
+                // `download_streaming` (reqwest, fs, size mismatch);
+                // anything below the inference call is a model issue.
+                let chain = format!("{e:#}");
+                let looks_like_model_issue = e.is::<reqwest::Error>()
+                    || e.is::<std::io::Error>()
+                    || chain.contains("download")
+                    || chain.contains("size mismatch")
+                    || chain.contains("load whisper model");
+                if looks_like_model_issue {
+                    Response::Err(ApiError::WhisperModelUnavailable(chain))
+                } else {
+                    Response::Err(ApiError::WhisperInference(chain))
+                }
+            }
         }
     }
 }

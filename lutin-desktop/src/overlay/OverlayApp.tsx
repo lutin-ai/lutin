@@ -6,7 +6,7 @@ import styles from "./overlay.module.css";
 /// Mirrors the Rust `OverlayPhase` enum 1:1 — externally tagged on
 /// `kind` because the `error` variant carries a message.
 type OverlayPhase =
-  | { kind: "listening" }
+  | { kind: "listening"; mib: number; elapsed_ms: number }
   | { kind: "transcribing" }
   | { kind: "done" }
   | { kind: "error"; message: string };
@@ -17,6 +17,17 @@ const PHASE_LABEL: Record<OverlayPhase["kind"], string> = {
   done: "Copied",
   error: "Error",
 };
+
+/// Format an elapsed milliseconds count as `m:ss` (or `ss s` under
+/// 60s). Whole-second resolution is plenty for a glanceable readout
+/// — sub-second ticks would just be noise on the pill.
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${rem.toString().padStart(2, "0")}`;
+}
 
 const PHASE_DOT: Record<OverlayPhase["kind"], string> = {
   listening: "listening",
@@ -57,8 +68,14 @@ export function OverlayApp() {
   // Rust always shows the window in the `Listening` phase first, so
   // this matches the actual state during the brief window before the
   // phase event reaches us — nothing weird flashes on screen.
-  const effective: OverlayPhase = phase ?? { kind: "listening" };
-  const label = effective.kind === "error" ? effective.message : PHASE_LABEL[effective.kind];
+  const effective: OverlayPhase =
+    phase ?? { kind: "listening", mib: 0, elapsed_ms: 0 };
+  const label =
+    effective.kind === "error"
+      ? effective.message
+      : effective.kind === "listening"
+      ? `${PHASE_LABEL.listening} · ${formatElapsed(effective.elapsed_ms)} · ${effective.mib.toFixed(2)} MiB`
+      : PHASE_LABEL[effective.kind];
   const dot = PHASE_DOT[effective.kind];
 
   return (

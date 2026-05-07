@@ -241,6 +241,171 @@ pub enum Request {
     SetProviders {
         providers: Vec<ProviderConfig>,
     },
+    /// Open a streaming transcription. Desktop calls this on PTT down,
+    /// then pumps `TranscribeChunk` frames carrying mic samples while
+    /// the key is held. Returns a `TranscriptionStreamId` that scopes
+    /// subsequent chunk + finish + cancel calls.
+    ///
+    /// Whisper inference runs CP-side so the desktop doesn't need a
+    /// model on disk and isn't bound by its memory ceiling. Config is
+    /// per-stream rather than persisted CP-side: each desktop holds
+    /// its own user prefs and just ships them along.
+    OpenTranscription {
+        config: WhisperConfig,
+    },
+    /// Append `samples` to the open stream. Wire format is
+    /// `MonoPcm16k`: 16 kHz mono signed PCM, the only shape whisper
+    /// accepts. The newtype carries that invariant from the cpal
+    /// callback through to CP — neither side has to re-derive it
+    /// from a doc-comment. Serialised transparently as `Vec<i16>` so
+    /// the wire bytes are identical to a bare slice.
+    ///
+    /// Acked with `ChunkAccepted`. The desktop's pump task awaits
+    /// each `cp_dispatch` before reading the next chunk from its
+    /// audio receiver, so chunks are naturally serialised over the
+    /// CP connection at one in flight per stream — that's the
+    /// backpressure surface; the ack body itself carries no
+    /// payload because the rate-limit signal is "did the call
+    /// resolve."
+    TranscribeChunk {
+        stream_id: TranscriptionStreamId,
+        samples: MonoPcm16k,
+    },
+    /// PTT released. CP runs whisper over the full accumulated buffer
+    /// and replies with the decoded text. The stream is consumed —
+    /// future chunk/finish calls against this id return
+    /// `TranscriptionStreamNotFound`.
+    FinishTranscription {
+        stream_id: TranscriptionStreamId,
+    },
+    /// User cancelled mid-capture (e.g. tapped the key, immediate
+    /// release, or chrome teardown). CP drops the buffer without
+    /// running inference. Idempotent — a stream that's already gone
+    /// returns `Cancelled` rather than erroring.
+    CancelTranscription {
+        stream_id: TranscriptionStreamId,
+    },
+}
+
+/// Opaque handle for a streaming transcription. CP allocates these
+/// monotonically; the desktop just echoes the value back. `u32` is
+/// plenty — at most a handful of streams live at once and the counter
+/// resets every CP boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TranscriptionStreamId(pub u32);
+
+/// 16 kHz mono signed PCM — the only audio shape whisper accepts.
+///
+/// Constructed once at the cpal capture boundary, after resampling
+/// + downmixing; carried through the desktop's chunk pump and the
+/// CP-side stream buffer without any further validation. Storing the
+/// invariant in the type means a downstream `&MonoPcm16k` is *proof*
+/// of the format rather than a doc-comment promise.
+///
+/// Wire format is the inner `Vec<i16>` exactly — `#[serde(transparent)]`
+/// — so this newtype is free at the protocol layer and trivially
+/// removable if the contract ever loosens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MonoPcm16k(Vec<i16>);
+
+impl MonoPcm16k {
+    /// Take ownership of `samples` already known to be 16 kHz mono
+    /// PCM. The capture pipeline calls this exactly once per chunk;
+    /// downstream code just borrows.
+    pub fn from_samples(samples: Vec<i16>) -> Self {
+        Self(samples)
+    }
+
+    pub fn as_slice(&self) -> &[i16] {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> Vec<i16> {
+        self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Closed catalogue of whisper.cpp models CP knows how to download.
+/// Mirrors the on-disk filename and Hugging Face URL so a malicious
+/// JSON payload can't pivot to arbitrary files or hosts. Add new
+/// entries here, never accept free-form filenames over the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhisperModel {
+    LargeV3Turbo,
+    DistilLargeV3,
+}
+
+impl Default for WhisperModel {
+    fn default() -> Self {
+        Self::LargeV3Turbo
+    }
+}
+
+/// Sampling strategy for one transcription. `Greedy` is fastest;
+/// `Beam(n)` trades CPU for accuracy. Persisted as a plain integer so
+/// the JSON config stays human-editable: `0` and `1` round-trip to
+/// `Greedy`, values >=2 become `Beam(n)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeamSize {
+    Greedy,
+    Beam(std::num::NonZeroU8),
+}
+
+impl Default for BeamSize {
+    fn default() -> Self {
+        Self::Beam(std::num::NonZeroU8::new(5).expect("5 != 0"))
+    }
+}
+
+impl Serialize for BeamSize {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Greedy => 1u8.serialize(s),
+            Self::Beam(n) => n.get().serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BeamSize {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u8::deserialize(d)?;
+        Ok(match n {
+            0 | 1 => Self::Greedy,
+            n => Self::Beam(std::num::NonZeroU8::new(n).expect("n > 1")),
+        })
+    }
+}
+
+/// Per-stream transcription parameters. The desktop holds the user
+/// prefs and ships them with `OpenTranscription` so CP stays
+/// stateless across stream lifetimes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WhisperConfig {
+    pub model: WhisperModel,
+    /// Whisper language code ("en", "sv", …) or `None` for autodetect.
+    pub language: Option<String>,
+    pub beam_size: BeamSize,
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self {
+            model: WhisperModel::default(),
+            language: None,
+            beam_size: BeamSize::default(),
+        }
+    }
 }
 
 /// Plain DTO mirroring `lutin_settings::ProviderConfig`. Defined here
@@ -317,6 +482,23 @@ pub enum ResponseOk {
     Providers(Vec<ProviderConfig>),
     /// Reply to `SetProviders`.
     ProvidersSaved,
+    /// Reply to `OpenTranscription`.
+    TranscriptionOpened {
+        stream_id: TranscriptionStreamId,
+    },
+    /// Reply to `TranscribeChunk`. Carries no payload — the desktop
+    /// uses these as ack pacing for the next chunk.
+    ChunkAccepted,
+    /// Reply to `FinishTranscription`. `text` is the decoded output;
+    /// empty string when whisper produced nothing usable (silence,
+    /// sub-threshold clip).
+    Transcription {
+        text: String,
+    },
+    /// Reply to `CancelTranscription`. Idempotent — fires for both
+    /// "stream existed and was cancelled" and "stream id was already
+    /// gone".
+    TranscriptionCancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -333,6 +515,53 @@ pub enum ApiError {
     SessionNotFound(SessionId),
     #[error("settings: {0}")]
     Settings(String),
+    #[error("transcription stream not found: {0:?}")]
+    TranscriptionStreamNotFound(TranscriptionStreamId),
+    /// Wire-bound limits: chunk too large, or per-connection stream
+    /// quota exhausted. Carries the offending value so a misbehaving
+    /// client can self-diagnose.
+    #[error("transcription limit exceeded: {0}")]
+    TranscriptionLimit(TranscriptionLimit),
+    /// Whisper model file is not available locally and a download
+    /// was attempted but failed (network, disk, validation). Distinct
+    /// from `Inference` so the desktop can surface a different
+    /// message and consider retrying.
+    #[error("whisper model unavailable: {0}")]
+    WhisperModelUnavailable(String),
+    /// Whisper inference itself failed (decode error, context
+    /// rejected the audio, internal panic). Generic catch-all for the
+    /// last leg of the pipeline.
+    #[error("whisper inference: {0}")]
+    WhisperInference(String),
+}
+
+/// Specific limit a `TranscribeChunk` / `OpenTranscription` request
+/// blew through. Kept as a small enum (rather than a number + label)
+/// so the desktop can switch on the cause without parsing a string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TranscriptionLimit {
+    /// `samples.len()` exceeded `MAX_CHUNK_SAMPLES`. The protocol
+    /// doesn't fix the constant — CP picks it; the desktop just
+    /// reads the cap from the error.
+    ChunkTooLarge { got: usize, max: usize },
+    /// Per-connection open-stream count would exceed
+    /// `MAX_OPEN_STREAMS_PER_CONN`. Almost always a desktop bug
+    /// (failure to `Cancel`/`Finish`); user-visible only as a
+    /// "transcription rejected" toast.
+    TooManyStreams { max: usize },
+}
+
+impl fmt::Display for TranscriptionLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ChunkTooLarge { got, max } => {
+                write!(f, "chunk too large: {got} samples > max {max}")
+            }
+            Self::TooManyStreams { max } => {
+                write!(f, "too many open streams (max {max} per connection)")
+            }
+        }
+    }
 }
 
 /// Server-pushed events, fanned out to every authenticated client.
@@ -394,5 +623,105 @@ mod tests {
     fn err_response_roundtrip() {
         let r = Response::Err(ApiError::NotFound(Slug::parse("x").unwrap()));
         assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn open_transcription_roundtrip() {
+        let r = Request::OpenTranscription {
+            config: WhisperConfig {
+                model: WhisperModel::DistilLargeV3,
+                language: Some("en".into()),
+                beam_size: BeamSize::Beam(std::num::NonZeroU8::new(3).unwrap()),
+            },
+        };
+        assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn transcribe_chunk_roundtrip() {
+        let r = Request::TranscribeChunk {
+            stream_id: TranscriptionStreamId(7),
+            samples: MonoPcm16k::from_samples(vec![0, 1, -1, i16::MAX, i16::MIN]),
+        };
+        assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn finish_and_cancel_transcription_roundtrip() {
+        let f = Request::FinishTranscription {
+            stream_id: TranscriptionStreamId(42),
+        };
+        assert_eq!(decode::<Request>(&encode(&f).unwrap()).unwrap(), f);
+        let c = Request::CancelTranscription {
+            stream_id: TranscriptionStreamId(42),
+        };
+        assert_eq!(decode::<Request>(&encode(&c).unwrap()).unwrap(), c);
+    }
+
+    #[test]
+    fn transcription_response_variants_roundtrip() {
+        for r in [
+            Response::Ok(ResponseOk::TranscriptionOpened {
+                stream_id: TranscriptionStreamId(1),
+            }),
+            Response::Ok(ResponseOk::ChunkAccepted),
+            Response::Ok(ResponseOk::Transcription {
+                text: "hello world".into(),
+            }),
+            Response::Ok(ResponseOk::TranscriptionCancelled),
+        ] {
+            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn transcription_error_variants_roundtrip() {
+        for r in [
+            Response::Err(ApiError::TranscriptionStreamNotFound(
+                TranscriptionStreamId(99),
+            )),
+            Response::Err(ApiError::TranscriptionLimit(
+                TranscriptionLimit::ChunkTooLarge {
+                    got: 200_000,
+                    max: 160_000,
+                },
+            )),
+            Response::Err(ApiError::TranscriptionLimit(
+                TranscriptionLimit::TooManyStreams { max: 32 },
+            )),
+            Response::Err(ApiError::WhisperModelUnavailable("404 from hf".into())),
+            Response::Err(ApiError::WhisperInference("decode failed".into())),
+        ] {
+            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    /// `BeamSize` has hand-rolled serde mapping `0|1 → Greedy`,
+    /// `≥2 → Beam(n)`. Easy to break by reordering the match arms;
+    /// pin every relevant value.
+    #[test]
+    fn beam_size_serde() {
+        // Greedy serialises as `1`.
+        let g_bytes = encode(&BeamSize::Greedy).unwrap();
+        assert_eq!(g_bytes, encode(&1u8).unwrap());
+        assert_eq!(decode::<BeamSize>(&g_bytes).unwrap(), BeamSize::Greedy);
+
+        // `0` deserialises back to Greedy.
+        let zero = encode(&0u8).unwrap();
+        assert_eq!(decode::<BeamSize>(&zero).unwrap(), BeamSize::Greedy);
+
+        // Beam(5) round-trips.
+        let b5 = BeamSize::Beam(std::num::NonZeroU8::new(5).unwrap());
+        assert_eq!(decode::<BeamSize>(&encode(&b5).unwrap()).unwrap(), b5);
+    }
+
+    /// `MonoPcm16k` is `#[serde(transparent)]` — confirm the wire
+    /// bytes equal those of a bare `Vec<i16>`. Catches accidental
+    /// addition of a wrapper variant or rename.
+    #[test]
+    fn mono_pcm_transparent() {
+        let raw: Vec<i16> = vec![10, 20, 30, -40];
+        let wrapped = MonoPcm16k::from_samples(raw.clone());
+        assert_eq!(encode(&wrapped).unwrap(), encode(&raw).unwrap());
     }
 }

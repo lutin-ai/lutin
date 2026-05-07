@@ -122,31 +122,6 @@ export async function setActiveSession(active: ActiveSession | null): Promise<vo
   return invoke("set_active_session", { active });
 }
 
-/// Closed set, mirrors Rust `WhisperModel`. Adding a model here
-/// requires a Rust catalogue change too — the JSON tag is enforced by
-/// serde on the Rust side.
-export type WhisperModel = "large-v3-turbo" | "distil-large-v3";
-
-export type WhisperModelInfo = {
-  model: WhisperModel;
-  filename: string;
-  display_name: string;
-};
-
-export async function whisperKnownModels(): Promise<WhisperModelInfo[]> {
-  return invoke("whisper_known_models");
-}
-
-export async function whisperLocalModels(): Promise<WhisperModelInfo[]> {
-  return invoke("whisper_local_models");
-}
-
-/// Force-download a known whisper model. First call on `large-v3-turbo`
-/// pulls ~1.6 GB, so caller is expected to surface progress UI.
-export async function whisperEnsureModel(model: WhisperModel): Promise<void> {
-  return invoke("whisper_ensure_model", { model });
-}
-
 type EventHandlers = {
   onConnected?: () => void;
   onDisconnected?: () => void;

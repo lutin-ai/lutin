@@ -35,11 +35,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
 cpal = "0.17"
-arboard = "3"
+# `wayland-data-control` makes arboard talk wlr-data-control directly
+# when `WAYLAND_DISPLAY` is set, instead of falling back to XWayland's
+# X11 clipboard. Without it, copies on Hyprland/wlroots compositors
+# land on the XWayland clipboard only and native Wayland apps never see
+# them (manifests as "PTT-to-clipboard does nothing when pasting").
+arboard = { version = "3", features = ["wayland-data-control"] }
 async-trait = "0.1"
-whisper-rs = { version = "0.16", features = ["vulkan"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-bytes = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Wayland compositors don't allow X11-style global key grabs. Under

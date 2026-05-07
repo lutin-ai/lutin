@@ -34,6 +34,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 libc = "0.2"
 dotenvy = "0.15"
 getrandom = "0.3"
+whisper-rs = { version = "0.16", features = ["vulkan"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+bytes = "1"
+dirs = "5"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full"] }

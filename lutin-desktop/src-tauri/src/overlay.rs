@@ -30,12 +30,17 @@ use tracing::{info, warn};
 const OVERLAY_LABEL: &str = "overlay";
 
 /// What the pill displays. Mirrors the JS-side `OverlayPhase` 1:1.
-/// Externally tagged on `kind` so the `Error` variant can carry a
-/// message without a wrapper.
+/// Externally tagged on `kind` so each variant can carry its own
+/// payload without a wrapper.
+///
+/// `Listening` updates several times per second from the chunk pump
+/// in `dispatch.rs` — `mib` is bytes shipped to CP so far, and
+/// `elapsed_ms` is wall-clock since PTT down. Both are read-only
+/// stats fed to the overlay pill.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OverlayPhase {
-    Listening,
+    Listening { mib: f32, elapsed_ms: u64 },
     Transcribing,
     Done,
     Error { message: String },
@@ -59,6 +64,16 @@ pub fn overlay_current_phase() -> Option<OverlayPhase> {
 /// hide captures the generation it saw and bails if the live value
 /// has moved on.
 static HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Update the cached phase without emitting an event or touching the
+/// window. Used by the chunk pump in `dispatch.rs` to publish live
+/// `Listening` stats — which fire many times per second — without
+/// flooding Tauri's event bus or thrashing `win.show()`. The JS
+/// overlay polls `overlay_current_phase` every 100 ms, so the update
+/// lands on the next tick.
+pub fn update<R: Runtime>(_app: &AppHandle<R>, phase: OverlayPhase) {
+    *LAST_PHASE.lock().expect("overlay phase mutex poisoned") = Some(phase);
+}
 
 /// Make the overlay visible (if it isn't already) and emit the
 /// current phase. Idempotent on rapid repeat calls — Tauri's `show`
@@ -90,7 +105,7 @@ pub fn show<R: Runtime>(app: &AppHandle<R>, phase: OverlayPhase) {
 /// confirms whether the window exists at all.
 #[tauri::command]
 pub fn overlay_test(app: AppHandle) {
-    show(&app, OverlayPhase::Listening);
+    show(&app, OverlayPhase::Listening { mib: 0.0, elapsed_ms: 0 });
     hide_after(&app, 2_000);
 }
 

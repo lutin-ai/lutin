@@ -15,7 +15,6 @@ mod overlay;
 mod plugin_protocol;
 mod settings;
 mod shim_protocol;
-mod transcribe;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -32,10 +31,8 @@ use crate::audio::Capture;
 use crate::bridge::{BridgeCmd, BridgeHandle, EngineBytes};
 use crate::bundles::BundleCache;
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
-use std::sync::Arc;
 
 use crate::settings::{ConnectionProfile, DesktopSettings};
-use crate::transcribe::{WhisperModel, WhisperTranscriber};
 
 /// Which backend is delivering global hotkey events. Picked at
 /// startup based on session type and a successful portal handshake;
@@ -124,12 +121,15 @@ struct AppState {
     /// is available — hotkey actions log and no-op in that case rather
     /// than panicking.
     pub audio: AudioHandle,
-    /// Local whisper.cpp transcriber. `Arc` so background warmup
-    /// tasks can hold their own clone without contending on the live
-    /// dispatch path. The transcriber reads its config from
-    /// `settings.whisper` per call rather than caching it, so there's
-    /// no SSoT split between the persisted file and the loaded state.
-    pub transcriber: Arc<WhisperTranscriber>,
+    /// In-flight PTT bookkeeping. `Some` between `ptt_down` and
+    /// `ptt_up`; lives on `AppState` (not a module-level static) so
+    /// it's testable, scoped to the app's lifetime, and cleanly torn
+    /// down with the rest of the state. `Mutex<Option<…>>` rather
+    /// than an actor task because the lock is only ever held for a
+    /// single replace/take (no `.await` spans), and the actor pattern
+    /// would multiply the channel/task plumbing for what's
+    /// fundamentally a one-slot register.
+    pub active_ptt: std::sync::Mutex<Option<dispatch::ActivePtt>>,
     /// What the chrome currently considers "active" — populated by
     /// `set_active_session` from `<PluginIframe>`'s mount/unmount
     /// hooks. Dispatch reads this to resolve `Target::ActiveWorkflow`
@@ -154,7 +154,7 @@ pub struct ActiveSession {
 /// Wrapper around `Option<Capture>` so `dispatch.rs` can unconditionally
 /// call `audio.start()` / `audio.stop()` whether or not a mic is
 /// available. Keeps the call sites readable; the no-mic case logs once
-/// at startup and silently no-ops thereafter.
+/// at startup and `start()` returns `None` so dispatch falls through.
 pub struct AudioHandle(Option<Capture>);
 
 impl AudioHandle {
@@ -168,16 +168,18 @@ impl AudioHandle {
         }
     }
 
-    pub fn start(&self) {
-        if let Some(c) = &self.0 {
-            c.start();
-        }
+    /// Arm capture and return the chunk receiver, or `None` when no
+    /// mic is available. Caller drives the receiver to completion (or
+    /// drops it) and pairs it with `stop()`.
+    pub fn start(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<lutin_control_protocol::MonoPcm16k>> {
+        self.0.as_ref().map(|c| c.start())
     }
 
-    pub fn stop(&self) -> Vec<f32> {
-        match &self.0 {
-            Some(c) => c.stop(),
-            None => Vec::new(),
+    pub fn stop(&self) {
+        if let Some(c) = &self.0 {
+            c.stop();
         }
     }
 }
@@ -201,11 +203,36 @@ fn profile_to_config(profile: &ConnectionProfile) -> Result<Option<CpConfig>, St
     Ok(Some(CpConfig { url, token }))
 }
 
+/// Why a `cp_dispatch` couldn't deliver a `Response`. Distinct from
+/// `Response::Err(ApiError)` — that's CP returning a typed
+/// application error; this enum is *transport* failure (CP wasn't
+/// connected, or the pending entry was dropped before the reply
+/// arrived). Two-variant: there's nothing else that can go wrong at
+/// this layer, and stringly-typed transport errors made dispatch
+/// site code show opaque messages on the listening overlay.
+#[derive(Debug, Clone)]
+pub enum TransportError {
+    NotConnected,
+    Cancelled,
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => f.write_str("control panel not connected"),
+            Self::Cancelled => f.write_str("request cancelled"),
+        }
+    }
+}
+
 /// Send `request` to CP and await its `Response`. Lower-level helper
 /// used by both the JS-facing `cp_send` command and Rust commands
 /// (e.g. `workflow_session_open`) that need to call CP without
 /// round-tripping through JS.
-async fn cp_dispatch(state: &AppState, request: Request) -> Result<Response, String> {
+pub(crate) async fn cp_dispatch(
+    state: &AppState,
+    request: Request,
+) -> Result<Response, TransportError> {
     let id = state.alloc_request_id();
     let (tx, rx) = oneshot::channel();
     state
@@ -223,14 +250,18 @@ async fn cp_dispatch(state: &AppState, request: Request) -> Result<Response, Str
             .lock()
             .expect("pending mutex poisoned")
             .remove(&id.0);
-        return Err("control panel not connected".into());
+        return Err(TransportError::NotConnected);
     }
-    rx.await.map_err(|_| "request cancelled".to_string())
+    rx.await.map_err(|_| TransportError::Cancelled)
 }
 
 #[tauri::command]
 async fn cp_send(state: State<'_, AppState>, request: Request) -> Result<Response, String> {
-    cp_dispatch(&state, request).await
+    // The Tauri command boundary is the one place where we collapse
+    // the typed transport error back to a string — JS callers just
+    // treat the failure as opaque. Internal Rust callers consume
+    // `cp_dispatch` directly and pattern-match on the typed enum.
+    cp_dispatch(&state, request).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -287,7 +318,8 @@ async fn workflow_open_plugin(
                 &state,
                 Request::GetWorkflowBundle { id: workflow.clone() },
             )
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
             let bytes = match resp {
                 Response::Ok(ResponseOk::WorkflowBundle { digest: got, bytes, .. }) => {
                     if got != digest {
@@ -345,7 +377,8 @@ async fn workflow_session_open(
         &state,
         Request::OpenSession { slug: slug.clone(), session: session.clone() },
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
     let endpoint = match open_resp {
         Response::Ok(ResponseOk::SessionOpened(ep)) => ep,
         Response::Ok(other) => return Err(format!("unexpected response: {other:?}")),
@@ -358,7 +391,8 @@ async fn workflow_session_open(
                 &state,
                 Request::ResumeSession { slug, session: session.clone() },
             )
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
             match resume_resp {
                 Response::Ok(ResponseOk::SessionResumed { endpoint, .. }) => endpoint,
                 Response::Ok(other) => {
@@ -435,69 +469,6 @@ fn workflow_session_close(state: State<'_, AppState>, session: SessionId) {
     {
         let _ = handle.send(BridgeCmd::Close);
     }
-}
-
-/// Catalogue entry served to JS. Mirrors `WhisperModel` plus the
-/// display name and filename so the settings UI can render a dropdown
-/// without a second round-trip.
-#[derive(Clone, Debug, Serialize)]
-pub struct WhisperModelInfo {
-    pub model: WhisperModel,
-    pub filename: &'static str,
-    pub display_name: &'static str,
-}
-
-impl From<WhisperModel> for WhisperModelInfo {
-    fn from(m: WhisperModel) -> Self {
-        Self {
-            model: m,
-            filename: m.filename(),
-            display_name: m.display_name(),
-        }
-    }
-}
-
-/// Closed catalogue of built-in whisper models the desktop knows how
-/// to download.
-#[tauri::command]
-fn whisper_known_models() -> Vec<WhisperModelInfo> {
-    WhisperModel::ALL.iter().copied().map(Into::into).collect()
-}
-
-/// Subset of the catalogue whose `.bin` is already on disk.
-#[tauri::command]
-fn whisper_local_models() -> Vec<WhisperModelInfo> {
-    transcribe::list_local_models()
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
-/// Force a download of `model` and warm up the transcriber if it
-/// matches the active configuration. Idempotent — re-running when the
-/// model file is already present is a fast no-op.
-#[tauri::command]
-async fn whisper_ensure_model(
-    state: State<'_, AppState>,
-    model: WhisperModel,
-) -> Result<(), String> {
-    transcribe::ensure_model(model)
-        .await
-        .map_err(|e| e.to_string())?;
-    let active_model = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .whisper
-        .model;
-    if active_model == model {
-        state
-            .transcriber
-            .warmup(model)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 /// Which keybind backend is active: `"plugin"` or `"portal"`. JS
@@ -622,13 +593,6 @@ async fn settings_set(
         Some(p) => profile_to_config(p)?,
         None => None,
     };
-    let new_model = new.whisper.model;
-    let transcriber = state.transcriber.clone();
-    state.tokio.spawn(async move {
-        if let Err(e) = transcriber.warmup(new_model).await {
-            warn!(error = %e, "whisper warmup after settings_set failed");
-        }
-    });
     *state.settings.lock().expect("settings mutex poisoned") = new;
     match (plan, backend) {
         (ReconcilePlan::Plugin(parsed), KeybindBackend::Plugin(reg)) => {
@@ -749,15 +713,6 @@ pub fn run() {
     };
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<CpUpdate>();
     let cp = CpClient::connect(&tokio, cfg, evt_tx.clone());
-    transcribe::install_log_callback();
-    let initial_model = settings.whisper.model;
-    let transcriber = Arc::new(WhisperTranscriber::new());
-    let warmup_transcriber = transcriber.clone();
-    tokio.spawn(async move {
-        if let Err(e) = warmup_transcriber.warmup(initial_model).await {
-            warn!(error = %e, "whisper warmup failed; first PTT will retry");
-        }
-    });
 
     // The global-shortcut Tauri plugin is always registered: even on
     // Wayland it stays inert (its handler returns early when the
@@ -781,7 +736,7 @@ pub fn run() {
         bridges: Mutex::new(HashMap::new()),
         conn: Mutex::new(initial_conn),
         audio: AudioHandle::new(),
-        transcriber,
+        active_ptt: Mutex::new(None),
         active_session: Mutex::new(None),
         keybind_backend: OnceLock::new(),
     };
@@ -861,9 +816,6 @@ pub fn run() {
             workflow_session_subscribe,
             workflow_session_close,
             set_active_session,
-            whisper_known_models,
-            whisper_local_models,
-            whisper_ensure_model,
             keybind_backend,
             overlay::overlay_test,
             overlay::overlay_current_phase,

@@ -8,10 +8,8 @@
 
 use std::path::PathBuf;
 
-use lutin_control_protocol::WorkflowId;
+use lutin_control_protocol::{WhisperConfig, WorkflowId};
 use serde::{Deserialize, Serialize};
-
-use crate::transcribe::WhisperConfig;
 
 /// One named control-panel endpoint.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -80,18 +78,27 @@ pub struct DesktopSettings {
 
 impl DesktopSettings {
     /// Bindings to actually register with the OS. Empty list seeds the
-    /// built-in PTT default (`Numpad1 → Ptt → ActiveWorkflow`) so
-    /// first-run users get push-to-talk without touching settings.
-    /// Trade-off: an empty list cannot mean "no hotkeys" — to opt out
-    /// the user binds a single throwaway combo. v2 may switch to
-    /// `Option<Vec<KeyBind>>` if that turns out to matter.
+    /// built-in PTT defaults (`Numpad1 → ActiveWorkflow`,
+    /// `Numpad2 → Clipboard`) so first-run users get both in-app
+    /// dictation and a global "transcribe to clipboard" hotkey without
+    /// touching settings. Trade-off: an empty list cannot mean "no
+    /// hotkeys" — to opt out the user binds a single throwaway combo.
+    /// v2 may switch to `Option<Vec<KeyBind>>` if that turns out to
+    /// matter.
     pub fn effective_keybinds(&self) -> Vec<KeyBind> {
         if self.keybinds.is_empty() {
-            vec![KeyBind {
-                combo: "Numpad1".to_owned(),
-                action: Action::Ptt,
-                target: Target::ActiveWorkflow,
-            }]
+            vec![
+                KeyBind {
+                    combo: "Numpad1".to_owned(),
+                    action: Action::Ptt,
+                    target: Target::ActiveWorkflow,
+                },
+                KeyBind {
+                    combo: "Numpad2".to_owned(),
+                    action: Action::Ptt,
+                    target: Target::Clipboard,
+                },
+            ]
         } else {
             self.keybinds.clone()
         }
