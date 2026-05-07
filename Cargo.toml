@@ -21,3 +21,4 @@ lutin-auth = { path = "crates/lutin-auth" }
 lutin-keypair = { path = "crates/lutin-keypair" }
 lutin-agent-sdk = { path = "crates/lutin-agent-sdk" }
 lutin-workflow-sdk = { path = "crates/lutin-workflow-sdk" }
+lutin-tts = { path = "crates/lutin-tts" }
