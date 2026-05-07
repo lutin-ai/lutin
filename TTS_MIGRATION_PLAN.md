@@ -70,7 +70,7 @@ pub enum TtsBackend {
     Orpheus { model: OrpheusModel, voice: OrpheusVoice },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OrpheusModel {
     /// `orpheus-3b-0.1-ft-Q4_K_M.gguf` — current default. Add new
     /// variants for new GGUF exports; the closed enum prevents the
@@ -79,33 +79,54 @@ pub enum OrpheusModel {
     ThreeBQ4_K_M,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Documented voices for the Orpheus 3B 0.1-ft model. Closed enum so
+/// a workflow can't pass arbitrary strings into the prompt template.
+/// If we add a new model with a different voice set, that becomes a
+/// new `OrpheusVoice` variant or — if voice sets diverge enough — a
+/// new outer `TtsBackend` variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrpheusVoice {
-    /// Default voice. Add variants per documented Orpheus voice
-    /// (tara, leah, leo, jess, …). Closed enum so a workflow can't
-    /// pass arbitrary strings into the prompt template.
     Tara,
     Leah,
-    // …
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TtsConfig {
-    pub backend: TtsBackend,
+    Jess,
+    Leo,
+    Dan,
+    Mia,
+    Zac,
+    Zoe,
 }
 ```
+
+`OpenTtsStream` carries `backend: TtsBackend` directly — no
+`TtsConfig` wrapper. The wrapper would have exactly one field today;
+add it later if cross-backend options (e.g. `output_sample_rate`,
+`pre_buffer_ms`) actually materialise.
 
 **New `Request` variants:**
 
 ```rust
-OpenTtsStream { config: TtsConfig },
+/// Pre-download / pre-load weights for a backend without opening a
+/// stream. Returns once the GGUF + SNAC (or backend-equivalent) are
+/// on disk and the factory has loaded into VRAM. Mirrors the
+/// `whisper_ensure_model` pattern — workflows / settings UI call
+/// this from the user's "enable TTS" toggle so the first
+/// `OpenTtsStream` doesn't block for minutes on a fresh install.
+EnsureTtsBackend { backend: TtsBackend },
+
+OpenTtsStream { backend: TtsBackend },
 SpeakTts { stream_id: TtsStreamId, text: String, speed: f32 },
 CancelTts { stream_id: TtsStreamId },
 CloseTtsStream { stream_id: TtsStreamId },
 ```
 
-**New `ResponseOk` variant** (only `OpenTtsStream` returns a payload —
-the rest are `Ack`):
+`OpenTtsStream` assumes the backend's weights are loaded. If they
+aren't, it returns `ApiError::TtsBackendNotReady` rather than
+silently downloading — that contract keeps the open call fast and
+predictable, and gives the UI a clean place to show progress for
+`EnsureTtsBackend` instead.
+
+**New `ResponseOk` variant** (only `OpenTtsStream` returns a
+payload — the rest are `Ack`):
 
 ```rust
 TtsStreamOpened { stream_id: TtsStreamId },
@@ -123,11 +144,12 @@ TtsFinished { stream_id: TtsStreamId },
 
 ```rust
 ApiError::TtsStreamNotFound(TtsStreamId)
+ApiError::TtsBackendNotReady   // OpenTtsStream before EnsureTtsBackend
 ApiError::TtsLimit(TtsLimit)
 
 pub enum TtsLimit {
     TooManyStreams { max: usize },   // process-wide
-    TextTooLong { got: usize, max: usize },
+    TextTooLong { got: usize, max: usize },  // enforced at SpeakTts
 }
 ```
 
@@ -138,8 +160,12 @@ Add roundtrip tests in the protocol's `mod tests` (mirror
 (`OrpheusModel`, `OrpheusVoice`) rather than free-form strings. This
 matches `WhisperModel` and gives us the same "wire surface can't
 pivot to arbitrary files" guarantee. Map enum → backend-internal
-string (`"tara"`, `"leah"`) inside CP at the boundary into
+string (`"tara"`, `"leah"`, …) inside CP at the boundary into
 `lutin-tts`.
+
+**Single id space.** `TtsStreamId(u32)` is the *only* id; CP passes
+`lutin_tts::StreamId(wire_id.0 as u64)` into the service. No
+internal/external mapping table to keep in sync.
 
 ## Slice 3 — CP-side wiring
 
@@ -147,37 +173,63 @@ string (`"tara"`, `"leah"`) inside CP at the boundary into
 `lutin-control-panel/src/tts_streams.rs`,
 edits to `lib.rs` for dispatch + the broadcast pump.
 
+**Hoist `download_streaming` first.** Move
+`lutin-control-panel/src/transcribe.rs::download_streaming` (plus
+the temp-rename scheme) into a new
+`lutin-control-panel/src/downloads.rs`, exporting one
+`download_to(url, dest) -> Result<()>` helper. Update
+`transcribe.rs` to use it. This is a separate prepatory commit
+before slice 3 proper — three copies of the same downloader (legacy
+whisper, current `transcribe.rs`, and our new `tts.rs`) is one too
+many.
+
 **`tts.rs` — model fetch + factory cache.** Mirrors
 `transcribe.rs`:
 
 - `models_dir(global_config_dir)` → `<config>/models/orpheus/`.
 - `ensure_orpheus_gguf(global_config_dir, OrpheusModel)` and
-  `ensure_snac_onnx(global_config_dir)` — atomic-rename downloads
-  using the same `download_streaming` helper (consider hoisting it
-  out of `transcribe.rs` into a shared module since this is now its
-  third copy from the legacy engine).
+  `ensure_snac_onnx(global_config_dir)` use the hoisted
+  `download_to` helper.
 - URLs: copy from `../lutin/engine/src/tts/model.rs`:
   - Orpheus 3B Q4_K_M:
     `https://huggingface.co/isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF/resolve/main/orpheus-3b-0.1-ft-Q4_K_M.gguf`
   - SNAC decoder:
     `https://huggingface.co/onnx-community/snac_24khz-ONNX/resolve/main/onnx/decoder_model.onnx`
 - A `TtsBackends` registry holding lazily-loaded `TtsService`s keyed
-  on a hash of the backend config (or per-`OrpheusModel`, since
-  voice doesn't affect model load):
+  on a model-identity discriminant (voice doesn't affect model
+  load, so two streams with different voices share the same
+  service):
 
   ```rust
+  /// Cache key for a loaded backend. Each variant captures only the
+  /// fields that determine which weights are in VRAM — voice and
+  /// other per-utterance config are excluded. As more backends land,
+  /// add variants here, never reuse one.
+  #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+  enum BackendKey {
+      Orpheus(OrpheusModel),
+      // Kokoro(KokoroModel),  // future
+  }
+
+  fn backend_key(b: &TtsBackend) -> BackendKey {
+      match b {
+          TtsBackend::Orpheus { model, .. } => BackendKey::Orpheus(*model),
+      }
+  }
+
   pub struct TtsBackends {
-      orpheus: Mutex<HashMap<OrpheusModel, Arc<TtsService>>>,
+      services: Mutex<HashMap<BackendKey, Arc<TtsService>>>,
       sink_tx: mpsc::UnboundedSender<TtsEvent>,
       config_dir: PathBuf,
   }
   ```
 
-  First `OpenTtsStream` for a given `OrpheusModel` runs
-  `ensure_orpheus_gguf` + `ensure_snac_onnx` on `spawn_blocking`,
-  then `OrpheusFactory::load(...)` (also blocking), then
-  `TtsService::new(Box::new(factory), sink, DEFAULT_WORKER_COUNT)`.
-  Subsequent opens reuse the cached service.
+  `EnsureTtsBackend { backend }` runs the model fetch +
+  `OrpheusFactory::load(...)` on `spawn_blocking`, then
+  `TtsService::new(Box::new(factory), sink, DEFAULT_WORKER_COUNT)`,
+  inserts under `backend_key(&backend)`. `OpenTtsStream` looks up
+  the key and returns `TtsBackendNotReady` on miss instead of
+  loading.
 
 **`tts_streams.rs` — registry.** Mirrors
 `transcription_streams.rs`:
@@ -185,16 +237,16 @@ edits to `lib.rs` for dispatch + the broadcast pump.
 ```rust
 pub struct Stream {
     pub id: TtsStreamId,
-    pub config: TtsConfig,
+    pub backend: TtsBackend,
     pub service: Arc<TtsService>,   // points at the loaded backend
-    pub internal_id: lutin_tts::StreamId,  // monotonic per-CP
 }
 ```
 
 - `MAX_OPEN_STREAMS` cap (32, matching transcription).
-- `open(config) -> Result<TtsStreamId, TtsLimit>` allocates
-  `TtsStreamId` (next_id) and maps to a fresh
-  `lutin_tts::StreamId(next_internal)` for the service.
+- `open(backend, service) -> Result<TtsStreamId, TtsLimit>`
+  allocates the wire id; the service consumes the same value as
+  `lutin_tts::StreamId(id.0 as u64)` so there's no second id space
+  to track.
 - `find(id) -> Option<&Stream>` for `Speak` / `Cancel`.
 - `take(id)` for `Close`.
 
@@ -210,10 +262,12 @@ pub struct Stream {
   spawns a task that pumps every `TtsEvent` into a broadcast frame:
   ```rust
   TtsEvent::Audio { stream_id, chunk } =>
-      broadcast(Event::TtsAudio { stream_id: wire_id(stream_id), chunk })
+      broadcast(Event::TtsAudio {
+          stream_id: TtsStreamId(stream_id.0 as u32),
+          chunk,
+      })
   ```
-  The `internal → wire` id map lives in `TtsBackends` (or a separate
-  small map; the mapping is allocated at `open` time).
+  Single id space — see slice 2.
 
 ## Slice 4 — desktop playback
 
@@ -227,19 +281,30 @@ pub struct Stream {
   port wholesale, that code carries egui + the old protocol.
 - A per-stream PCM queue: `HashMap<TtsStreamId, VecDeque<i16>>`
   guarded by a `Mutex` on the cpal callback side. Output callback
-  drains the active stream's queue.
+  drains the queue belonging to the currently active session;
+  others are held untouched.
 - The CP event listener (in `dispatch.rs` or
   `lib.rs::run_app`) receives `Event::TtsAudio` / `TtsFinished` and
   pushes bytes into the right queue. Drop chunks for streams the
   desktop doesn't know about (defensive — broadcast can deliver
   events for streams owned by other clients in multi-desktop
   setups, though we ship single-client today).
-- Active-stream selection: the desktop tracks "which stream id
-  belongs to which workflow iframe" via the same active-session
-  tracking that transcription uses. Audio for inactive workflows is
-  buffered (or dropped — pick at slice time; recommend dropping with
-  a warn, since holding back audio after the user has switched
-  contexts is worse than losing it).
+- **Active-stream selection.** Each TTS stream is bound to a
+  session at `tts_open_stream` time (the calling workflow's active
+  session id). Reuse the existing `set_active_session` from Phase
+  3a: when the active session changes, the playback module
+  (a) immediately silences output, (b) drops queued PCM for streams
+  bound to the previously-active session — held audio after a
+  context switch is worse than losing it. New audio for those
+  streams keeps arriving over the wire and gets dropped on
+  enqueue with a single rate-limited warn.
+- **Cancel cascade.** `tts_cancel(stream_id)`:
+  1. calls CP `CancelTts` (in-flight synthesis stops, queued
+     sentences drop on the CP side);
+  2. before awaiting the response, drains the desktop-side queue
+     for that stream synchronously so any already-broadcast
+     PCM that hasn't been played yet is discarded.
+  Without step 2 the user hears tail audio after pressing stop.
 
 **Tauri commands** (in `dispatch.rs`):
 
@@ -259,11 +324,13 @@ playback stays in Rust).
 
 ## Slice 5 — workflow shim + capability
 
-**Capability gate.** `dispatch.rs` (or wherever the
-transcription capability check sits) must reject `tts_open_stream`
-unless the calling workflow's manifest includes
-`"tts"` in `capabilities`. Same enforcement shape as
-`receive_transcription`.
+**Capability gate.** Enforced in `lutin-desktop/src-tauri/src/dispatch.rs`
+at the same layer that gates `receive_transcription`. `tts_open_stream`
+(and consequently `tts_speak` / `tts_cancel` / `tts_close_stream` for
+stream ids that weren't opened by the calling workflow) reject
+unless the workflow's manifest declares `"tts"` in `capabilities`.
+`EnsureTtsBackend` is also gated — without the capability you can't
+even pre-download.
 
 **Shim API** (lutin-desktop frontend, the chrome injects this into
 the workflow iframe):
