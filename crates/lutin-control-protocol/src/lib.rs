@@ -285,6 +285,147 @@ pub enum Request {
     CancelTranscription {
         stream_id: TranscriptionStreamId,
     },
+    /// Pre-download / pre-load weights for a backend without opening a
+    /// stream. Returns once the GGUF + SNAC (or backend-equivalent) are
+    /// on disk and the factory has loaded into VRAM. Mirrors the
+    /// whisper-model-fetch shape — workflows / settings UI call this
+    /// from the user's "enable TTS" toggle so the first
+    /// `OpenTtsStream` doesn't block for minutes on a fresh install.
+    EnsureTtsBackend { backend: TtsBackend },
+    /// Open a streaming TTS synthesis session against an
+    /// already-loaded backend. Returns `TtsBackendNotReady` if the
+    /// backend's weights haven't been loaded yet — call
+    /// `EnsureTtsBackend` first.
+    OpenTtsStream { backend: TtsBackend },
+    /// Synthesise `text` on the open stream. Audio frames are pushed
+    /// out-of-band as `Event::TtsAudio`, terminated by
+    /// `Event::TtsFinished` (per `text` call). `speed` is in the
+    /// 0.5..=2.0 range; the Orpheus backend currently ignores it
+    /// (model has no speed control), but the wire carries it for
+    /// future backends and post-output resampling.
+    SpeakTts {
+        stream_id: TtsStreamId,
+        text: String,
+        speed: TtsSpeed,
+    },
+    /// Drop in-flight synthesis + queued utterances on the stream.
+    /// Idempotent — no-op once the stream is gone.
+    CancelTts { stream_id: TtsStreamId },
+    /// Tear down the stream. Subsequent `Speak`/`Cancel` against this
+    /// id return `TtsStreamNotFound`.
+    CloseTtsStream { stream_id: TtsStreamId },
+}
+
+/// Opaque handle for a streaming TTS session. CP allocates these
+/// monotonically and passes the same value into `lutin_tts::StreamId`
+/// (widened to `u64`) — single id space, no internal/external mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TtsStreamId(pub u32);
+
+/// Which TTS backend to instantiate for a stream. Closed enum so the
+/// wire surface can't pivot to arbitrary model files / hosts. Add new
+/// variants for new backends; voice / per-utterance config rides
+/// inside the variant that needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TtsBackend {
+    Orpheus {
+        model: OrpheusModel,
+        voice: OrpheusVoice,
+    },
+}
+
+/// Closed catalogue of Orpheus GGUF exports CP knows how to fetch.
+/// Mirrors `WhisperModel` — wire surface stays tight, on-disk
+/// filename + URL mapping lives CP-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrpheusModel {
+    /// Maps to `orpheus-3b-0.1-ft-Q4_K_M.gguf` upstream. CP owns the
+    /// variant → URL/filename mapping; the wire surface stays opaque.
+    ThreeBQ4KM,
+}
+
+/// Playback speed for `SpeakTts`, expressed as integer thousandths
+/// (`1000` ≡ 1.0×). Constrained to `[500, 2000]` (0.5×..=2.0×) at
+/// parse time so the wire surface can't carry runaway values into a
+/// future post-output resampler. The Orpheus backend currently
+/// ignores speed (no in-model control); the value is carried for
+/// future backends + cpal-stage resampling.
+///
+/// Integer-typed so the protocol's blanket `Eq` derive keeps working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct TtsSpeed(u16);
+
+impl<'de> Deserialize<'de> for TtsSpeed {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u16::deserialize(d)?;
+        Self::from_thousandths(n).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtsSpeedOutOfRange {
+    pub got_thousandths: u16,
+}
+
+impl fmt::Display for TtsSpeedOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "tts speed {}/1000 outside {}..={}",
+            self.got_thousandths,
+            TtsSpeed::MIN_THOUSANDTHS,
+            TtsSpeed::MAX_THOUSANDTHS,
+        )
+    }
+}
+
+impl std::error::Error for TtsSpeedOutOfRange {}
+
+impl TtsSpeed {
+    pub const MIN_THOUSANDTHS: u16 = 500;
+    pub const MAX_THOUSANDTHS: u16 = 2000;
+    pub const NORMAL: Self = Self(1000);
+
+    pub fn from_thousandths(n: u16) -> Result<Self, TtsSpeedOutOfRange> {
+        if !(Self::MIN_THOUSANDTHS..=Self::MAX_THOUSANDTHS).contains(&n) {
+            return Err(TtsSpeedOutOfRange { got_thousandths: n });
+        }
+        Ok(Self(n))
+    }
+
+    pub fn as_thousandths(self) -> u16 {
+        self.0
+    }
+
+    pub fn as_f32(self) -> f32 {
+        self.0 as f32 / 1000.0
+    }
+}
+
+impl Default for TtsSpeed {
+    fn default() -> Self {
+        Self::NORMAL
+    }
+}
+
+/// Documented voices for the Orpheus 3B 0.1-ft model. Closed enum so
+/// a workflow can't smuggle arbitrary strings into the prompt
+/// template. If a future model ships a different voice set, that
+/// becomes a new `OrpheusVoice` variant or — when the sets diverge
+/// enough — a new outer `TtsBackend` variant. The CP boundary maps
+/// these to the backend-internal lowercase strings (`"tara"`,
+/// `"leah"`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrpheusVoice {
+    Tara,
+    Leah,
+    Jess,
+    Leo,
+    Dan,
+    Mia,
+    Zac,
+    Zoe,
 }
 
 /// Opaque handle for a streaming transcription. CP allocates these
@@ -499,6 +640,20 @@ pub enum ResponseOk {
     /// "stream existed and was cancelled" and "stream id was already
     /// gone".
     TranscriptionCancelled,
+    /// Reply to `EnsureTtsBackend`. Carries no payload — backend is
+    /// either loaded or `TtsBackendUnavailable` came back instead.
+    TtsBackendReady,
+    /// Reply to `OpenTtsStream`.
+    TtsStreamOpened { stream_id: TtsStreamId },
+    /// Reply to `SpeakTts`. Carries no payload — synthesis output is
+    /// pushed via `Event::TtsAudio` / `Event::TtsFinished`.
+    TtsSpeechQueued,
+    /// Reply to `CancelTts`. Idempotent — fires for both
+    /// "stream existed and was cancelled" and "stream id was already
+    /// gone".
+    TtsCancelled,
+    /// Reply to `CloseTtsStream`.
+    TtsStreamClosed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -533,6 +688,55 @@ pub enum ApiError {
     /// last leg of the pipeline.
     #[error("whisper inference: {0}")]
     WhisperInference(String),
+    #[error("tts stream not found: {0:?}")]
+    TtsStreamNotFound(TtsStreamId),
+    /// `OpenTtsStream` arrived before `EnsureTtsBackend` for the
+    /// matching backend identity. Desktop should call
+    /// `EnsureTtsBackend` (showing progress) and retry the open.
+    #[error("tts backend not ready")]
+    TtsBackendNotReady,
+    /// Backend weights couldn't be made available — download failed,
+    /// disk full, factory load errored. Distinct from
+    /// `TtsBackendNotReady` (a sequencing error) so the desktop can
+    /// surface a real error message.
+    #[error("tts backend unavailable: {0}")]
+    TtsBackendUnavailable(String),
+    /// TTS synthesis failed mid-utterance (model error, GPU OOM, …).
+    #[error("tts synthesis: {0}")]
+    TtsSynthesis(String),
+    /// Wire-bound limits: too many open streams, text too long.
+    #[error("tts limit exceeded: {0}")]
+    TtsLimit(TtsLimit),
+}
+
+/// Specific limit a TTS request blew through. Same shape as
+/// `TranscriptionLimit` — small closed enum so the desktop can switch
+/// on the cause without parsing a string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TtsLimit {
+    /// Process-wide open-stream count would exceed
+    /// `MAX_OPEN_STREAMS`. Almost always a workflow bug
+    /// (failure to `CloseTtsStream`).
+    TooManyStreams { max: usize },
+    /// `text.len()` (in bytes) exceeded the per-`SpeakTts` cap. The
+    /// model has a fixed context window, so longer inputs are
+    /// silently truncated by the worker; rejecting at the boundary
+    /// means the workflow gets a hard error rather than mysterious
+    /// half-spoken sentences.
+    TextTooLong { got: usize, max: usize },
+}
+
+impl fmt::Display for TtsLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyStreams { max } => {
+                write!(f, "too many open tts streams (max {max})")
+            }
+            Self::TextTooLong { got, max } => {
+                write!(f, "tts text too long: {got} bytes > max {max}")
+            }
+        }
+    }
 }
 
 /// Specific limit a `TranscribeChunk` / `OpenTranscription` request
@@ -573,6 +777,18 @@ pub enum Event {
     ProjectDeleted { slug: Slug },
     SessionStarted { slug: Slug, info: SessionInfo },
     SessionEnded { slug: Slug, session: SessionId },
+    /// Synthesised audio frame for an open TTS stream. Broadcast —
+    /// every authenticated client receives it; clients filter by the
+    /// `stream_id` they own. `chunk` is raw PCM (24 kHz mono i16
+    /// little-endian for the Orpheus backend).
+    TtsAudio {
+        stream_id: TtsStreamId,
+        chunk: Vec<u8>,
+    },
+    /// Terminator for a single `SpeakTts` call. Pairs 1:1 with
+    /// `SpeakTts`, *not* with the stream lifetime — the same stream
+    /// emits one `Finished` per utterance.
+    TtsFinished { stream_id: TtsStreamId },
 }
 
 #[derive(Debug, Error)]
@@ -713,6 +929,110 @@ mod tests {
         // Beam(5) round-trips.
         let b5 = BeamSize::Beam(std::num::NonZeroU8::new(5).unwrap());
         assert_eq!(decode::<BeamSize>(&encode(&b5).unwrap()).unwrap(), b5);
+    }
+
+    #[test]
+    fn tts_speed_parse_and_serde() {
+        assert_eq!(
+            TtsSpeed::from_thousandths(1000).unwrap(),
+            TtsSpeed::NORMAL
+        );
+        assert_eq!(TtsSpeed::from_thousandths(500).unwrap().as_thousandths(), 500);
+        assert_eq!(TtsSpeed::from_thousandths(2000).unwrap().as_thousandths(), 2000);
+        assert!(TtsSpeed::from_thousandths(499).is_err());
+        assert!(TtsSpeed::from_thousandths(2001).is_err());
+
+        // Wire layer enforces the same range — a hand-rolled u16 that
+        // bypasses `from_thousandths` must not deserialise.
+        let bad = encode(&100u16).unwrap();
+        assert!(decode::<TtsSpeed>(&bad).is_err());
+
+        // Round-trip a valid value.
+        let s = TtsSpeed::from_thousandths(1250).unwrap();
+        assert_eq!(decode::<TtsSpeed>(&encode(&s).unwrap()).unwrap(), s);
+    }
+
+    #[test]
+    fn open_tts_stream_roundtrip() {
+        let r = Request::OpenTtsStream {
+            backend: TtsBackend::Orpheus {
+                model: OrpheusModel::ThreeBQ4KM,
+                voice: OrpheusVoice::Tara,
+            },
+        };
+        assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn tts_request_variants_roundtrip() {
+        for r in [
+            Request::EnsureTtsBackend {
+                backend: TtsBackend::Orpheus {
+                    model: OrpheusModel::ThreeBQ4KM,
+                    voice: OrpheusVoice::Leah,
+                },
+            },
+            Request::SpeakTts {
+                stream_id: TtsStreamId(7),
+                text: "hello world".into(),
+                speed: TtsSpeed::NORMAL,
+            },
+            Request::CancelTts {
+                stream_id: TtsStreamId(7),
+            },
+            Request::CloseTtsStream {
+                stream_id: TtsStreamId(7),
+            },
+        ] {
+            assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn tts_response_variants_roundtrip() {
+        for r in [
+            Response::Ok(ResponseOk::TtsBackendReady),
+            Response::Ok(ResponseOk::TtsStreamOpened {
+                stream_id: TtsStreamId(3),
+            }),
+            Response::Ok(ResponseOk::TtsSpeechQueued),
+            Response::Ok(ResponseOk::TtsCancelled),
+            Response::Ok(ResponseOk::TtsStreamClosed),
+        ] {
+            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn tts_error_variants_roundtrip() {
+        for r in [
+            Response::Err(ApiError::TtsStreamNotFound(TtsStreamId(99))),
+            Response::Err(ApiError::TtsBackendNotReady),
+            Response::Err(ApiError::TtsBackendUnavailable("404 from hf".into())),
+            Response::Err(ApiError::TtsSynthesis("decode failed".into())),
+            Response::Err(ApiError::TtsLimit(TtsLimit::TooManyStreams { max: 32 })),
+            Response::Err(ApiError::TtsLimit(TtsLimit::TextTooLong {
+                got: 9000,
+                max: 4096,
+            })),
+        ] {
+            assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn tts_event_variants_roundtrip() {
+        for e in [
+            Event::TtsAudio {
+                stream_id: TtsStreamId(1),
+                chunk: vec![1, 2, 3, 4],
+            },
+            Event::TtsFinished {
+                stream_id: TtsStreamId(1),
+            },
+        ] {
+            assert_eq!(decode::<Event>(&encode(&e).unwrap()).unwrap(), e);
+        }
     }
 
     /// `MonoPcm16k` is `#[serde(transparent)]` — confirm the wire

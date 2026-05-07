@@ -8,7 +8,14 @@ API later without churning callers.
 
 - **Slice 1 — `crates/lutin-tts` crate. DONE.** Commits `e40f463` +
   review-fix `1d17c87`.
-- **Slice 2 — protocol additions.** Pending.
+- **Slice 2 — protocol additions. DONE.** Wire types
+  (`TtsStreamId`, `TtsBackend`, `OrpheusModel`, `OrpheusVoice`,
+  `TtsSpeed` newtype enforcing 0.5..=2.0× at parse time), 5 new
+  `Request` variants, 5 new `ResponseOk` acks, 2 new `Event`
+  variants (`TtsAudio` / `TtsFinished`), 4 new `ApiError`s + the
+  `TtsLimit` enum. Roundtrip tests added. CP dispatcher stubs the
+  TTS arms with `TtsBackendUnavailable("not enabled in this build")`
+  until slice 3 wires them.
 - **Slice 3 — CP-side wiring.** Pending.
 - **Slice 4 — desktop playback.** Pending.
 - **Slice 5 — workflow shim + capability.** Pending.

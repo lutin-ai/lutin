@@ -180,6 +180,19 @@ impl AppState {
                 self.transcription.cancel(stream_id);
                 return Response::Ok(ResponseOk::TranscriptionCancelled);
             }
+            // TTS dispatch lands in slice 3. Until then the wire
+            // surface exists but no backend is loaded; reuse the
+            // standard "call EnsureTtsBackend first" sequencing
+            // error so callers don't have to special-case a
+            // slice-2-only state. (`Unavailable` is reserved for
+            // real load/download failures per its doc.)
+            Request::EnsureTtsBackend { .. }
+            | Request::OpenTtsStream { .. }
+            | Request::SpeakTts { .. }
+            | Request::CancelTts { .. }
+            | Request::CloseTtsStream { .. } => {
+                return Response::Err(ApiError::TtsBackendNotReady);
+            }
             _ => {}
         }
         let (reply, rx) = oneshot::channel();
@@ -224,8 +237,13 @@ impl AppState {
             Request::OpenTranscription { .. }
             | Request::TranscribeChunk { .. }
             | Request::FinishTranscription { .. }
-            | Request::CancelTranscription { .. } => {
-                unreachable!("transcription requests are handled before this match");
+            | Request::CancelTranscription { .. }
+            | Request::EnsureTtsBackend { .. }
+            | Request::OpenTtsStream { .. }
+            | Request::SpeakTts { .. }
+            | Request::CancelTts { .. }
+            | Request::CloseTtsStream { .. } => {
+                unreachable!("transcription/tts requests are handled before this match");
             }
         };
         if self.commands.send(cmd).await.is_err() {
