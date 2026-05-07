@@ -16,7 +16,16 @@ API later without churning callers.
   `TtsLimit` enum. Roundtrip tests added. CP dispatcher stubs the
   TTS arms with `TtsBackendUnavailable("not enabled in this build")`
   until slice 3 wires them.
-- **Slice 3 — CP-side wiring.** Pending.
+- **Slice 3 — CP-side wiring. DONE.** New `tts.rs` (model fetch +
+  `TtsBackends` registry keyed on a `BackendKey` discriminant),
+  `tts_streams.rs` (per-stream registry, `MAX_OPEN_STREAMS = 32`),
+  dispatcher arms for the five new requests, process-wide
+  `TtsEvent` sink + `tts_sink_pump` task that fans `Audio`/`Finished`
+  onto the existing broadcast. `download_streaming` was hoisted
+  ahead of the slice into a shared `downloads.rs` module so
+  whisper + TTS share one downloader. `MAX_TEXT_LEN = 4096`
+  enforced at `SpeakTts`. Voice enum → backend token mapping
+  lives in `tts::voice_token` at the CP boundary.
 - **Slice 4 — desktop playback.** Pending.
 - **Slice 5 — workflow shim + capability.** Pending.
 

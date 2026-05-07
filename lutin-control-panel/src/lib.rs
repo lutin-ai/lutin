@@ -11,14 +11,18 @@ pub mod sessions;
 mod settings_io;
 pub mod transcribe;
 pub mod transcription_streams;
+pub mod tts;
+pub mod tts_streams;
 pub mod workflow_images;
 
 use futures_util::{SinkExt, StreamExt};
 use lutin_auth::{Scope, SigningKey, VerifyingKey, verify};
 use lutin_control_protocol::{
     self as cp, ApiError, DisplayName, Event, MonoPcm16k, ProjectInfo, Request, Response,
-    ResponseOk, SessionId, Slug, TranscriptionStreamId, WhisperConfig, WorkflowId,
+    ResponseOk, SessionId, Slug, TranscriptionStreamId, TtsBackend, TtsLimit, TtsSpeed,
+    TtsStreamId, WhisperConfig, WorkflowId,
 };
+use lutin_tts::TtsEvent;
 use std::sync::Arc;
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use std::path::{Path, PathBuf};
@@ -29,6 +33,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::warn;
 
 const CHANNEL_BUF: usize = 64;
+
+/// Per-`SpeakTts` byte cap. The model's context window silently
+/// truncates oversize inputs; rejecting at the wire boundary turns
+/// the failure into a hard error a workflow can catch instead of
+/// half-spoken sentences. 4096 bytes ≈ ~1.5 KB English over the 2K
+/// token Orpheus context with headroom to spare.
+const MAX_TEXT_LEN: usize = 4096;
 
 /// Server-side project record. CP owns the per-project signing key
 /// in-memory; `start_session` / `open_session` mint tokens against it
@@ -117,6 +128,13 @@ pub struct AppState {
     /// `FinishTranscription` runs whisper for several seconds, which
     /// would block the whole supervisor if routed through it.
     transcription: transcription_streams::TranscriptionRegistry,
+    /// Loaded TTS backends (one `TtsService` per model identity). Lazy
+    /// — first `EnsureTtsBackend` triggers the download/load.
+    tts_backends: tts::TtsBackends,
+    /// Per-stream TTS sessions. Open count is process-wide; the
+    /// service `Arc` inside each entry keeps a backend alive as long
+    /// as any stream points at it.
+    tts_streams: tts_streams::TtsStreamRegistry,
 }
 
 pub struct Supervisor {
@@ -139,12 +157,25 @@ impl Supervisor {
             config.global_config_dir.clone(),
         ));
         let transcription = transcription_streams::TranscriptionRegistry::new(transcriber);
+
+        // Single sink for every loaded TTS backend; CP fans events
+        // out onto the broadcast as they arrive. Unbounded because
+        // the producers are real-time audio synthesisers — applying
+        // back-pressure to them would stall the model thread; we'd
+        // rather drop a slow consumer than the producer.
+        let (tts_sink_tx, tts_sink_rx) = mpsc::unbounded_channel::<TtsEvent>();
+        let tts_backends = tts::TtsBackends::new(config.global_config_dir.clone(), tts_sink_tx);
+        let tts_streams = tts_streams::TtsStreamRegistry::new();
+        tokio::spawn(tts_sink_pump(tts_sink_rx, ev_tx.clone()));
+
         let join = tokio::spawn(supervisor(cmd_rx, ev_tx.clone(), sd_rx, config));
         let state = AppState {
             issuer,
             commands: cmd_tx,
             events: ev_tx,
             transcription,
+            tts_backends,
+            tts_streams,
         };
         Self {
             state,
@@ -181,18 +212,24 @@ impl AppState {
                 self.transcription.cancel(stream_id);
                 return Response::Ok(ResponseOk::TranscriptionCancelled);
             }
-            // TTS dispatch lands in slice 3. Until then the wire
-            // surface exists but no backend is loaded; reuse the
-            // standard "call EnsureTtsBackend first" sequencing
-            // error so callers don't have to special-case a
-            // slice-2-only state. (`Unavailable` is reserved for
-            // real load/download failures per its doc.)
-            Request::EnsureTtsBackend { .. }
-            | Request::OpenTtsStream { .. }
-            | Request::SpeakTts { .. }
-            | Request::CancelTts { .. }
-            | Request::CloseTtsStream { .. } => {
-                return Response::Err(ApiError::TtsBackendNotReady);
+            Request::EnsureTtsBackend { backend } => {
+                return self.handle_ensure_tts_backend(backend).await;
+            }
+            Request::OpenTtsStream { backend } => {
+                return self.handle_open_tts_stream(backend);
+            }
+            Request::SpeakTts {
+                stream_id,
+                text,
+                speed,
+            } => {
+                return self.handle_speak_tts(stream_id, text, speed);
+            }
+            Request::CancelTts { stream_id } => {
+                return self.handle_cancel_tts(stream_id);
+            }
+            Request::CloseTtsStream { stream_id } => {
+                return self.handle_close_tts_stream(stream_id);
             }
             _ => {}
         }
@@ -322,6 +359,86 @@ impl AppState {
                 }
             }
         }
+    }
+
+    async fn handle_ensure_tts_backend(&self, backend: TtsBackend) -> Response {
+        match self.tts_backends.ensure(backend).await {
+            Ok(()) => Response::Ok(ResponseOk::TtsBackendReady),
+            Err(e) => Response::Err(ApiError::TtsBackendUnavailable(format!("{e:#}"))),
+        }
+    }
+
+    fn handle_open_tts_stream(&self, backend: TtsBackend) -> Response {
+        let Some(service) = self.tts_backends.lookup(&backend) else {
+            return Response::Err(ApiError::TtsBackendNotReady);
+        };
+        match self.tts_streams.open(backend, service) {
+            Ok(stream_id) => Response::Ok(ResponseOk::TtsStreamOpened { stream_id }),
+            Err(limit) => Response::Err(ApiError::TtsLimit(limit)),
+        }
+    }
+
+    fn handle_speak_tts(&self, stream_id: TtsStreamId, text: String, speed: TtsSpeed) -> Response {
+        if text.len() > MAX_TEXT_LEN {
+            return Response::Err(ApiError::TtsLimit(TtsLimit::TextTooLong {
+                got: text.len(),
+                max: MAX_TEXT_LEN,
+            }));
+        }
+        let Some((service, backend)) = self.tts_streams.lookup(stream_id) else {
+            return Response::Err(ApiError::TtsStreamNotFound(stream_id));
+        };
+        let TtsBackend::Orpheus { voice, .. } = backend;
+        let voice_token = tts::voice_token(voice);
+        let wire_id = lutin_tts::StreamId(stream_id.0 as u64);
+        if !service.speak(wire_id, &text, voice_token, speed.as_f32()) {
+            return Response::Err(ApiError::TtsSynthesis(
+                "tts service rejected speak request".into(),
+            ));
+        }
+        Response::Ok(ResponseOk::TtsSpeechQueued)
+    }
+
+    fn handle_cancel_tts(&self, stream_id: TtsStreamId) -> Response {
+        if let Some((service, _)) = self.tts_streams.lookup(stream_id) {
+            service.cancel(lutin_tts::StreamId(stream_id.0 as u64));
+        }
+        Response::Ok(ResponseOk::TtsCancelled)
+    }
+
+    fn handle_close_tts_stream(&self, stream_id: TtsStreamId) -> Response {
+        if let Some(stream) = self.tts_streams.take(stream_id) {
+            stream
+                .service
+                .close(lutin_tts::StreamId(stream_id.0 as u64));
+        }
+        Response::Ok(ResponseOk::TtsStreamClosed)
+    }
+}
+
+/// Drain the process-wide TTS sink and fan events out onto the
+/// broadcast. Wire `TtsStreamId` is just the producer-side `StreamId`
+/// narrowed to `u32` — slice 2 locked in the single id space, so the
+/// cast back is loss-free.
+async fn tts_sink_pump(
+    mut rx: mpsc::UnboundedReceiver<TtsEvent>,
+    events: broadcast::Sender<Event>,
+) {
+    while let Some(ev) = rx.recv().await {
+        let frame = match ev {
+            TtsEvent::Audio { stream_id, chunk } => Event::TtsAudio {
+                stream_id: TtsStreamId(stream_id.0 as u32),
+                chunk,
+            },
+            TtsEvent::Finished { stream_id } => Event::TtsFinished {
+                stream_id: TtsStreamId(stream_id.0 as u32),
+            },
+        };
+        // Broadcast `send` only fails when there are zero receivers;
+        // that's a transient state during startup / reconnects, not
+        // an error. Drop on the floor — the next event lands once a
+        // client subscribes.
+        let _ = events.send(frame);
     }
 }
 

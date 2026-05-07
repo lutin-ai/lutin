@@ -19,6 +19,7 @@ lutin-protocol.workspace = true
 lutin-auth.workspace = true
 lutin-keypair = { path = "../crates/lutin-keypair" }
 lutin-control-protocol = { path = "../crates/lutin-control-protocol" }
+lutin-tts = { path = "../crates/lutin-tts" }
 lutin-storage = { path = "../crates/lutin-storage" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process", "fs", "signal"] }
 tokio-tungstenite = "0.29"

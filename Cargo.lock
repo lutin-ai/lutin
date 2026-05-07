@@ -3016,6 +3016,7 @@ dependencies = [
  "lutin-keypair",
  "lutin-protocol",
  "lutin-storage",
+ "lutin-tts",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
