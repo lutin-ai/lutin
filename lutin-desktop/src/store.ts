@@ -48,19 +48,40 @@ export const useApp = create<AppState>((set) => ({
   setConn: (conn) => set({ conn }),
   setView: (view) => set({ view }),
   setSettings: (settings) => set({ settings }),
-  setProjects: (projects) => set({ projects }),
+  // De-dupe by slug at write time. ListProjects on connect and the
+  // ProjectCreated event race each other, and the event has already
+  // been applied by the time the list reply lands; without this guard
+  // a project ends up in `projects` twice → React duplicate-key
+  // warning → sidebar click handlers bound to the wrong row.
+  setProjects: (projects) => {
+    const seen = new Set<string>();
+    const dedup: ProjectInfo[] = [];
+    for (const p of projects) {
+      if (seen.has(p.slug)) continue;
+      seen.add(p.slug);
+      dedup.push(p);
+    }
+    set({ projects: dedup });
+  },
   selectProject: (slug) => set({ selectedProject: slug, selectedSession: null }),
-  setSessions: (slug, sessions) =>
-    set((s) => ({ sessionsBySlug: { ...s.sessionsBySlug, [slug]: sessions } })),
+  setSessions: (slug, sessions) => {
+    const seen = new Set<string>();
+    const dedup: SessionInfo[] = [];
+    for (const sess of sessions) {
+      if (seen.has(sess.id)) continue;
+      seen.add(sess.id);
+      dedup.push(sess);
+    }
+    set((s) => ({ sessionsBySlug: { ...s.sessionsBySlug, [slug]: dedup } }));
+  },
   selectSession: (id) => set({ selectedSession: id }),
 
   applyEvent: (event) =>
     set((s) => {
       if ("ProjectCreated" in event) {
         const exists = s.projects.some((p) => p.slug === event.ProjectCreated.slug);
-        return {
-          projects: exists ? s.projects : [...s.projects, event.ProjectCreated],
-        };
+        if (exists) return s;
+        return { projects: [...s.projects, event.ProjectCreated] };
       }
       if ("ProjectDeleted" in event) {
         const slug = event.ProjectDeleted.slug;

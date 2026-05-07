@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
+  setActiveSession,
   workflowOpenPlugin,
   workflowSessionClose,
   workflowSessionOpen,
@@ -37,12 +39,14 @@ export function PluginIframe(props: Props) {
   const [opened, setOpened] = useState<PluginOpened | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
+  const [iframeLoaded, setIframeLoaded] = useState(false);
 
   // Resolve plugin URL.
   useEffect(() => {
     let cancelled = false;
     setError(null);
     setOpened(null);
+    setIframeLoaded(false);
     workflowOpenPlugin(workflow, digest)
       .then((res) => { if (!cancelled) setOpened(res); })
       .catch((e) => { if (!cancelled) setError(String(e)); });
@@ -64,96 +68,136 @@ export function PluginIframe(props: Props) {
     };
   }, [slug, session]);
 
-  // Wire the MessagePort handshake + the bytes pump.
+  // Wire the MessagePort handshake + the bytes pump. Runs once *all*
+  // three preconditions are true: bundle resolved, engine bridge open,
+  // and iframe finished loading. We can't rely on attaching a fresh
+  // `load` listener here — `opened` and `bridgeReady` may flip after
+  // the iframe has already loaded, in which case the listener never
+  // fires and the iframe stays blank. Tracking `iframeLoaded` as state
+  // (set by an inline `onLoad` on the JSX) sidesteps the race.
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe || !opened || !bridgeReady) return;
+    if (!iframe || !opened || !bridgeReady || !iframeLoaded) return;
 
     let port: MessagePort | null = null;
     let unsubscribePromise: Promise<{ id: () => number }> | null = null;
     let cancelled = false;
 
-    const onLoad = () => {
-      const channel = new MessageChannel();
-      port = channel.port1;
-      port.onmessage = async (e) => {
-        const msg = e.data as
-          | { kind: "request"; request_id: number; body: Uint8Array | number[] }
-          | { kind: "notification"; body: string; title?: string }
-          | undefined;
-        if (!msg || !port) return;
-        if (msg.kind === "request") {
-          const bytes = msg.body instanceof Uint8Array
-            ? msg.body
-            : Uint8Array.from(msg.body);
-          try {
-            const reply = await workflowSessionRequest(session, bytes);
-            port.postMessage({
-              kind: "response",
-              request_id: msg.request_id,
-              body: reply,
-            });
-          } catch (err) {
-            // Surface to the iframe so the plugin can show the
-            // failure; using an `error` field on the response keeps
-            // the request_id correlation intact.
-            port.postMessage({
-              kind: "response",
-              request_id: msg.request_id,
-              error: String(err),
-            });
-          }
-          return;
-        }
-        if (msg.kind === "notification") {
-          console.info("[plugin notification]", msg.title ?? "Plugin", msg.body);
-          try {
-            if ("Notification" in window && Notification.permission === "granted") {
-              new Notification(msg.title ?? "Plugin", { body: msg.body });
-            }
-          } catch { /* non-fatal */ }
-        }
-      };
-      port.start();
+    // Permission gate. The plugin's manifest names which capabilities
+    // the chrome should forward; calls to undeclared capabilities are
+    // rejected here, before any native side-effect runs. The bytes
+    // pump (request/response/broadcast) is implicit — every plugin
+    // gets it; capabilities are the gated surface.
+    const permissions = new Set(opened.manifest.permissions);
+    const allow = (perm: string) => permissions.has(perm);
 
-      // Subscribe to engine broadcasts → forward to iframe. The
-      // promise resolves before the channel is wired, but the bridge
-      // pump won't fire any broadcasts before subscribe lands as long
-      // as the iframe hasn't asked for any yet (engines push events
-      // only in response to subscribe-style requests).
-      unsubscribePromise = (async () => {
-        const ch = await workflowSessionSubscribe(session, (body) => {
-          port?.postMessage({ kind: "broadcast", body });
+    type RequestMsg = { kind: "request"; request_id: number; body: Uint8Array | number[] };
+    type NotificationMsg = { kind: "notification"; body: string; title?: string };
+    type IframeMsg = RequestMsg | NotificationMsg;
+
+    const handleRequest = async (port: MessagePort, msg: RequestMsg) => {
+      const bytes = msg.body instanceof Uint8Array ? msg.body : Uint8Array.from(msg.body);
+      try {
+        const reply = await workflowSessionRequest(session, bytes);
+        port.postMessage({ kind: "response", request_id: msg.request_id, body: reply });
+      } catch (err) {
+        // Surface to the iframe so the plugin can show the failure;
+        // an `error` field on the response keeps request_id
+        // correlation intact.
+        port.postMessage({
+          kind: "response",
+          request_id: msg.request_id,
+          error: String(err),
         });
-        return { id: () => ch.id };
-      })();
-
-      const targetOrigin = originOf(opened.url);
-      iframe.contentWindow?.postMessage(
-        {
-          type: "lutin-init",
-          slug,
-          session,
-          workflow,
-          manifest: opened.manifest,
-        },
-        targetOrigin,
-        [channel.port2],
-      );
+      }
     };
 
-    iframe.addEventListener("load", onLoad);
+    const handleNotification = (msg: NotificationMsg) => {
+      if (!allow("notification")) {
+        console.warn(
+          `[plugin ${workflow}] denied: notification not in manifest.permissions`,
+        );
+        return;
+      }
+      console.info("[plugin notification]", msg.title ?? "Plugin", msg.body);
+      try {
+        if ("Notification" in window && Notification.permission === "granted") {
+          new Notification(msg.title ?? "Plugin", { body: msg.body });
+        }
+      } catch { /* non-fatal */ }
+    };
+
+    const channel = new MessageChannel();
+    port = channel.port1;
+    port.onmessage = (e) => {
+      const msg = e.data as IframeMsg | undefined;
+      if (!msg || !port) return;
+      if (msg.kind === "request") void handleRequest(port, msg);
+      else if (msg.kind === "notification") handleNotification(msg);
+    };
+    port.start();
+
+    unsubscribePromise = (async () => {
+      const ch = await workflowSessionSubscribe(session, (body) => {
+        port?.postMessage({ kind: "broadcast", body });
+      });
+      return { id: () => ch.id };
+    })();
+
+    // Per-session transcription deliveries. Rust gates emission on
+    // the manifest declaring `receive_transcription`, but we keep the
+    // listener attached unconditionally — if Rust says deliver, deliver.
+    // The shim only exposes `onTranscription` to the plugin when the
+    // manifest opted in, so a workflow that didn't declare it can't
+    // observe these even if some other path delivered one.
+    const transcriptionTopic = `transcription:${session}`;
+    const transcriptionUnlisten = listen<{ text: string; source: string }>(
+      transcriptionTopic,
+      (e) => {
+        port?.postMessage({
+          kind: "transcription",
+          text: e.payload.text,
+          source: e.payload.source,
+        });
+      },
+    );
+
+    // Tell Rust which session is active so dispatch can resolve
+    // `Target::ActiveWorkflow`. Capabilities ride along so the routing
+    // gate doesn't need a second lookup.
+    setActiveSession({
+      session,
+      workflow,
+      capabilities: opened.manifest.capabilities ?? [],
+    }).catch(() => { /* non-fatal — gate falls back to clipboard */ });
+
+    const targetOrigin = originOf(opened.url);
+    iframe.contentWindow?.postMessage(
+      {
+        type: "lutin-init",
+        slug,
+        session,
+        workflow,
+        manifest: opened.manifest,
+      },
+      targetOrigin,
+      [channel.port2],
+    );
+
     return () => {
       cancelled = true;
-      iframe.removeEventListener("load", onLoad);
       port?.close();
+      transcriptionUnlisten.then((u) => u()).catch(() => {});
+      // Best-effort clear; if another iframe mounts immediately it
+      // will overwrite this with its own `setActiveSession` call.
+      setActiveSession(null).catch(() => {});
       // Tauri Channels can't be unregistered explicitly; the bridge
       // drops dead subscribers on the next broadcast send. Holding
       // the promise prevents an unused-var warning while documenting
       // the intent.
       void unsubscribePromise; void cancelled;
     };
-  }, [opened, bridgeReady, slug, session, workflow]);
+  }, [opened, bridgeReady, iframeLoaded, slug, session, workflow]);
 
   if (error) {
     return (
@@ -166,25 +210,87 @@ export function PluginIframe(props: Props) {
       </div>
     );
   }
-  if (!opened) {
-    return (
-      <div className={styles.placeholder}>
-        <div className={styles.placeholderIcon}>⏳</div>
-        <div className={styles.placeholderTitle}>Loading plugin…</div>
-        <div className={styles.placeholderSub}><code>{workflow}</code></div>
-      </div>
-    );
-  }
+
+  // Staged status: bundle → engine → iframe boot. The iframe always
+  // mounts (so its load fires deterministically) but we overlay an
+  // indicator until everything's wired and the plugin can take over.
+  const fullyReady = opened !== null && bridgeReady && iframeLoaded;
+  const stage: { label: string; sub: string } | null = !opened
+    ? { label: "Fetching plugin bundle…", sub: workflow }
+    : !bridgeReady
+      ? { label: "Connecting to engine…", sub: shortSession(session) }
+      : !iframeLoaded
+        ? { label: "Starting plugin…", sub: opened.manifest.display_name || workflow }
+        : null;
 
   return (
-    <iframe
-      ref={iframeRef}
-      src={opened.url}
-      sandbox="allow-scripts"
-      title={opened.manifest.display_name || workflow}
-      style={{ width: "100%", height: "100%", border: 0 }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      {opened && (
+        <iframe
+          ref={iframeRef}
+          src={opened.url}
+          // `allow-same-origin` keeps the iframe on its
+          // `lutin-plugin://<id>` origin instead of letting the sandbox
+          // attribute force it to `null`. The cross-origin isolation we
+          // rely on comes from the custom scheme (chrome lives on a
+          // different scheme/host), not from the sandbox — origin
+          // `null` actually defeats it because `null` ≠ `null` in
+          // postMessage targeting and CORS checks refuse
+          // `Access-Control-Allow-Origin: *` for null origins.
+          sandbox="allow-scripts allow-same-origin"
+          title={opened.manifest.display_name || workflow}
+          onLoad={() => setIframeLoaded(true)}
+          style={{
+            width: "100%",
+            height: "100%",
+            border: 0,
+            visibility: fullyReady ? "visible" : "hidden",
+          }}
+        />
+      )}
+      {stage && (
+        <div
+          className={styles.placeholder}
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            background: "var(--bg-0)",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", alignItems: "center" }}>
+            <Spinner />
+            <div className={styles.placeholderTitle}>{stage.label}</div>
+            <div className={styles.placeholderSub}><code>{stage.sub}</code></div>
+          </div>
+        </div>
+      )}
+    </div>
   );
+}
+
+function Spinner() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 50 50" aria-hidden>
+      <circle
+        cx="25" cy="25" r="20" fill="none"
+        stroke="currentColor" strokeWidth="4" strokeLinecap="round"
+        strokeDasharray="80 60"
+        opacity="0.6"
+      >
+        <animateTransform
+          attributeName="transform" type="rotate"
+          from="0 25 25" to="360 25 25" dur="0.9s" repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
+}
+
+function shortSession(id: string): string {
+  return id.length > 12 ? id.slice(0, 10) + "…" : id;
 }
 
 function originOf(url: string): string {

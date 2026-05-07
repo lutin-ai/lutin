@@ -4,7 +4,10 @@
 
 pub mod defaults;
 mod registry;
+pub mod session_index;
+pub mod session_summary;
 pub mod sessions;
+mod settings_io;
 pub mod workflow_images;
 
 use futures_util::{SinkExt, StreamExt};
@@ -71,6 +74,16 @@ enum Command {
         session: SessionId,
         reply: oneshot::Sender<Response>,
     },
+    ResumeSession {
+        slug: Slug,
+        session: SessionId,
+        reply: oneshot::Sender<Response>,
+    },
+    DeleteSession {
+        slug: Slug,
+        session: SessionId,
+        reply: oneshot::Sender<Response>,
+    },
     OpenSession {
         slug: Slug,
         session: SessionId,
@@ -82,6 +95,13 @@ enum Command {
     },
     GetWorkflowBundle {
         id: WorkflowId,
+        reply: oneshot::Sender<Response>,
+    },
+    ListProviders {
+        reply: oneshot::Sender<Response>,
+    },
+    SetProviders {
+        providers: Vec<lutin_control_protocol::ProviderConfig>,
         reply: oneshot::Sender<Response>,
     },
 }
@@ -149,6 +169,16 @@ impl AppState {
                 session,
                 reply,
             },
+            Request::ResumeSession { slug, session } => Command::ResumeSession {
+                slug,
+                session,
+                reply,
+            },
+            Request::DeleteSession { slug, session } => Command::DeleteSession {
+                slug,
+                session,
+                reply,
+            },
             Request::OpenSession { slug, session } => Command::OpenSession {
                 slug,
                 session,
@@ -156,6 +186,8 @@ impl AppState {
             },
             Request::GetWorkflowCdylib { id } => Command::GetWorkflowCdylib { id, reply },
             Request::GetWorkflowBundle { id } => Command::GetWorkflowBundle { id, reply },
+            Request::ListProviders => Command::ListProviders { reply },
+            Request::SetProviders { providers } => Command::SetProviders { providers, reply },
         };
         if self.commands.send(cmd).await.is_err() {
             return Response::Err(ApiError::Supervisor("supervisor stopped".into()));
@@ -289,7 +321,7 @@ async fn handle_command(
                 let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
                 return;
             }
-            let infos = sessions::list_sessions(session_registry, &slug);
+            let infos = sessions::list_sessions(session_registry, &config.projects_root, &slug);
             let _ = reply.send(Response::Ok(ResponseOk::Sessions(infos)));
         }
         Command::StartSession {
@@ -345,6 +377,66 @@ async fn handle_command(
                 }
             }
         }
+        Command::ResumeSession {
+            slug,
+            session,
+            reply,
+        } => {
+            let Some(record) = projects.iter().find(|p| p.info.slug == slug) else {
+                let _ = reply.send(Response::Err(ApiError::NotFound(slug)));
+                return;
+            };
+            match sessions::resume_session(
+                session_registry,
+                &slug,
+                &session,
+                &record.signing,
+                &config.projects_root,
+                &config.global_config_dir,
+            )
+            .await
+            {
+                Ok((running_session, endpoint)) => {
+                    let info = running_session.info.clone();
+                    let _ = events.send(Event::SessionStarted {
+                        slug: slug.clone(),
+                        info: info.clone(),
+                    });
+                    let _ = reply.send(Response::Ok(ResponseOk::SessionResumed {
+                        info,
+                        endpoint,
+                    }));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(e.into()));
+                }
+            }
+        }
+        Command::DeleteSession {
+            slug,
+            session,
+            reply,
+        } => {
+            match sessions::delete_session(
+                session_registry,
+                &slug,
+                &session,
+                &config.projects_root,
+            )
+            .await
+            {
+                Ok(()) => {
+                    let _ = events.send(Event::SessionEnded {
+                        slug: slug.clone(),
+                        session,
+                    });
+                    let _ = reply.send(Response::Ok(ResponseOk::SessionDeleted));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(e.into()));
+                }
+            }
+        }
         Command::OpenSession {
             slug,
             session,
@@ -360,6 +452,26 @@ async fn handle_command(
                 }
                 Err(e) => {
                     let _ = reply.send(Response::Err(e.into()));
+                }
+            }
+        }
+        Command::ListProviders { reply } => {
+            match settings_io::read_providers(&config.global_config_dir) {
+                Ok(providers) => {
+                    let _ = reply.send(Response::Ok(ResponseOk::Providers(providers)));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Settings(e)));
+                }
+            }
+        }
+        Command::SetProviders { providers, reply } => {
+            match settings_io::write_providers(&config.global_config_dir, &providers) {
+                Ok(()) => {
+                    let _ = reply.send(Response::Ok(ResponseOk::ProvidersSaved));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Settings(e)));
                 }
             }
         }

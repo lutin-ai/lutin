@@ -8,7 +8,10 @@
 
 use std::path::PathBuf;
 
+use lutin_control_protocol::WorkflowId;
 use serde::{Deserialize, Serialize};
+
+use crate::transcribe::WhisperConfig;
 
 /// One named control-panel endpoint.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -20,6 +23,44 @@ pub struct ConnectionProfile {
     pub token: String,
 }
 
+/// What audio pipeline a hotkey drives. The `Target` (sibling field on
+/// `KeyBind`) decides where the resulting text goes — these two axes
+/// are intentionally orthogonal so adding wake-word later is just
+/// another trigger source feeding the same routing table.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    /// Hold-to-talk. Down → start capture. Up → stop + transcribe.
+    Ptt,
+    // Reserved (additive — adding doesn't break existing settings):
+    //   Dictate          — tap to start, second tap or silence to stop
+    //   OpenMicToggle    — flip always-on listening
+    //   ChromeAction { name: String } — non-audio chrome operations
+}
+
+/// Where the transcribed text lands. Resolution of `ActiveWorkflow`
+/// happens at fire-time using the React store's reported active
+/// session id; null falls through to clipboard so audio isn't lost.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Target {
+    ActiveWorkflow,
+    Workflow { workflow: WorkflowId },
+    Clipboard,
+    // Reserved: TypeIntoFocused (needs `enigo`).
+}
+
+/// One user-bound shortcut. `combo` is in the accelerator format
+/// understood by `tauri-plugin-global-shortcut` (e.g. `"Numpad1"`,
+/// `"CommandOrControl+Shift+M"`). The on-disk shape — chrome's
+/// in-memory map is derived from this list on load + on settings_set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyBind {
+    pub combo: String,
+    pub action: Action,
+    pub target: Target,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopSettings {
@@ -27,9 +68,35 @@ pub struct DesktopSettings {
     /// first entry when the named one is missing.
     pub default: String,
     pub connections: Vec<ConnectionProfile>,
+    /// User-configured global hotkeys. Empty list means "no hotkeys";
+    /// callers wanting a sensible default for first-run UX can call
+    /// `effective_keybinds()` instead which seeds a PTT default.
+    pub keybinds: Vec<KeyBind>,
+    /// Local whisper.cpp settings — model file, language, beam size.
+    /// Defaults to large-v3-turbo with autodetect; first PTT after a
+    /// fresh install triggers the download.
+    pub whisper: WhisperConfig,
 }
 
 impl DesktopSettings {
+    /// Bindings to actually register with the OS. Empty list seeds the
+    /// built-in PTT default (`Numpad1 → Ptt → ActiveWorkflow`) so
+    /// first-run users get push-to-talk without touching settings.
+    /// Trade-off: an empty list cannot mean "no hotkeys" — to opt out
+    /// the user binds a single throwaway combo. v2 may switch to
+    /// `Option<Vec<KeyBind>>` if that turns out to matter.
+    pub fn effective_keybinds(&self) -> Vec<KeyBind> {
+        if self.keybinds.is_empty() {
+            vec![KeyBind {
+                combo: "Numpad1".to_owned(),
+                action: Action::Ptt,
+                target: Target::ActiveWorkflow,
+            }]
+        } else {
+            self.keybinds.clone()
+        }
+    }
+
     pub fn active(&self) -> Option<&ConnectionProfile> {
         self.connections
             .iter()
@@ -39,10 +106,32 @@ impl DesktopSettings {
 
     pub fn load() -> Self {
         let path = settings_path();
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "settings read failed");
+                return Self::default();
+            }
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                // Don't silently overwrite a malformed file — preserve
+                // it next to the original so the user (or future-you)
+                // can recover the keybinds / whisper config / provider
+                // tokens that just got rejected.
+                let backup = path.with_extension("json.bad");
+                let _ = std::fs::rename(&path, &backup);
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    backup = %backup.display(),
+                    "settings parse failed; preserved as .bad and falling back to defaults"
+                );
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {

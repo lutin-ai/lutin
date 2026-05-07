@@ -3,6 +3,10 @@ target/
 **/target/
 *.rs.bk
 
+# JS deps (bun workspace; lockfile is committed, modules are not)
+node_modules/
+**/node_modules/
+
 # Local runtime state (vendor tree, per-project state, seeded workflows)
 .local/
 

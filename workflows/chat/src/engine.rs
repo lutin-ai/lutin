@@ -14,7 +14,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
@@ -36,6 +36,7 @@ use lutin_workflow_sdk::agent::{
     build_agent as sdk_build_agent, refresh_agent as sdk_refresh_agent, BuildArgs, BuildError,
 };
 use lutin_workflow_sdk::transcript;
+use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -90,6 +91,7 @@ fn require_env(key: &'static str) -> Result<String> {
 /// `Send` enqueues a new turn (queued behind any in-flight one).
 enum AgentCmd {
     Send { text: String, turn: TurnId },
+    Rerun { turn: TurnId },
     Cancel,
 }
 
@@ -100,12 +102,21 @@ struct AppState {
     session: SessionId,
     issuer: VerifyingKey,
     state_dir: PathBuf,
+    /// Needed by request handlers that read shared config (personas,
+    /// settings) — not just the agent runner.
+    global_config_dir: PathBuf,
+    project_config_dir: PathBuf,
     events: broadcast::Sender<ChatEvent>,
     next_turn: Arc<AtomicU64>,
     /// Send-only handle to the agent runner. The runner owns the
     /// `Agent` on its task's stack — there is no shared mutable
     /// agent state in the WS layer.
     agent_cmds: mpsc::UnboundedSender<AgentCmd>,
+    /// Set by the runner when it bails (startup failure, panic in
+    /// init, etc). Read by `handle_request` when `agent_cmds.send`
+    /// returns `Err`, so the user sees the actual reason instead of
+    /// a generic "agent runner is gone".
+    runner_failure: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -139,12 +150,14 @@ async fn main() -> Result<()> {
 
     let (events, _) = broadcast::channel(64);
     let (agent_cmds, agent_rx) = mpsc::unbounded_channel();
+    let runner_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     let runner_ctx = RunnerCtx {
         state_dir: env.state_dir.clone(),
-        global_config_dir: env.global_config_dir,
-        project_config_dir: env.project_config_dir,
+        global_config_dir: env.global_config_dir.clone(),
+        project_config_dir: env.project_config_dir.clone(),
         events: events.clone(),
+        failure: runner_failure.clone(),
     };
     tokio::spawn(run_agent_loop(runner_ctx, agent_rx));
 
@@ -154,9 +167,12 @@ async fn main() -> Result<()> {
         session: env.session,
         issuer: env.project_pubkey,
         state_dir: env.state_dir,
+        global_config_dir: env.global_config_dir,
+        project_config_dir: env.project_config_dir,
         events,
         next_turn: Arc::new(AtomicU64::new(1)),
         agent_cmds,
+        runner_failure,
     };
 
     loop {
@@ -312,6 +328,23 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
             let _ = state.agent_cmds.send(AgentCmd::Cancel);
             Ok(ChatOk::Cancelled)
         }
+        ChatRequest::ListPersonas => {
+            let resolver = Resolver::new(
+                state.global_config_dir.clone(),
+                Some(state.project_config_dir.clone()),
+            );
+            let personas = Persona::list(&resolver)
+                .map_err(|e| ChatError::Internal(format!("list personas: {e}")))?;
+            let projected = personas
+                .into_iter()
+                .map(|p| chat::PersonaInfo {
+                    name: p.name,
+                    display_name: p.display_name,
+                    model: p.model.unwrap_or_default(),
+                })
+                .collect();
+            Ok(ChatOk::Personas { personas: projected })
+        }
         ChatRequest::SendMessage { text } => {
             let turn = state.next_turn();
             if state
@@ -319,7 +352,26 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
                 .send(AgentCmd::Send { text, turn })
                 .is_err()
             {
-                return Err(ChatError::Internal("agent runner is gone".into()));
+                let reason = state
+                    .runner_failure
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_else(|| "agent runner exited without recording a reason".into());
+                return Err(ChatError::Internal(format!("agent runner unavailable: {reason}")));
+            }
+            Ok(ChatOk::MessageQueued { turn_id: turn })
+        }
+        ChatRequest::Rerun => {
+            let turn = state.next_turn();
+            if state.agent_cmds.send(AgentCmd::Rerun { turn }).is_err() {
+                let reason = state
+                    .runner_failure
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_else(|| "agent runner exited without recording a reason".into());
+                return Err(ChatError::Internal(format!("agent runner unavailable: {reason}")));
             }
             Ok(ChatOk::MessageQueued { turn_id: turn })
         }
@@ -343,59 +395,112 @@ struct RunnerCtx {
     global_config_dir: PathBuf,
     project_config_dir: PathBuf,
     events: broadcast::Sender<ChatEvent>,
+    /// Shared with `AppState`. Runner writes the failure reason here
+    /// before exiting so subsequent `Send` requests can return it
+    /// instead of the placeholder "agent runner is gone".
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl RunnerCtx {
+    fn record_failure(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        warn!(error = %reason, "agent runner bailing");
+        if let Ok(mut slot) = self.failure.lock() {
+            // First-write wins — later transient errors after the
+            // initial failure shouldn't overwrite the root cause.
+            if slot.is_none() {
+                *slot = Some(reason);
+            }
+        }
+    }
 }
 
 async fn run_agent_loop(ctx: RunnerCtx, mut rx: mpsc::UnboundedReceiver<AgentCmd>) {
-    // One Agent for the workflow's lifetime. Its `messages` vec is the
-    // single source of truth for transcript state — we seed from disk
-    // at startup, save back to disk after each turn, and let the agent
-    // own the in-memory copy. Persona + settings still reload per turn
-    // via `refresh_agent` so out-of-band TOML edits take effect.
+    // The Agent owns the in-memory transcript for the workflow's
+    // lifetime. We build it lazily on the first `Send` so that a
+    // misconfigured persona (e.g. missing provider) at session-open
+    // doesn't kill the runner — the user can `SetPersona` and retry,
+    // and we rebuild against the new state. Per-turn refresh via
+    // `sdk_refresh_agent` then keeps later out-of-band TOML edits
+    // applied without a full rebuild.
     //
-    // Errors at startup (corrupt transcript, missing persona, etc.)
-    // bail the runner; the workflow process dies and the user sees a
-    // clear failure on next interaction.
-    let resolved = match resolve_args(&ctx) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(error = %e, "resolve args at runner start failed; bailing");
-            return;
-        }
-    };
-    let mut agent = match sdk_build_agent(resolved.as_build_args()) {
-        Ok(a) => a,
-        Err(e) => {
-            warn!(error = %e, "build agent at runner start failed; bailing");
-            return;
-        }
-    };
+    // Truly fatal startup errors (corrupt transcript) still bail —
+    // there's no recovery path for those.
     let history = match transcript::load(&ctx.state_dir) {
         Ok(m) => m,
         Err(e) => {
-            warn!(error = %e, "load transcript at runner start failed; bailing");
+            ctx.record_failure(format!("load transcript: {e}"));
             return;
         }
     };
-    if let Err(e) = agent.edit_messages(|m| *m = history) {
-        warn!(error = %e, "seed agent messages at runner start failed; bailing");
-        return;
-    }
+    // Refresh summary.json on boot so a resumed session gets its
+    // last_activity bumped (and a freshly-created session gets a
+    // file at all, even before the first turn). Done from the
+    // transcript directly so we don't need an Agent for this.
+    write_summary(&ctx.state_dir, &history);
 
+    let mut agent: Option<Agent> = None;
     while let Some(cmd) = rx.recv().await {
         match cmd {
             AgentCmd::Send { text, turn } => {
-                run_turn(&ctx, &mut rx, &mut agent, text, turn).await;
+                if let Some(a) = ensure_agent(&mut agent, &ctx, &history, turn) {
+                    run_turn(&ctx, &mut rx, a, Some(text), turn).await;
+                }
+            }
+            AgentCmd::Rerun { turn } => {
+                if let Some(a) = ensure_agent(&mut agent, &ctx, &history, turn) {
+                    run_turn(&ctx, &mut rx, a, None, turn).await;
+                }
             }
             AgentCmd::Cancel => {} // idle — nothing to cancel
         }
     }
 }
 
+/// Lazy-build the agent on first use; surface init failures as a
+/// turn-level error so the runner stays alive. Returns `None` when
+/// the build failed (and the caller should skip the turn).
+fn ensure_agent<'a>(
+    slot: &'a mut Option<Agent>,
+    ctx: &RunnerCtx,
+    history: &[lutin_llm::Message],
+    turn: TurnId,
+) -> Option<&'a mut Agent> {
+    if slot.is_none() {
+        match build_initial_agent(ctx, history) {
+            Ok(a) => *slot = Some(a),
+            Err(reason) => {
+                let _ = ctx.events.send(ChatEvent::MessageFinished {
+                    turn_id: turn,
+                    reason: FinishReason::Failed(reason),
+                });
+                return None;
+            }
+        }
+    }
+    slot.as_mut()
+}
+
+/// Build the agent on first use and seed its message vec with the
+/// on-disk transcript. Returns a human-readable reason on failure so
+/// the caller can surface it as a turn-level error and stay alive.
+fn build_initial_agent(ctx: &RunnerCtx, history: &[lutin_llm::Message]) -> Result<Agent, String> {
+    let resolved = resolve_args(ctx).map_err(|e| format!("resolve args: {e}"))?;
+    let mut agent = sdk_build_agent(resolved.as_build_args())
+        .map_err(|e| format!("build agent: {}", map_build_error(e)))?;
+    agent
+        .edit_messages(|m| *m = history.to_vec())
+        .map_err(|e| format!("seed agent messages: {e}"))?;
+    Ok(agent)
+}
+
+/// `text` is `Some(_)` for a new user message and `None` for a Rerun,
+/// which kicks the agent loop against the existing transcript.
 async fn run_turn(
     ctx: &RunnerCtx,
     rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
     agent: &mut Agent,
-    text: String,
+    text: Option<String>,
     turn: TurnId,
 ) {
     // Refresh provider/model/sampling/system/tools from disk so
@@ -418,13 +523,17 @@ async fn run_turn(
         });
         return;
     }
-    // start() consumes pending messages on this run, so push first.
-    if let Err(e) = agent.push_message(lutin_llm::Message::User(text)) {
-        let _ = ctx.events.send(ChatEvent::MessageFinished {
-            turn_id: turn,
-            reason: FinishReason::Failed(format!("push: {e}")),
-        });
-        return;
+    // start() consumes pending messages on this run, so push first
+    // (skipped on Rerun, which deliberately runs against the existing
+    // transcript without appending a new user message).
+    if let Some(text) = text {
+        if let Err(e) = agent.push_message(lutin_llm::Message::User(text)) {
+            let _ = ctx.events.send(ChatEvent::MessageFinished {
+                turn_id: turn,
+                reason: FinishReason::Failed(format!("push: {e}")),
+            });
+            return;
+        }
     }
     let mut stream = match agent.start() {
         Ok(s) => s,
@@ -450,8 +559,9 @@ async fn run_turn(
             },
             cmd = rx.recv() => match cmd {
                 Some(AgentCmd::Cancel) => agent.cancel(),
-                Some(AgentCmd::Send { turn: dropped_turn, .. }) => {
-                    warn!("send received during in-flight turn — dropping; client should wait");
+                Some(AgentCmd::Send { turn: dropped_turn, .. })
+                | Some(AgentCmd::Rerun { turn: dropped_turn }) => {
+                    warn!("send/rerun received during in-flight turn — dropping; client should wait");
                     let _ = ctx.events.send(ChatEvent::MessageFinished {
                         turn_id: dropped_turn,
                         reason: FinishReason::Failed("turn already in flight".into()),
@@ -471,11 +581,116 @@ async fn run_turn(
     if let Err(e) = transcript::save(&ctx.state_dir, agent.messages()) {
         warn!(error = %e, "save transcript failed");
     }
+    write_summary(&ctx.state_dir, agent.messages());
     let reason = finish.unwrap_or_else(|| map_finish_reason(outcome.finish_reason));
     let _ = ctx.events.send(ChatEvent::MessageFinished {
         turn_id: turn,
         reason,
     });
+}
+
+/// Workflow-supplied summary file CP reads at `ListSessions` time
+/// to label this session in the desktop's list. Schema is shared
+/// across workflows (chrome reads it identically) — keep it in sync
+/// with `lutin_control_protocol::SessionSummary`. We mirror the type
+/// rather than depend on the CP crate so chat keeps its lean
+/// dependency footprint.
+#[derive(Debug, Clone, Serialize)]
+struct ChatSummary {
+    title: Option<String>,
+    subtitle: Option<String>,
+    last_activity: Option<String>,
+    preview: Option<String>,
+}
+
+const SUMMARY_TITLE_CHARS: usize = 80;
+const SUMMARY_PREVIEW_CHARS: usize = 160;
+
+/// Build + atomically write `<state_dir>/summary.json`. Called after
+/// every turn so the dormant-session label tracks the latest state;
+/// also called once at runner startup so the file exists before any
+/// turns happen. Failures log a warning but never bubble — a missing
+/// summary just means the chrome shows a generic fallback label, not
+/// that the session is broken.
+fn write_summary(state_dir: &std::path::Path, messages: &[lutin_llm::Message]) {
+    let summary = build_summary(messages);
+    let payload = match serde_json::to_vec_pretty(&summary) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "encode summary.json failed");
+            return;
+        }
+    };
+    let path = state_dir.join("summary.json");
+    let tmp = state_dir.join("summary.json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &payload) {
+        warn!(error = %e, path = %tmp.display(), "write summary tmp failed");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        warn!(error = %e, "rename summary tmp into place failed");
+    }
+}
+
+fn build_summary(messages: &[lutin_llm::Message]) -> ChatSummary {
+    let title = messages.iter().find_map(|m| match m {
+        lutin_llm::Message::User(text) if !text.trim().is_empty() => {
+            Some(truncate_chars(text.trim(), SUMMARY_TITLE_CHARS))
+        }
+        _ => None,
+    });
+    let preview = messages.iter().rev().find_map(|m| match m {
+        lutin_llm::Message::Assistant { text, .. } if !text.trim().is_empty() => {
+            Some(truncate_chars(text.trim(), SUMMARY_PREVIEW_CHARS))
+        }
+        _ => None,
+    });
+    let visible = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                lutin_llm::Message::User(t) if !t.is_empty(),
+            ) || matches!(
+                m,
+                lutin_llm::Message::Assistant { text, .. } if !text.is_empty(),
+            )
+        })
+        .count();
+    let subtitle = if visible == 0 {
+        None
+    } else if visible == 1 {
+        Some("1 message".into())
+    } else {
+        Some(format!("{visible} messages"))
+    };
+    ChatSummary {
+        title,
+        subtitle,
+        last_activity: Some(chrono::Utc::now().to_rfc3339()),
+        preview,
+    }
+}
+
+/// Char-aware (not byte-aware) truncation, with a single ellipsis
+/// when we cut. Avoids splitting multi-byte UTF-8 sequences.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut count = 0;
+    let mut end_byte = s.len();
+    for (idx, _) in s.char_indices() {
+        if count == max_chars {
+            end_byte = idx;
+            break;
+        }
+        count += 1;
+    }
+    if end_byte < s.len() {
+        let mut out = s[..end_byte].to_owned();
+        out.push('…');
+        out
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Project the engine-side `Vec<Message>` to the chat protocol's

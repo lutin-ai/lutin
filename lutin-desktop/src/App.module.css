@@ -1,12 +1,18 @@
 .shell {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
-  background: #0e0e0e;
-  color: #ddd;
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
-  font-size: 13px;
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--fs-lg);
   overflow: hidden;
+}
+
+.row {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
 .empty {
@@ -14,32 +20,35 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #666;
-  font-size: 14px;
+  color: var(--text-4);
+  font-size: var(--fs-xl);
+  background: var(--bg-1);
 }
 
 .noconfig {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--s-3);
   text-align: center;
   max-width: 400px;
 }
 .noconfigTitle {
-  font-size: 16px;
-  color: #ddd;
+  font-size: var(--fs-2xl);
+  color: var(--text-1);
+  font-weight: 600;
 }
 .noconfig p {
-  color: #888;
+  color: var(--text-3);
   margin: 0;
 }
 .noconfig button {
-  background: #2a4a8a;
+  background: var(--accent);
   border: none;
-  color: #fff;
-  padding: 8px 18px;
-  border-radius: 4px;
-  cursor: pointer;
+  color: var(--accent-on);
+  padding: 8px var(--s-5);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-lg);
+  font-weight: 500;
 }
-.noconfig button:hover { background: #355aaa; }
+.noconfig button:hover { background: var(--accent-hover); }

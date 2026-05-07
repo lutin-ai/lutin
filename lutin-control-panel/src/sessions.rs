@@ -20,10 +20,14 @@ use lutin_auth::{
     Scope, SessionId, SigningKey, Slug, Subject, Ttl, WorkflowId, mint_with_ttl,
     pubkey_to_string,
 };
-use lutin_control_protocol::{ApiError, ProjectPubkey, SessionEndpoint, SessionInfo, WorkflowInfo};
+use lutin_control_protocol::{
+    ApiError, ProjectPubkey, SessionEndpoint, SessionInfo, SessionState, WorkflowInfo,
+};
 use tokio::process::Command;
 use tracing::{info, warn};
 
+use crate::session_index::{self, IndexError};
+use crate::session_summary;
 use crate::workflow_images;
 
 /// How long to wait for the workflow container to publish its handoff.
@@ -64,6 +68,8 @@ pub enum SessionError {
     Auth(#[from] lutin_auth::AuthError),
     #[error("rng: {0}")]
     Rng(#[from] getrandom::Error),
+    #[error("session index: {0}")]
+    Index(#[from] IndexError),
 }
 
 /// Live in-memory record of one running session container.
@@ -141,13 +147,103 @@ pub async fn start_session(
     projects_root: &Path,
     global_config_dir: &Path,
 ) -> Result<(RunningSession, SessionEndpoint), SessionError> {
+    let session_id = mint_session_id()?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    // Append to the workflow's index *before* the container spawns so
+    // a crash mid-spawn still leaves a discoverable (dormant) entry
+    // the user can clean up. `spawn_container` is otherwise free to
+    // tear down its container; the index entry survives.
+    session_index::append(projects_root, slug, workflow, &session_id, &created_at)?;
+    spawn_container(
+        registry,
+        slug,
+        workflow,
+        &session_id,
+        &created_at,
+        signing,
+        projects_root,
+        global_config_dir,
+    )
+    .await
+}
+
+/// Resume a dormant session: discover its workflow id from the index,
+/// reuse its existing on-disk state dir, spawn a fresh container.
+/// Idempotent — if the session is already running (e.g. a concurrent
+/// caller raced us to spawn it), re-mint a token against the existing
+/// container instead of erroring. The desktop's open flow funnels
+/// every list-row click through OpenSession→ResumeSession fallback,
+/// so two near-simultaneous clicks on the same dormant row would
+/// otherwise reliably trip this race.
+pub async fn resume_session(
+    registry: &mut SessionRegistry,
+    slug: &Slug,
+    session: &SessionId,
+    signing: &SigningKey,
+    projects_root: &Path,
+    global_config_dir: &Path,
+) -> Result<(RunningSession, SessionEndpoint), SessionError> {
+    if let Some(existing) = registry
+        .iter()
+        .find(|s| &s.slug == slug && &s.info.id == session)
+        .cloned()
+    {
+        let token = mint_session_token(
+            signing,
+            slug.clone(),
+            existing.info.workflow.clone(),
+            existing.info.id.clone(),
+        )?;
+        let endpoint = SessionEndpoint {
+            addr: existing.addr,
+            token,
+            project_pubkey: existing.project_pubkey.clone(),
+        };
+        return Ok((existing, endpoint));
+    }
+    let workflow = session_index::find_workflow(projects_root, slug, session)
+        .ok_or_else(|| SessionError::SessionNotFound(session.clone()))?;
+    // Recover created_at from the index so the resumed `SessionInfo`
+    // keeps its original timestamp. `read_all` is the cheapest
+    // workflow-agnostic way to find it.
+    let created_at = session_index::read_all(projects_root, slug)
+        .into_iter()
+        .find(|(_, e)| e.id == *session)
+        .map(|(_, e)| e.created_at)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    spawn_container(
+        registry,
+        slug,
+        &workflow,
+        session,
+        &created_at,
+        signing,
+        projects_root,
+        global_config_dir,
+    )
+    .await
+}
+
+/// Spawn a workflow container for `(slug, workflow, session_id)`, wait
+/// for handoff, register it. Both `start_session` (fresh id) and
+/// `resume_session` (reused id) funnel through here so the docker run
+/// flags stay in one place.
+async fn spawn_container(
+    registry: &mut SessionRegistry,
+    slug: &Slug,
+    workflow: &WorkflowId,
+    session_id: &SessionId,
+    created_at: &str,
+    signing: &SigningKey,
+    projects_root: &Path,
+    global_config_dir: &Path,
+) -> Result<(RunningSession, SessionEndpoint), SessionError> {
     let image_ref = resolve_workflow_image(workflow)?;
     let project_dir = projects_root.join(slug.as_str());
     let lutin_dir = project_dir.join(".lutin");
     let project_pubkey = ProjectPubkey::new(signing.verifying_key().to_bytes());
     let project_pubkey_b64 = pubkey_to_string(&signing.verifying_key());
 
-    let session_id = mint_session_id()?;
     let session_dir = lutin_dir.join("sessions").join(session_id.as_str());
     tokio::fs::create_dir_all(&session_dir).await?;
     let handoff_path = session_dir.join("handoff");
@@ -250,6 +346,13 @@ pub async fn start_session(
     let session_info = SessionInfo {
         id: session_id.clone(),
         workflow: workflow.clone(),
+        created_at: created_at.to_owned(),
+        state: SessionState::Running,
+        // Engine writes summary.json once it has state worth showing;
+        // on first start it's None, and `list_sessions` reads it
+        // fresh on every call so subsequent writes show up without
+        // mutating this snapshot.
+        summary: None,
     };
     let token = mint_session_token(
         signing,
@@ -323,12 +426,83 @@ pub fn open_session(
     })
 }
 
-pub fn list_sessions(registry: &SessionRegistry, slug: &Slug) -> Vec<SessionInfo> {
-    registry
+/// Every session for `slug`, dormant included. Walks the workflow
+/// index files on disk for the persistent set, then overrides
+/// `state`/`created_at` from the in-memory registry where the same id
+/// is currently running. Per-session `summary.json` files are read
+/// fresh on every call.
+pub fn list_sessions(
+    registry: &SessionRegistry,
+    projects_root: &Path,
+    slug: &Slug,
+) -> Vec<SessionInfo> {
+    let mut out: Vec<SessionInfo> = session_index::read_all(projects_root, slug)
+        .into_iter()
+        .map(|(workflow, entry)| SessionInfo {
+            id: entry.id.clone(),
+            workflow,
+            created_at: entry.created_at,
+            state: SessionState::Dormant,
+            summary: session_summary::read(projects_root, slug, &entry.id),
+        })
+        .collect();
+    for running in registry.iter().filter(|s| &s.slug == slug) {
+        if let Some(existing) = out.iter_mut().find(|s| s.id == running.info.id) {
+            existing.state = SessionState::Running;
+        } else {
+            // Running but not in any index file — shouldn't happen
+            // (start_session writes the index before spawning) but
+            // surface it rather than hide it.
+            warn!(
+                slug = %slug.as_str(),
+                session = %running.info.id,
+                "running session has no index entry; surfacing without summary"
+            );
+            let mut info = running.info.clone();
+            info.state = SessionState::Running;
+            info.summary = session_summary::read(projects_root, slug, &running.info.id);
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// Permanently delete a session: stop the container if running, drop
+/// the index entry, and remove its on-disk state dir.
+pub async fn delete_session(
+    registry: &mut SessionRegistry,
+    slug: &Slug,
+    session: &SessionId,
+    projects_root: &Path,
+) -> Result<(), SessionError> {
+    // Stop if running. Don't error on "not running" — delete should
+    // succeed for dormant sessions too.
+    if let Some(idx) = registry
         .iter()
-        .filter(|s| &s.slug == slug)
-        .map(|s| s.info.clone())
-        .collect()
+        .position(|s| &s.slug == slug && &s.info.id == session)
+    {
+        let entry = registry.swap_remove(idx);
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &entry.container_name])
+            .output()
+            .await;
+    }
+
+    let workflow = session_index::find_workflow(projects_root, slug, session)
+        .ok_or_else(|| SessionError::SessionNotFound(session.clone()))?;
+    session_index::remove(projects_root, slug, &workflow, session)?;
+
+    let session_dir = projects_root
+        .join(slug.as_str())
+        .join(".lutin")
+        .join("sessions")
+        .join(session.as_str());
+    if let Err(e) = tokio::fs::remove_dir_all(&session_dir).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(SessionError::Io(e));
+    }
+    Ok(())
 }
 
 /// Tear down every session container for a given slug — used when the

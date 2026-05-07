@@ -107,10 +107,51 @@ pub struct WorkflowInfo {
 /// One running or persisted session within a project. The session
 /// itself is a separate WS endpoint the desktop dials directly — see
 /// `SessionEndpoint`.
+///
+/// Sessions persist on disk independently of their containers: CP
+/// indexes them in `<project>/.lutin/<workflow>/sessions.toml`, so a
+/// stopped session is `Dormant` rather than gone. The chrome lists
+/// dormant + running together; clicking dormant triggers
+/// `ResumeSession` to bring the container back up.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: SessionId,
     pub workflow: WorkflowId,
+    /// RFC3339 timestamp recorded when CP first started the session.
+    /// Stable across stop/resume.
+    pub created_at: String,
+    /// `Running` if a container is currently up for this session id;
+    /// `Dormant` otherwise. Computed at list-time from CP's registry —
+    /// not stored on disk.
+    pub state: SessionState,
+    /// Workflow-supplied presentational metadata for the session list.
+    /// Optional; chrome falls back to a generic label when absent.
+    /// Engines write this into `<project>/.lutin/sessions/<id>/summary.json`
+    /// while running and CP passes it through unchanged. The schema is
+    /// the same for every workflow so chrome stays workflow-agnostic.
+    pub summary: Option<SessionSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionState {
+    Running,
+    Dormant,
+}
+
+/// Workflow-written, opaque-to-CP metadata that controls how a
+/// session row is labelled in the desktop's list. Every field is
+/// optional; chrome substitutes generic fallbacks when missing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    /// Headline for the row. Chat: first user message, truncated.
+    /// Transcription: recording filename. Etc.
+    pub title: Option<String>,
+    /// Secondary line. Chat: "12 messages". Transcription: duration.
+    pub subtitle: Option<String>,
+    /// RFC3339 of the engine's last meaningful state change.
+    pub last_activity: Option<String>,
+    /// One-line preview body. Chat: last assistant message snippet.
+    pub preview: Option<String>,
 }
 
 /// Where a started workflow session listens, and the token a client
@@ -153,8 +194,25 @@ pub enum Request {
         slug: Slug,
         workflow: WorkflowId,
     },
-    /// Stop a running session (terminates its container).
+    /// Stop a running session (terminates its container). The
+    /// on-disk state and index entry are preserved — call
+    /// `DeleteSession` to forget the session entirely.
     StopSession {
+        slug: Slug,
+        session: SessionId,
+    },
+    /// Bring a dormant session back up. Looks up the workflow id from
+    /// the on-disk index, spawns a container against the existing
+    /// session dir (so the engine reads its prior state), returns the
+    /// new endpoint. No-op-with-fresh-token if the session is already
+    /// running.
+    ResumeSession {
+        slug: Slug,
+        session: SessionId,
+    },
+    /// Permanently remove a session: stop it if running, delete its
+    /// state dir, drop the index entry. Irreversible.
+    DeleteSession {
         slug: Slug,
         session: SessionId,
     },
@@ -179,6 +237,51 @@ pub enum Request {
     GetWorkflowBundle {
         id: WorkflowId,
     },
+    /// Read the configured LLM providers from the global
+    /// `settings.toml`. Only the providers list is exposed via this
+    /// RPC today; other Settings sections (chat, tts, …) are still
+    /// edited out-of-band.
+    ListProviders,
+    /// Replace the entire `providers = [...]` table in the global
+    /// `settings.toml`. Whole-list replace is intentional: the
+    /// desktop edits a draft and saves atomically, matching how it
+    /// already handles connection profiles. Other sections of
+    /// `settings.toml` are preserved by reading the file as
+    /// `toml::Value`, swapping the providers key, and writing back.
+    SetProviders {
+        providers: Vec<ProviderConfig>,
+    },
+}
+
+/// Plain DTO mirroring `lutin_settings::ProviderConfig`. Defined here
+/// (rather than re-exported) to keep `lutin-control-protocol` dep-light;
+/// the CP runtime converts between the two when reading/writing
+/// `settings.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderConfig {
+    pub name: String,
+    pub kind: ProviderKind,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub use_oauth: bool,
+}
+
+/// Wire/disk format uses snake_case (`open_router`, `open_ai_compat`)
+/// to match `lutin_settings::ProviderKind` so the on-disk
+/// `settings.toml` written by the CP handler stays compatible with
+/// the engine-side loader.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    OpenRouter,
+    Ollama,
+    Anthropic,
+    OpenAiCompat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,6 +304,13 @@ pub enum ResponseOk {
         endpoint: SessionEndpoint,
     },
     SessionStopped,
+    SessionDeleted,
+    /// Reply to `ResumeSession`: a fresh endpoint plus the rehydrated
+    /// `SessionInfo` (state will be `Running` after this returns).
+    SessionResumed {
+        info: SessionInfo,
+        endpoint: SessionEndpoint,
+    },
     /// Reply to `OpenSession`: just an endpoint (the caller already has
     /// the `SessionInfo` from `ListSessions`).
     SessionOpened(SessionEndpoint),
@@ -221,6 +331,10 @@ pub enum ResponseOk {
         digest: String,
         bytes: Vec<u8>,
     },
+    /// Reply to `ListProviders`.
+    Providers(Vec<ProviderConfig>),
+    /// Reply to `SetProviders`.
+    ProvidersSaved,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -235,6 +349,8 @@ pub enum ApiError {
     WorkflowNotFound(WorkflowId),
     #[error("session not found: {0}")]
     SessionNotFound(SessionId),
+    #[error("settings: {0}")]
+    Settings(String),
 }
 
 /// Server-pushed events, fanned out to every authenticated client.

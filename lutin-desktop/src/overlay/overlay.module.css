@@ -1,0 +1,102 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: rgba(18, 18, 22, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: rgba(245, 245, 250, 0.95);
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 24px -8px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: pill-in 180ms ease-out;
+}
+
+.pill[data-dot="done"] {
+  border-color: rgba(134, 239, 172, 0.35);
+  background: rgba(20, 28, 22, 0.94);
+}
+
+.pill[data-dot="error"] {
+  border-color: rgba(252, 165, 165, 0.35);
+  background: rgba(28, 18, 18, 0.94);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5eead4;
+  box-shadow: 0 0 8px rgba(94, 234, 212, 0.6);
+}
+
+.pill[data-dot="listening"] .dot {
+  background: #f87171;
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.7);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(94, 234, 212, 0.25);
+  border-top-color: #5eead4;
+  animation: spin 0.7s linear infinite;
+}
+
+.check {
+  color: #86efac;
+  animation: check-pop 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.label {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.55;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes check-pop {
+  0% {
+    transform: scale(0.2);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.25);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes pill-in {
+  from {
+    transform: translateY(4px) scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}

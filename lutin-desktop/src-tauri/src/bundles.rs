@@ -112,13 +112,29 @@ impl BundleCache {
                 digest
             )));
         }
-        self.entries
-            .lock()
-            .expect("bundle map mutex poisoned")
-            .insert(
-                (workflow.as_str().to_owned(), digest.to_owned()),
-                dir.clone(),
-            );
+        // Evict prior digests for this workflow id, both from the
+        // in-memory map and on disk. `resolve_asset` looks up by
+        // workflow id alone (the iframe URL doesn't carry a digest), so
+        // leaving stale entries means asset reads after a rebuild can
+        // randomly resolve to the old bundle.
+        let mut map = self.entries.lock().expect("bundle map mutex poisoned");
+        let stale_dirs: Vec<PathBuf> = map
+            .iter()
+            .filter_map(|((w, d), p)| {
+                (w == workflow.as_str() && d != digest).then(|| p.clone())
+            })
+            .collect();
+        map.retain(|(w, d), _| w != workflow.as_str() || d == digest);
+        map.insert(
+            (workflow.as_str().to_owned(), digest.to_owned()),
+            dir.clone(),
+        );
+        drop(map);
+        for stale in stale_dirs {
+            if stale != dir {
+                let _ = std::fs::remove_dir_all(&stale);
+            }
+        }
         Ok(dir)
     }
 

@@ -19,15 +19,47 @@ export interface WorkflowInfo {
   digest: string;
 }
 
+export type SessionState = "Running" | "Dormant";
+
+/// Workflow-written, opaque-to-CP metadata that controls how a
+/// session row is labelled. Every field optional — chrome falls back
+/// to a generic label when missing.
+export interface SessionSummary {
+  title?: string | null;
+  subtitle?: string | null;
+  last_activity?: string | null;
+  preview?: string | null;
+}
+
 export interface SessionInfo {
   id: SessionId;
   workflow: WorkflowId;
+  /// RFC3339, recorded when CP first started the session. Stable
+  /// across stop/resume.
+  created_at: string;
+  state: SessionState;
+  summary?: SessionSummary | null;
 }
 
 export interface SessionEndpoint {
   addr: string;
   token: string;
   project_pubkey: number[];
+}
+
+export type ProviderKind =
+  | "open_router"
+  | "ollama"
+  | "anthropic"
+  | "open_ai_compat";
+
+export interface ProviderConfig {
+  name: string;
+  kind: ProviderKind;
+  api_key?: string | null;
+  api_key_env?: string | null;
+  base_url?: string | null;
+  use_oauth?: boolean;
 }
 
 export type Request =
@@ -38,9 +70,13 @@ export type Request =
   | { ListSessions: { slug: Slug } }
   | { StartSession: { slug: Slug; workflow: WorkflowId } }
   | { StopSession: { slug: Slug; session: SessionId } }
+  | { ResumeSession: { slug: Slug; session: SessionId } }
+  | { DeleteSession: { slug: Slug; session: SessionId } }
   | { OpenSession: { slug: Slug; session: SessionId } }
   | { GetWorkflowCdylib: { id: WorkflowId } }
-  | { GetWorkflowBundle: { id: WorkflowId } };
+  | { GetWorkflowBundle: { id: WorkflowId } }
+  | "ListProviders"
+  | { SetProviders: { providers: ProviderConfig[] } };
 
 export type ResponseOk =
   | { Projects: ProjectInfo[] }
@@ -50,16 +86,21 @@ export type ResponseOk =
   | { Sessions: SessionInfo[] }
   | { SessionStarted: { info: SessionInfo; endpoint: SessionEndpoint } }
   | "SessionStopped"
+  | "SessionDeleted"
+  | { SessionResumed: { info: SessionInfo; endpoint: SessionEndpoint } }
   | { SessionOpened: SessionEndpoint }
   | { WorkflowCdylib: { id: WorkflowId; digest: string; bytes: number[] } }
-  | { WorkflowBundle: { id: WorkflowId; digest: string; bytes: number[] } };
+  | { WorkflowBundle: { id: WorkflowId; digest: string; bytes: number[] } }
+  | { Providers: ProviderConfig[] }
+  | "ProvidersSaved";
 
 export type ApiError =
   | { NotFound: Slug }
   | { AlreadyExists: Slug }
   | { Supervisor: string }
   | { WorkflowNotFound: WorkflowId }
-  | { SessionNotFound: SessionId };
+  | { SessionNotFound: SessionId }
+  | { Settings: string };
 
 export type Response = { Ok: ResponseOk } | { Err: ApiError };
 
@@ -75,9 +116,41 @@ export interface ConnectionProfile {
   token: string;
 }
 
+/// Mirrors Rust `Action` (settings.rs). Externally tagged on `kind` —
+/// only `ptt` exists today; reserved variants (`dictate`, `open_mic_toggle`,
+/// …) are additive so old settings round-trip through future builds.
+export type Action = { kind: "ptt" };
+
+/// Mirrors Rust `Target` (settings.rs). `active_workflow` resolves at
+/// dispatch time against the focused iframe; `workflow` pins to a
+/// specific workflow id; `clipboard` is the safe fallback.
+export type Target =
+  | { kind: "active_workflow" }
+  | { kind: "workflow"; workflow: WorkflowId }
+  | { kind: "clipboard" };
+
+export interface KeyBind {
+  combo: string;
+  action: Action;
+  target: Target;
+}
+
+export type WhisperModel = "large-v3-turbo" | "distil-large-v3";
+
+/// Mirrors Rust `WhisperConfig`. `beam_size` is persisted as a small
+/// integer (0/1 ⇒ greedy, n ⇒ beam width n); we keep that shape so
+/// edits round-trip cleanly through the chrome's draft state.
+export interface WhisperConfig {
+  model: WhisperModel;
+  language?: string | null;
+  beam_size: number;
+}
+
 export interface DesktopSettings {
   default: string;
   connections: ConnectionProfile[];
+  keybinds: KeyBind[];
+  whisper: WhisperConfig;
 }
 
 // Mirrors Rust `PluginManifest` + `PluginOpened` (lib.rs). `url` is
@@ -86,8 +159,23 @@ export interface DesktopSettings {
 export interface PluginManifest {
   entry: string;
   permissions: string[];
+  /// Subset of well-known capability names this workflow can be the
+  /// *target* of (vs `permissions`, which is what it can *do*). E.g.
+  /// `"receive_transcription"` opts in to per-session transcription
+  /// deliveries from the chrome's hotkey routing.
+  capabilities: string[];
   display_name: string;
   icon: string;
+}
+
+/// Sent to Rust via `set_active_session` whenever a plugin iframe
+/// mounts or unmounts. Mirrors Rust `ActiveSession`. Carrying
+/// `capabilities` here avoids an extra round-trip through the bundle
+/// cache on the dispatch hot path.
+export interface ActiveSession {
+  session: SessionId;
+  workflow: WorkflowId;
+  capabilities: string[];
 }
 
 export interface PluginOpened {

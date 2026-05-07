@@ -1,74 +1,221 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { ChatView } from "@lutin/chat-widgets";
+import "@lutin/chat-widgets/theme.css";
 import type { Lutin } from "./lutin";
+import {
+  type ChatEvent,
+  type ChatResponse,
+  type PersonaInfo,
+  decodeChatEvent,
+  decodeChatResponse,
+  encodeChatRequest,
+} from "./chat";
+import { initialSnapshot, reduce } from "./session";
+import { toViewModel } from "./adapter";
+import { makePersonaComposer } from "./PersonaComposer";
 
-interface Props { lutin: Lutin }
-
-/// Phase 2 chat UI stub. The bytes pump (chrome ↔ engine) isn't wired
-/// yet, so this only proves bundle delivery + the lutin handshake.
-/// `lutin.request` / `lutin.onBroadcast` start working once the engine
-/// bridge lands; until then this file just renders context and lets
-/// the user fire a chrome notification.
-export function App({ lutin }: Props) {
-  const [status, setStatus] = useState<string>("");
-
-  const ping = () => {
-    lutin.notify(
-      `${lutin.workflow}/${lutin.session.slice(0, 8)} says hi`,
-      "Chat plugin",
-    );
-    setStatus("notification sent");
-    setTimeout(() => setStatus(""), 1500);
-  };
-
-  return (
-    <div style={styles.root}>
-      <h1 style={styles.title}>{lutin.manifest.icon} Chat</h1>
-      <dl style={styles.dl}>
-        <dt style={styles.dt}>Project</dt>
-        <dd style={styles.dd}><code>{lutin.slug}</code></dd>
-        <dt style={styles.dt}>Session</dt>
-        <dd style={styles.dd}><code>{lutin.session}</code></dd>
-        <dt style={styles.dt}>Permissions</dt>
-        <dd style={styles.dd}>
-          {lutin.manifest.permissions.length === 0
-            ? <em>none declared</em>
-            : lutin.manifest.permissions.join(", ")}
-        </dd>
-      </dl>
-      <p style={styles.note}>
-        Engine bridge is wired (lutin.request / lutin.onBroadcast
-        round-trip through chrome). Chat protocol decoding lands next.
-      </p>
-      <button style={styles.button} onClick={ping}>
-        Send test notification
-      </button>
-      {status && <span style={styles.status}>{status}</span>}
-    </div>
-  );
+interface Props {
+  lutin: Lutin;
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  root: {
-    fontFamily:
-      "system-ui, -apple-system, 'Segoe UI', sans-serif",
-    padding: "1.5rem",
-    color: "#222",
-    background: "#fafafa",
-    minHeight: "100vh",
-    boxSizing: "border-box",
-  },
-  title: { fontSize: "1.4rem", margin: "0 0 1rem" },
-  dl: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.25rem 1rem", margin: 0 },
-  dt: { color: "#666", fontSize: "0.85rem" },
-  dd: { margin: 0, fontSize: "0.9rem" },
-  note: { marginTop: "1.5rem", color: "#888", fontStyle: "italic" },
-  button: {
-    marginTop: "0.5rem",
-    padding: "0.4rem 0.9rem",
-    border: "1px solid #ccc",
-    borderRadius: 4,
-    background: "white",
-    cursor: "pointer",
-  },
-  status: { marginLeft: "0.75rem", color: "#0a7", fontSize: "0.85rem" },
-};
+export function App({ lutin }: Props) {
+  const [snap, dispatch] = useReducer(reduce, initialSnapshot);
+  const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
+  const [draft, setDraft] = useState("");
+
+  // Wire PTT / open-mic transcription deliveries into the composer.
+  // We append rather than replace so the user can stack voice input
+  // on top of already-typed text. The plan calls for "don't auto-send"
+  // — the user reviews the result before hitting send.
+  useEffect(() => {
+    if (!lutin.onTranscription) return;
+    const off = lutin.onTranscription(({ text }) => {
+      if (!text) return;
+      setDraft((prev) => (prev.length === 0 ? text : `${prev} ${text}`));
+    });
+    return off;
+  }, [lutin]);
+
+  // Subscribe to engine broadcasts and fetch personas. Personas are
+  // engine-side metadata (file enumeration in `personas/`) so we
+  // request once on mount; if the user adds a new persona file the
+  // page is reloaded today. Hot-reload would need a CP broadcast.
+  useEffect(() => {
+    let cancelled = false;
+    const off = lutin.onBroadcast((body) => {
+      let ev: ChatEvent;
+      try {
+        ev = decodeChatEvent(body);
+      } catch (err) {
+        console.warn("malformed ChatEvent broadcast", err);
+        return;
+      }
+      dispatch({ type: "event", event: ev });
+    });
+
+    lutin
+      .request(encodeChatRequest({ kind: "subscribe" }))
+      .then((body) => {
+        if (cancelled) return;
+        let resp: ChatResponse;
+        try {
+          resp = decodeChatResponse(body);
+        } catch (err) {
+          console.warn("malformed Subscribe response", err);
+          return;
+        }
+        dispatch({ type: "response", response: resp });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        dispatch({ type: "submitFailed", message: `subscribe: ${String(err)}` });
+      });
+
+    lutin
+      .request(encodeChatRequest({ kind: "listPersonas" }))
+      .then((body) => {
+        if (cancelled) return;
+        const resp = decodeChatResponse(body);
+        if (resp.ok && resp.value.kind === "personas") {
+          setPersonas(resp.value.personas);
+        }
+      })
+      .catch(() => {
+        // Persona picker degrades gracefully; failure here just leaves
+        // the dropdown showing "no personas configured".
+        if (!cancelled) setPersonas([]);
+      });
+
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [lutin]);
+
+  // Pending sends/reruns that arrived while another turn was in flight.
+  // Drained on the next idle tick so the user can stack up follow-ups
+  // without waiting for each turn to complete.
+  type PendingItem = { kind: "send"; text: string } | { kind: "rerun" };
+  const queueRef = useRef<PendingItem[]>([]);
+
+  const dispatchSend = useCallback(
+    (text: string) => {
+      dispatch({ type: "submitOptimistic", text });
+      lutin
+        .request(encodeChatRequest({ kind: "sendMessage", text }))
+        .then((body) => {
+          let resp: ChatResponse;
+          try {
+            resp = decodeChatResponse(body);
+          } catch (err) {
+            dispatch({
+              type: "submitFailed",
+              message: `decode SendMessage response: ${String(err)}`,
+            });
+            return;
+          }
+          dispatch({ type: "response", response: resp });
+        })
+        .catch((err) => {
+          dispatch({ type: "submitFailed", message: String(err) });
+        });
+    },
+    [lutin],
+  );
+
+  const dispatchRerun = useCallback(() => {
+    dispatch({ type: "rerunOptimistic" });
+    lutin
+      .request(encodeChatRequest({ kind: "rerun" }))
+      .then((body) => {
+        let resp: ChatResponse;
+        try {
+          resp = decodeChatResponse(body);
+        } catch (err) {
+          dispatch({
+            type: "submitFailed",
+            message: `decode Rerun response: ${String(err)}`,
+          });
+          return;
+        }
+        dispatch({ type: "response", response: resp });
+      })
+      .catch((err) => {
+        dispatch({ type: "submitFailed", message: String(err) });
+      });
+  }, [lutin]);
+
+  const send = useCallback(
+    (text: string) => {
+      if (snap.turn.kind === "streaming") {
+        queueRef.current.push({ kind: "send", text });
+        return;
+      }
+      dispatchSend(text);
+    },
+    [snap.turn.kind, dispatchSend],
+  );
+
+  const rerun = useCallback(() => {
+    if (snap.turn.kind === "streaming") {
+      queueRef.current.push({ kind: "rerun" });
+      return;
+    }
+    dispatchRerun();
+  }, [snap.turn.kind, dispatchRerun]);
+
+  // Drain one queued item per idle tick. Process FIFO; the dispatched
+  // call flips the turn back to streaming so we re-enter this effect
+  // when it lands again.
+  useEffect(() => {
+    if (snap.turn.kind !== "idle") return;
+    const next = queueRef.current.shift();
+    if (!next) return;
+    if (next.kind === "send") dispatchSend(next.text);
+    else dispatchRerun();
+  }, [snap.turn.kind, dispatchSend, dispatchRerun]);
+
+  const cancel = useCallback(() => {
+    // Drop any queued follow-ups too — Cancel means "stop, don't roll
+    // straight into the next thing I queued."
+    queueRef.current.length = 0;
+    lutin.request(encodeChatRequest({ kind: "cancel" })).catch(() => {});
+  }, [lutin]);
+
+  const changePersona = useCallback(
+    (name: string | null) => {
+      lutin
+        .request(encodeChatRequest({ kind: "setPersona", name }))
+        .then((body) => dispatch({ type: "response", response: decodeChatResponse(body) }))
+        .catch((err) =>
+          dispatch({ type: "submitFailed", message: `setPersona: ${String(err)}` }),
+        );
+    },
+    [lutin],
+  );
+
+  const Composer = useMemo(
+    () =>
+      makePersonaComposer({
+        personas,
+        activePersona: snap.persona,
+        onChangePersona: changePersona,
+        onRerun: rerun,
+      }),
+    [personas, snap.persona, changePersona, rerun],
+  );
+
+  const vm = toViewModel(snap);
+
+  return (
+    <ChatView
+      messages={vm.messages}
+      turn={vm.turn}
+      onSend={send}
+      onCancel={cancel}
+      draft={draft}
+      onDraftChange={setDraft}
+      slots={{ Composer }}
+    />
+  );
+}

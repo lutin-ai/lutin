@@ -1,0 +1,136 @@
+.bar {
+  height: var(--topbar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s-2) 0 var(--s-4);
+  gap: var(--s-5);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-2);
+  user-select: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding-right: var(--s-3);
+}
+.logo {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-press));
+  box-shadow: 0 0 0 1px rgba(232, 116, 59, 0.35), 0 0 14px -4px var(--accent);
+}
+.logo::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 2px;
+  background: var(--bg-1);
+}
+.wordmark {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-1-strong);
+}
+
+.nav {
+  display: flex;
+  gap: var(--s-1);
+}
+.tab {
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  font-size: var(--fs-xl);
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.tab:hover { color: var(--text-1-strong); background: var(--bg-2); }
+.tab[data-active="true"] {
+  color: var(--text-1-strong);
+  background: var(--bg-3);
+}
+
+.spacer { flex: 1; align-self: stretch; }
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border-3);
+  border-radius: var(--r-sm);
+  padding: 2px 6px;
+  cursor: default;
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-4);
+}
+.conn[data-state="connected"] .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.conn[data-state="connecting"] .dot { background: var(--warn); }
+.conn[data-state="rejected"] .dot,
+.conn[data-state="error"] .dot { background: var(--err); }
+
+.connDetail {
+  margin-left: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Window controls ── */
+.winCtrls {
+  display: flex;
+  gap: 2px;
+  margin-left: var(--s-2);
+}
+.winBtn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.winBtn:hover {
+  background: var(--bg-3);
+  color: var(--text-1-strong);
+}
+.winClose:hover {
+  background: var(--err);
+  color: var(--accent-on);
+}

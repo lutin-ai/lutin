@@ -1,0 +1,9 @@
+{
+  "name": "lutin-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "lutin-desktop",
+    "workflows/*/ui"
+  ]
+}

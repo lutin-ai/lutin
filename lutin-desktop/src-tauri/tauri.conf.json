@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lutin-desktop",
+  "productName": "Lutin",
   "version": "0.1.0",
   "identifier": "dev.lutin.desktop",
   "build": {
@@ -12,9 +12,25 @@
   "app": {
     "windows": [
       {
-        "title": "lutin-desktop",
-        "width": 800,
-        "height": 600
+        "title": "Lutin",
+        "width": 1400,
+        "height": 900,
+        "decorations": false
+      },
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "Lutin Overlay",
+        "width": 240,
+        "height": 56,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": false,
+        "shadow": false
       }
     ],
     "security": {

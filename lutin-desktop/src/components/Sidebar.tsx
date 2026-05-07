@@ -7,6 +7,7 @@ export function Sidebar() {
   const projects = useApp((s) => s.projects);
   const selected = useApp((s) => s.selectedProject);
   const select = useApp((s) => s.selectProject);
+  const view = useApp((s) => s.view);
   const setView = useApp((s) => s.setView);
   const conn = useApp((s) => s.conn);
 
@@ -22,8 +23,6 @@ export function Sidebar() {
       await cpSendOk({
         CreateProject: { slug: newSlug.trim(), display_name: newName.trim() },
       });
-      // Server will fan out a `ProjectCreated` event; the store's
-      // `applyEvent` reducer adds it to `projects`. No manual append.
       setNewSlug("");
       setNewName("");
       setCreating(false);
@@ -41,34 +40,40 @@ export function Sidebar() {
     }
   };
 
+  const onSelect = (slug: string) => {
+    if (view.kind === "settings") setView({ kind: "project" });
+    select(slug);
+  };
+
+  const inSettings = view.kind === "settings";
+
   return (
     <aside className={styles.sidebar}>
-      <header className={styles.header}>
-        <span className={styles.title}>lutin</span>
+      <div className={styles.sectionHead}>
+        <span className={styles.sectionLabel}>Projects</span>
         <button
-          className={styles.iconBtn}
-          title="Settings"
-          onClick={() => setView({ kind: "settings" })}
+          className={styles.addBtn}
+          title="New project"
+          disabled={conn.kind !== "connected" || creating}
+          onClick={() => setCreating(true)}
         >
-          ⚙
+          +
         </button>
-      </header>
-
-      <div className={styles.connBadge} data-state={conn.kind}>
-        {connLabel(conn.kind)}
-        {conn.kind === "rejected" && <div className={styles.connDetail}>{conn.reason}</div>}
-        {conn.kind === "error" && <div className={styles.connDetail}>{conn.error}</div>}
       </div>
 
       <ul className={styles.list}>
         {projects.map((p) => (
           <li
             key={p.slug}
-            className={selected === p.slug ? styles.active : undefined}
-            onClick={() => select(p.slug)}
+            className={!inSettings && selected === p.slug ? styles.active : undefined}
+            onClick={() => onSelect(p.slug)}
           >
+            <span className={styles.folderIcon} aria-hidden>
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <path d="M1.5 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1h6.1a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
+              </svg>
+            </span>
             <span className={styles.projName}>{p.display_name}</span>
-            <span className={styles.projSlug}>{p.slug}</span>
             <button
               className={styles.deleteBtn}
               title="Delete"
@@ -83,7 +88,7 @@ export function Sidebar() {
         ))}
       </ul>
 
-      {creating ? (
+      {creating && (
         <div className={styles.creator}>
           <input
             placeholder="slug"
@@ -98,7 +103,7 @@ export function Sidebar() {
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
           <div className={styles.creatorRow}>
-            <button onClick={submit}>Create</button>
+            <button className={styles.primary} onClick={submit}>Create</button>
             <button
               onClick={() => {
                 setCreating(false);
@@ -112,27 +117,7 @@ export function Sidebar() {
           </div>
           {error && <div className={styles.error}>{error}</div>}
         </div>
-      ) : (
-        <button
-          className={styles.newProjectBtn}
-          disabled={conn.kind !== "connected"}
-          onClick={() => setCreating(true)}
-        >
-          + New project
-        </button>
       )}
     </aside>
   );
-}
-
-function connLabel(kind: string): string {
-  switch (kind) {
-    case "connecting": return "Connecting…";
-    case "connected": return "Connected";
-    case "disconnected": return "Disconnected";
-    case "rejected": return "Rejected";
-    case "error": return "Error";
-    case "noconfig": return "No connection configured";
-    default: return kind;
-  }
 }

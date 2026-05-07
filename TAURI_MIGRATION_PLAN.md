@@ -293,7 +293,7 @@ session pane placeholder. `cp_status` returns a full `ConnSnapshot`
 (externally tagged JSON) so the React side hydrates without racing
 against the event listener attaching.
 
-### Phase 2: Plugin loading without native APIs — **MOSTLY DONE**
+### Phase 2: Plugin loading without native APIs — **DONE (modulo live-run smoke test)**
 
 Done so far:
 
@@ -343,38 +343,54 @@ Done so far:
 
 What's left for Phase 2:
 
-- **JS postcard codec** for chat's protocol (`ChatRequest`,
-  `ChatResponse = Result<ChatOk, ChatError>`, `ChatEvent`). No
-  canonical JS port exists. Options, in order of preference:
-  1. Hand-roll the postcard subset chat needs (varint, length-prefixed
-     strings, enum tags, `Vec<T>`, `Option<T>`). Manageable for the
-     chat surface; share as `workflows/chat/ui/src/postcard.ts` first,
-     extract to a workspace-level helper if a second plugin needs it.
-  2. Ship a translation layer in chrome that JSON-ifies the chat
-     protocol on the iframe boundary. Keeps the engine untouched but
-     means chrome grows chat-specific knowledge — bad fit for a
-     generic chrome.
-  3. Switch chat's wire format to JSON on a feature flag. Touches the
-     engine — explicitly excluded by the plan.
-  Go with (1).
-- **Real chat React UI**: composer, scrollback, persona indicator —
-  mirror today's egui surface (`workflows/chat/src/ui.rs`). The shim
-  is the only async boundary; rendering is plain React state driven
-  off `lutin.onBroadcast` events.
-- **Cross-origin chrome-hosted shim** (deferred but planned): plugins
-  currently ship their own copy of `lutin.ts`. Move it to a chrome-
-  served file (e.g. via a `lutin-shim` URI scheme handler that adds
-  `Access-Control-Allow-Origin: *`) so updates land in one place.
-- **Permission enforcement gates**. Today the iframe's
-  `notification.post` runs unconditionally chrome-side; once Phase 3
-  Tauri commands land (audio, hotkey, clipboard), chrome must check
-  the calling iframe's manifest before forwarding. The origin →
-  plugin_id registry is implicit today (host segment of the iframe
-  URL); make it explicit when the first capability ships.
+- **JS postcard codec** — DONE. `workflows/chat/ui/src/postcard.ts`
+  implements the LEB128 varint + length-prefixed primitives postcard's
+  standard flavour uses; `chat.ts` wires up `ChatRequest` (encode),
+  `ChatResponse` / `ChatEvent` (decode). Shared with future plugins
+  by promotion to a workspace-level helper if a second plugin lands;
+  for now it's plugin-local since chat is the only consumer.
+- **Real chat React UI** — DONE. `workflows/chat/ui/src/App.tsx` plus
+  `session.ts` (a pure reducer mirroring `apply_chat_event` /
+  `apply_chat_response` from the egui path). Composer, scrollback,
+  persona indicator, cancel-while-streaming, error banner. Subscribe
+  fires once on mount; broadcasts feed the reducer.
+- **Wire-format pinned with golden tables.** Rust side:
+  `tests::golden_postcard_bytes` in `workflows/chat/src/lib.rs`. JS
+  side: `workflows/chat/ui/src/golden.test.ts` (`bun test`). Both
+  hold the same byte-level expectations across `ChatRequest`,
+  `ChatEvent`, and `ChatResponse` shapes; either side drifting trips
+  one of the two tests immediately.
+- **Iframe error propagation.** `lutin.ts::request` now rejects when
+  chrome posts `{ kind: "response", request_id, error }`, instead of
+  resolving with `undefined` and leaving callers hanging.
+- **Image builds clean** — DONE. `docker build -f workflows/chat/Dockerfile
+  -t lutin-workflow-chat:dev .` produces an image carrying both the
+  engine binary and the bundle tarball. End-to-end live run is the
+  remaining manual handoff: start CP pointing at the chat image, run
+  desktop, open a chat session, verify a streamed reply renders.
+  Nothing in code is gating that demo.
+- **Cross-origin chrome-hosted shim** — DONE. New `lutin-shim` URI
+  scheme handler in `lutin-desktop/src-tauri/src/shim_protocol.rs`
+  serves a single embedded JS file (`shim/lutin.js`) with permissive
+  CORS. Plugin `index.html` loads it via
+  `<script src="lutin-shim://localhost/shim.js">` before any bundled
+  JS runs; the shim sets `window.__lutinReady` so plugin code awaits
+  the global instead of bundling its own copy. `workflows/chat/ui/src/
+  lutin.ts` is now types + a thin global accessor only.
+- **Permission enforcement gates** — DONE. `<PluginIframe>` builds a
+  `permissions` Set from `opened.manifest.permissions` and rejects
+  capability calls to undeclared perms before any side-effect runs.
+  Today only `notification` is gated; `audio`/`hotkey`/`clipboard`
+  hook into the same gate when Phase 3 lands. No origin → plugin_id
+  registry is needed because each iframe gets its own MessagePort
+  bound by closure to its manifest — port possession is the proof of
+  identity, stronger than origin matching.
 
 Phase 2 deliverable per the original plan was "end-to-end chat
-streaming through chrome's bytes pump". The wire is fully open;
-postcard-in-JS is the gating item between here and that demo.
+streaming through chrome's bytes pump". The wire is fully open and
+all code paths between iframe and engine compile + pass golden
+tests. Live-run verification (real LLM, real WS) is a manual step
+gated only on a configured CP and credentials.
 
 ### Phase 2 lessons + decisions to lock in
 
@@ -400,19 +416,336 @@ postcard-in-JS is the gating item between here and that demo.
   the workflow code — chat's egui `ui.rs` keeps existing untouched
   until Phase 4 cleanup; the bundle is its own source under `ui/`.
 
-### Phase 3: Native capabilities
+### Undocumented Phase 2 additions
 
-- Add Tauri commands for audio capture (cpal), wake-word (ort +
-  openWakeWord), global hotkeys, clipboard, notifications.
-- Extend the JS shim with the corresponding subset, gated on plugin
-  manifest permissions.
-- Build a chrome-level "global transcription" pane (not per-plugin):
-  wake word fires → start capture → run transcription → push text into
-  active session's iframe via `lutin.send` or a higher-level
-  `lutin.dictate(text)` helper.
-- Decide where transcription model runs: locally (whisper.cpp via
-  `whisper-rs`) or via the chat engine (already calling LLMs). Local is
-  simpler for global-transcription latency.
+These shipped alongside Phase 2 but were not in the original plan
+narrative. Listed here so future-you doesn't think they appeared from
+nowhere:
+
+- **CP session lifecycle**: `lutin-control-panel/src/session_index.rs`
+  (per-workflow on-disk session index), `session_summary.rs` (reads
+  workflow-written `summary.json` for list decorations),
+  `settings_io.rs` (provider list persistence without clobbering other
+  settings sections), updates to `defaults.rs`.
+- **CP request surface**: `ResumeSession`/`SessionResumed` are wired
+  through and used by the desktop's `workflow_session_open` fallback
+  (see `lutin-desktop/src-tauri/src/lib.rs:230-247`).
+- **Personas**: `personas/orchestrator.toml`, `personas/researcher.toml`
+  added; `personas/assistant.toml` updated. Read by chat workflow for
+  the persona picker.
+- **Desktop chrome**: `lutin-desktop/src/components/TopBar.tsx` and
+  `theme.css` for app-level chrome (header + global CSS variables).
+- **Chat UI extras**: `workflows/chat/ui/src/PersonaComposer.tsx`
+  (persona picker), `adapter.ts` (separated from `chat.ts`).
+
+These don't change the Phase 2 architectural claims — they're feature
+work that grew up around the migration. Phase 2's iframe + bytes-pump
+contract is intact and load-bearing for everything below.
+
+### Phase 3a: Keybinds + transcription — **DONE (slices 1–5; slice 6 deferred)**
+
+Slices 1–5 landed, plus a listening/transcribing overlay window that
+wasn't in the original plan. End-to-end PTT works: hotkey (X11 via
+`global-shortcut`, Wayland via `xdg-desktop-portal-globalshortcuts`) →
+mic capture → Whisper transcription → text delivered into the active
+workflow iframe (or clipboard fallback). See per-slice notes below for
+the actual implementation shape.
+
+
+#### Goal
+
+PTT working end-to-end: hotkey (global, even when app unfocused) →
+mic capture → transcription → text delivered into the active workflow
+iframe. Foundation built so wake-word / open-mic / dictate-into-focused
+can be added later without restructuring.
+
+Not in this phase: wake-word, dictate-into-focused-app (needs `enigo`),
+voice-command parsing (port from old app's `voice_command.rs`).
+
+#### Mental model (the partition)
+
+- Hotkey registration, mic capture, transcription all live in **Rust
+  core**. Single owner of mic and OS-level keys; iframes can't reach
+  either.
+- Workflows declare a *capability to be a target of transcribed audio*;
+  they do **not** register or own combos. The user binds combos in
+  chrome settings.
+- A binding is `(combo, action, target)`. `action` selects the audio
+  pipeline shape (PTT-style hold vs tap). `target` selects where the
+  resulting text goes.
+- Trigger source (hotkey now, wake-word later) is orthogonal to target.
+  The same routing layer serves both.
+
+#### Settings schema (extension to `DesktopSettings`)
+
+```rust
+pub struct DesktopSettings {
+    // existing
+    pub default: String,
+    pub connections: Vec<ConnectionProfile>,
+    // new
+    pub keybinds: Vec<KeyBind>,
+}
+
+pub struct KeyBind {
+    pub combo: String,          // accelerator string, e.g. "Numpad1",
+                                // "CommandOrControl+Shift+M"
+    pub action: Action,
+    pub target: Target,
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    Ptt,            // hold-to-talk: down=start capture, up=stop+transcribe
+    Dictate,        // tap to start, second tap (or silence) to stop
+    // reserved (additive): OpenMicToggle, ChromeAction { name: String }
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Target {
+    ActiveWorkflow,                          // route to focused session
+    Workflow { workflow: WorkflowId },       // pinned workflow
+    Clipboard,
+    // reserved (additive): TypeIntoFocused
+}
+```
+
+In-memory we keep an `Arc<Vec<KeyBind>>` plus a derived `combo →
+KeyBind` lookup map. On `settings_set`, diff old/new combo sets and
+re-register accordingly.
+
+#### Tauri command surface
+
+```rust
+#[tauri::command]
+fn keybind_combos_in_use(state) -> Vec<String>;
+// for the settings UI to flag conflicts before commit
+
+#[tauri::command]
+fn set_active_session(state, session: Option<SessionId>);
+// chrome calls on session switch / focus change so Rust can resolve
+// Target::ActiveWorkflow
+```
+
+No `keybind_register` from JS. Workflows are *targetable*, not
+*registrants*.
+
+#### Hotkey dispatch
+
+`tauri-plugin-global-shortcut` registers each `combo` at startup +
+on settings change. Single global handler:
+
+1. lookup `KeyBind` by combo,
+2. spawn `dispatch(Trigger::Hotkey, action, target, phase)` on the
+   tokio runtime (don't block the keyboard thread),
+3. `phase` = `Down`/`Up` from the plugin's `ShortcutEvent::state`.
+
+`Trigger` is an internal enum (`Hotkey | WakeWord` later). Routing
+code only sees `Trigger`, so adding wake-word is purely additive.
+
+#### Audio capture (`src-tauri/src/audio.rs`)
+
+```rust
+pub struct Capture { /* ... */ }
+impl Capture {
+    pub fn start(&self) -> Result<()>;      // idempotent
+    pub fn stop(&self) -> Result<Vec<f32>>; // 16 kHz mono, drained
+}
+```
+
+cpal default input device, resampled to 16 kHz mono (mirror old app's
+`audio/capture.rs`). Single global capture instance; concurrent triggers
+while held coalesce to one stream. In-memory buffer for v1; swap for a
+chunk channel when streaming transcription is needed.
+
+#### Transcription (`src-tauri/src/transcribe.rs`)
+
+```rust
+pub trait Transcriber: Send + Sync {
+    async fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<String>;
+}
+pub struct StubTranscriber;     // returns "[transcribed N samples]"
+pub struct WhisperTranscriber;  // slice 4: whisper-rs
+```
+
+Slices 1–3 ship `StubTranscriber` so the pipeline runs without model
+plumbing. Slice 4 swaps in `WhisperTranscriber` behind the trait.
+
+#### Routing (Rust → workflow iframe)
+
+After `transcribe()` resolves with `text`:
+
+- `Target::Clipboard` → `arboard::set_text(text)`.
+- `Target::Workflow { workflow }` → resolve a session id for that
+  workflow (heuristic: most-recent active session for that workflow id;
+  if none, fall through to clipboard).
+- `Target::ActiveWorkflow` → use `active_session_id`; if `None`, fall
+  through to clipboard with a warning notification (don't lose audio).
+
+For workflow targets, emit Tauri event `transcription:<session_id>`
+with `{ text, source: "ptt" }`.
+
+`<PluginIframe>` (already keyed by session id, already MessagePort-based)
+listens for this event and forwards over the port as a **new envelope
+kind** sibling to the existing engine bytes:
+
+```ts
+// chrome → iframe MessagePort frame
+{ kind: "transcription", text: string, source: "ptt" | "openmic" }
+```
+
+Crucially this is **not** an engine bytes-pump message — it doesn't
+go through the engine WS. The bytes pump stays pure (engine bytes
+only). The iframe shim dispatches `kind === "transcription"` to a
+separate listener registry.
+
+#### Workflow capability declaration
+
+Extend `lutin.workflow.json`:
+
+```json
+{
+  "entry": "index.html",
+  "permissions": ["clipboard"],
+  "capabilities": ["receive_transcription"],
+  "display_name": "Chat",
+  "icon": "💬"
+}
+```
+
+- `permissions` = what the workflow can *do* (existing).
+- `capabilities` = what the workflow can *be a target of* (new).
+
+Chrome's settings UI populates the target dropdown from installed
+workflows that declare `receive_transcription`. Chrome refuses to
+deliver to workflows that don't declare it (defense-in-depth — the
+shim just won't expose `onTranscription`, but Rust also gates the
+event emission).
+
+#### Shim API addition
+
+```ts
+window.lutin.onTranscription(
+  cb: (msg: { text: string; source: "ptt" | "openmic" }) => void
+): () => void; // unsubscribe
+```
+
+Only injected when the manifest declares `receive_transcription`.
+Subscription dispatches off the same MessagePort handler that already
+demuxes `kind: "broadcast" | "response" | "notification"`.
+
+#### Active session tracking
+
+React store gains `activeSessionId: string | null`. `<PluginIframe>`
+sets it on mount + on visibility change (intersection observer or
+explicit `onSessionFocus` from the parent tab manager). Tauri command
+`set_active_session(session_id)` syncs it into Rust. `Target::ActiveWorkflow`
+reads this value at dispatch time.
+
+Phase 2 already drops/remounts iframe on session switch (lessons line
+411), so mount-time set is sufficient for v1.
+
+#### Chat UI integration
+
+`workflows/chat/ui/src/App.tsx`: register `lutin.onTranscription`,
+push text into the composer (don't auto-send). Per-binding `auto_send`
+can be added to `KeyBind` later if the manual confirmation gets old.
+
+#### Settings UI
+
+New section under Settings:
+
+- List existing keybinds: `combo · action · target · [×]`
+- Add binding: select `action` → select `target` (dropdown filtered to
+  valid targets per action) → click-to-capture combo (focused input
+  listens `keydown`, builds the accelerator string, Esc cancels)
+- Conflict check via `keybind_combos_in_use` before save
+- v1: no edit; delete + re-add. Keeps the UI tiny.
+
+#### Slicing (sequenced, each runnable)
+
+1. **Schema + dispatch wiring** — DONE. Added `tauri-plugin-global-shortcut`,
+   extend settings, register/unregister combos, emit a `keybind:fired`
+   Tauri event for testing. Seed default `Numpad1 + Ptt +
+   ActiveWorkflow` when `keybinds` is empty. No UI.
+2. **Audio capture + stub transcription + clipboard target** — DONE.
+   `audio.rs` (cpal default input, resampled to 16 kHz mono),
+   `transcribe::StubTranscriber` proved the pipeline before slice 4
+   replaced it.
+3. **Active session tracking + iframe delivery** — DONE.
+   `set_active_session`, `transcription:<session>` event, shim
+   `onTranscription`, chat manifest declares
+   `capabilities: ["receive_transcription"]`, `App.tsx` pushes text
+   into the composer.
+4. **Real transcription.** — DONE. `WhisperTranscriber` (whisper-rs,
+   Vulkan-accelerated build) replaces the stub. Models live at
+   `~/.lutin/models/whisper/` (matches the old desktop layout, so users
+   keep their cached weights). `KNOWN_WHISPER_MODELS` mirrors the old
+   list — `ggml-large-v3-turbo.bin` (default) and
+   `ggml-distil-large-v3.bin`. First call lazy-downloads from HF; load
+   + inference both happen on `spawn_blocking` so neither the keyboard
+   thread nor the tokio runtime stalls. New Tauri commands
+   `whisper_known_models` / `whisper_local_models` /
+   `whisper_ensure_model` for the slice-5 settings UI; `WhisperConfig`
+   (model/language/beam_size) is part of `DesktopSettings`. Startup
+   spawns a warmup task so the first PTT skips the load cost.
+5. **Settings UI** — DONE. `KeybindsPanel` in `SettingsView.tsx`:
+   add/delete bindings, click-to-capture combo, conflict check via
+   `keybind_combos_in_use`, backend banner showing whether plugin or
+   portal backend is live.
+6. **(Deferred) external targets + wake-word.** `enigo` for
+   `TypeIntoFocused`, `ort` + `openWakeWord` as a second `Trigger`
+   variant feeding the same routing.
+
+#### Undocumented Phase 3a additions
+
+These shipped with Phase 3a but weren't in the original plan:
+
+- **Wayland portal backend** (`keybind_portal.rs`). On Wayland,
+  `tauri-plugin-global-shortcut` can't see keys (no compositor API).
+  Instead we register through `xdg-desktop-portal`'s
+  `org.freedesktop.portal.GlobalShortcuts` interface; the user grants
+  combos through their compositor's portal dialog. `lib.rs::build_keybind_backend`
+  picks portal on Wayland, plugin elsewhere. JS finds out which is
+  active via `keybind_backend()` so the settings UI can explain
+  portal-mediated combo capture.
+- **Listening/transcribing overlay** (`overlay.rs` + second Tauri
+  webview labelled `"overlay"`). Floating pill that shows
+  `Listening → Transcribing → Done/Error` during a PTT cycle.
+  `HIDE_GENERATION` counter prevents stale auto-hide tasks from
+  killing newer phases. `LAST_PHASE` is cached so the freshly-mounted
+  overlay webview can pull its initial phase via
+  `overlay_current_phase` instead of racing the first emit.
+- **Capability gate** (`capability.rs` + `dispatch.rs`). Workflow
+  manifests' `capabilities` set is evaluated at dispatch time, not at
+  iframe construction — `Target::ActiveWorkflow` checks the active
+  session's manifest before emitting `transcription:<session>` and
+  falls through to clipboard with a warning notification when the
+  target session can't receive.
+
+#### Designed-for-future hooks (locked in slice 1)
+
+- `Trigger` enum + dispatch signature `fn dispatch(trigger, action,
+  target, phase)`. Wake-word lands as another `Trigger` variant.
+- `Transcriber` trait. Whisper-rs is one impl; a future remote
+  endpoint or model swap is local change.
+- `Action` and `Target` enums have reserved variants. Adding
+  `OpenMicToggle` / `TypeIntoFocused` is additive, no migration.
+- Iframe envelope kind set is open: `transcription` joins `broadcast`,
+  `response`, `notification` without renaming.
+
+#### Open questions to resolve during slice 1
+
+1. **Default binding strategy.** Implicit default (`Numpad1 PTT →
+   ActiveWorkflow` if `keybinds` is empty) vs seed-on-first-run. Lean
+   implicit — keeps `desktop.json` clean for users who don't customize.
+2. **`Target::ActiveWorkflow` against incapable workflow.** Fall back
+   to clipboard with a warning notification. Confirmed during design.
+3. **Multi-binding to same action.** Two combos both bound to `Ptt`
+   with different targets is allowed; lookup is by combo. No special
+   handling.
+4. **PTT semantics with no active session.** Clipboard fallback (so
+   audio isn't lost). Decided.
 
 ### Phase 4: Polish + cleanup
 
@@ -489,29 +822,22 @@ workflows/
 
 ## What to do first when context is fresh
 
-Phase 1 + most of Phase 2 are landed. To finish Phase 2:
+Phases 1, 2, and 3a are landed. Next up is **Phase 4 (polish + cleanup)**:
 
-1. **JS postcard codec** in `workflows/chat/ui/src/postcard.ts`
-   covering chat's protocol surface. Reference is the Rust types in
-   `workflows/chat/src/lib.rs` (`ChatRequest`, `ChatOk`, `ChatError`,
-   `ChatEvent`, `SessionState`, `HistoricalMessage`, `TurnId`,
-   `FinishReason`). Verify against postcard's varint format
-   (`postcard::to_allocvec` with the standard flavour). Worth a
-   round-trip golden test that loads a captured `Frame::Broadcast`
-   body and asserts the JS decode matches.
-2. **Real chat UI in `workflows/chat/ui/src/`** — composer, scrollback,
-   persona indicator. State flows from `lutin.onBroadcast` callbacks
-   into a small reducer; `lutin.request(encode(SendMessage))` for
-   intents. Mirror the current egui shape (`workflows/chat/src/ui.rs`).
-3. **Smoke test**: rebuild the chat image
-   (`docker build -f workflows/chat/Dockerfile -t lutin-workflow-chat:dev .`),
-   wire CP to it, start a chat session in the desktop chrome, send a
-   message, see a streamed reply in the iframe.
-4. **Cross-origin chrome-hosted shim** (optional but cleaner): move
-   `lutin.ts` out of the chat bundle and serve it from chrome via a
-   `lutin-shim://localhost/shim.js` scheme handler with permissive
-   CORS. Plugin `index.html` imports it. One copy, no per-plugin
-   drift.
+1. **Delete dead egui code.** `crates/lutin-workflow-ui`, `crates/lutin-ui`,
+   `workflows/chat/src/ui.rs`, anything still pulling `eframe`/`egui`.
+   `lutin-desktop-egui` (the renamed pre-Tauri crate) gets dropped from
+   disk, not just from the workspace members list.
+2. **Drop `lutin.workflow.cdylib` dual-write.** CP currently accepts
+   either label; once egui is gone, require `lutin.workflow.bundle`
+   only and delete `read_cdylib_bytes` / `GetWorkflowCdylib`.
+3. **Window state persistence.** `tauri-plugin-window-state`. Main
+   window only — overlay window is positioned by the OS / our code.
+4. **Auto-update.** Wire Tauri's built-in updater against whatever
+   release pipeline ships first.
+5. **WebKitGTK smoke test on Wayland.** Trackpad scroll quality is
+   the known risk; if unbearable, the escape hatch is Chromium-via-CEF,
+   but we hope to avoid that.
 
 Things to remember, learned the hard way:
 

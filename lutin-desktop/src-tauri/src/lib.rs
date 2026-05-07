@@ -2,14 +2,23 @@
 //! that JS calls, and pumps `CpUpdate` events out as Tauri events the
 //! React chrome listens to.
 
+mod audio;
 mod bridge;
 mod bundles;
+mod capability;
 mod cp;
+mod dispatch;
+mod keybind;
+#[cfg(target_os = "linux")]
+mod keybind_portal;
+mod overlay;
 mod plugin_protocol;
 mod settings;
+mod shim_protocol;
+mod transcribe;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lutin_control_protocol::{Request, Response, ResponseOk, SessionId, Slug, WorkflowId};
@@ -19,10 +28,49 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+use crate::audio::Capture;
 use crate::bridge::{BridgeCmd, BridgeHandle, EngineBytes};
 use crate::bundles::BundleCache;
 use crate::cp::{CpClient, CpCommand, CpConfig, CpUpdate, RequestId, Token};
+use std::sync::Arc;
+
 use crate::settings::{ConnectionProfile, DesktopSettings};
+use crate::transcribe::{WhisperModel, WhisperTranscriber};
+
+/// Which backend is delivering global hotkey events. Picked at
+/// startup based on session type and a successful portal handshake;
+/// thereafter immutable. Each variant *owns* its backend-specific
+/// state — the registry only exists when we actually use it (no
+/// "Plugin variant + dangling registry field" invariant to maintain).
+pub enum KeybindBackend {
+    /// `tauri-plugin-global-shortcut` path (X11, macOS, Windows, and
+    /// Wayland fallback when the portal is unavailable). Owns the
+    /// in-process registry the plugin handler reads on each event.
+    Plugin(crate::keybind::KeybindRegistry),
+    /// XDG GlobalShortcuts portal (Wayland). Background task owns
+    /// the D-Bus session and dispatches Activated/Deactivated.
+    #[cfg(target_os = "linux")]
+    Portal(crate::keybind_portal::PortalBackend),
+}
+
+/// What `keybind_backend` returns to JS. Externally tagged on `kind`
+/// — the portal variant carries the id prefix and snippet template
+/// so the settings UI doesn't re-derive the format and stays in sync
+/// when the wire format changes.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeybindBackendInfo {
+    Plugin,
+    Portal {
+        /// Per-bind shortcut id is `format!("{id_prefix}{idx}")`.
+        id_prefix: String,
+        /// Compositor snippet template, with literal `{combo}` and
+        /// `{id}` placeholders the JS substitutes. Today this emits
+        /// a Hyprland line; a future Sway/etc. branch picks a
+        /// different template at construction time.
+        snippet_template: String,
+    },
+}
 
 /// Snapshot of the connection's last known state. Mirrors the React
 /// `ConnState` type 1:1 — Tauri serializes externally-tagged on `kind`
@@ -62,6 +110,76 @@ struct AppState {
     /// against a `cp:connected` event that fires before the
     /// listener attaches.
     conn: Mutex<ConnSnapshot>,
+    /// Backend delivering hotkey events. Set exactly once during
+    /// `setup()` — `setup` builds the appropriate variant (portal
+    /// proxy on Wayland, plugin registry elsewhere) and seals it.
+    /// All readers see the same value for the rest of the app's
+    /// life, no locking, no clones, no poison cases. The plugin
+    /// path's `KeybindRegistry` lives *inside* the variant, so the
+    /// "registry only matters when Plugin is selected" invariant is
+    /// compiler-enforced.
+    pub keybind_backend: OnceLock<KeybindBackend>,
+    /// Microphone capture, owned for the app's lifetime so the cpal
+    /// stream-control thread is built once. `None` if no input device
+    /// is available — hotkey actions log and no-op in that case rather
+    /// than panicking.
+    pub audio: AudioHandle,
+    /// Local whisper.cpp transcriber. `Arc` so background warmup
+    /// tasks can hold their own clone without contending on the live
+    /// dispatch path. The transcriber reads its config from
+    /// `settings.whisper` per call rather than caching it, so there's
+    /// no SSoT split between the persisted file and the loaded state.
+    pub transcriber: Arc<WhisperTranscriber>,
+    /// What the chrome currently considers "active" — populated by
+    /// `set_active_session` from `<PluginIframe>`'s mount/unmount
+    /// hooks. Dispatch reads this to resolve `Target::ActiveWorkflow`
+    /// and to gate `Target::Workflow {…}` against the running session
+    /// for that workflow id. `None` while no plugin iframe is mounted
+    /// (e.g. on the Settings tab).
+    pub active_session: Mutex<Option<ActiveSession>>,
+}
+
+/// What the React side reports about the iframe currently in front.
+/// Carries the manifest's `capabilities` set so dispatch can do the
+/// `receive_transcription` gate without round-tripping back through
+/// the bundle cache. Cheap copy on the routing path.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct ActiveSession {
+    pub session: SessionId,
+    pub workflow: WorkflowId,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Wrapper around `Option<Capture>` so `dispatch.rs` can unconditionally
+/// call `audio.start()` / `audio.stop()` whether or not a mic is
+/// available. Keeps the call sites readable; the no-mic case logs once
+/// at startup and silently no-ops thereafter.
+pub struct AudioHandle(Option<Capture>);
+
+impl AudioHandle {
+    pub fn new() -> Self {
+        match Capture::new() {
+            Ok(c) => Self(Some(c)),
+            Err(e) => {
+                warn!(error = %e, "audio capture unavailable; hotkey PTT will no-op");
+                Self(None)
+            }
+        }
+    }
+
+    pub fn start(&self) {
+        if let Some(c) = &self.0 {
+            c.start();
+        }
+    }
+
+    pub fn stop(&self) -> Vec<f32> {
+        match &self.0 {
+            Some(c) => c.stop(),
+            None => Vec::new(),
+        }
+    }
 }
 
 impl AppState {
@@ -137,6 +255,11 @@ pub struct PluginManifest {
     pub entry: String,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// What this workflow can be a *target of* (vs `permissions`,
+    /// which is what it can *do*). Slice 3 introduces
+    /// `"receive_transcription"`.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub display_name: String,
     #[serde(default)]
@@ -213,15 +336,37 @@ async fn workflow_session_open(
         return Ok(());
     }
 
-    let resp = cp_dispatch(
+    // Try OpenSession first (cheap; just re-mints a token if running).
+    // If CP reports the session as not-running, transparently fall
+    // back to ResumeSession so the chrome doesn't need to know
+    // whether the engine container is up — clicking a list row Just
+    // Works.
+    let open_resp = cp_dispatch(
         &state,
-        Request::OpenSession { slug, session: session.clone() },
+        Request::OpenSession { slug: slug.clone(), session: session.clone() },
     )
     .await?;
-    let endpoint = match resp {
+    let endpoint = match open_resp {
         Response::Ok(ResponseOk::SessionOpened(ep)) => ep,
         Response::Ok(other) => return Err(format!("unexpected response: {other:?}")),
-        Response::Err(e) => return Err(format!("CP error: {e}")),
+        Response::Err(_) => {
+            // Most likely SessionNotFound (registry doesn't have it
+            // because container is dormant). Resume covers other CP
+            // errors too — if it also fails, the second error is the
+            // useful one to surface.
+            let resume_resp = cp_dispatch(
+                &state,
+                Request::ResumeSession { slug, session: session.clone() },
+            )
+            .await?;
+            match resume_resp {
+                Response::Ok(ResponseOk::SessionResumed { endpoint, .. }) => endpoint,
+                Response::Ok(other) => {
+                    return Err(format!("unexpected resume response: {other:?}"));
+                }
+                Response::Err(e) => return Err(format!("CP resume error: {e}")),
+            }
+        }
     };
 
     let url = format!("ws://{}", endpoint.addr);
@@ -292,19 +437,217 @@ fn workflow_session_close(state: State<'_, AppState>, session: SessionId) {
     }
 }
 
+/// Catalogue entry served to JS. Mirrors `WhisperModel` plus the
+/// display name and filename so the settings UI can render a dropdown
+/// without a second round-trip.
+#[derive(Clone, Debug, Serialize)]
+pub struct WhisperModelInfo {
+    pub model: WhisperModel,
+    pub filename: &'static str,
+    pub display_name: &'static str,
+}
+
+impl From<WhisperModel> for WhisperModelInfo {
+    fn from(m: WhisperModel) -> Self {
+        Self {
+            model: m,
+            filename: m.filename(),
+            display_name: m.display_name(),
+        }
+    }
+}
+
+/// Closed catalogue of built-in whisper models the desktop knows how
+/// to download.
+#[tauri::command]
+fn whisper_known_models() -> Vec<WhisperModelInfo> {
+    WhisperModel::ALL.iter().copied().map(Into::into).collect()
+}
+
+/// Subset of the catalogue whose `.bin` is already on disk.
+#[tauri::command]
+fn whisper_local_models() -> Vec<WhisperModelInfo> {
+    transcribe::list_local_models()
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// Force a download of `model` and warm up the transcriber if it
+/// matches the active configuration. Idempotent — re-running when the
+/// model file is already present is a fast no-op.
+#[tauri::command]
+async fn whisper_ensure_model(
+    state: State<'_, AppState>,
+    model: WhisperModel,
+) -> Result<(), String> {
+    transcribe::ensure_model(model)
+        .await
+        .map_err(|e| e.to_string())?;
+    let active_model = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .whisper
+        .model;
+    if active_model == model {
+        state
+            .transcriber
+            .warmup(model)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Which keybind backend is active: `"plugin"` or `"portal"`. JS
+/// uses this to decide whether the Keybinds settings UI should
+/// surface portal ids (with copy-pastable compositor snippets) or
+/// just the combo strings.
+/// Build the keybind backend at startup. On Wayland we try the
+/// portal first; on failure (no `xdg-desktop-portal-*` running, user
+/// denied the bind dialog, etc.) we fall back to the plugin path.
+/// The fallback is honest about the limitation — on Wayland the
+/// plugin's X11 grabs only fire while focus is on an XWayland
+/// window — but it's better than silently dead hotkeys, and the
+/// settings UI surfaces the actual backend so the user knows.
+fn build_keybind_backend(
+    app: &AppHandle,
+    prefer_portal: bool,
+    initial: &[settings::KeyBind],
+) -> KeybindBackend {
+    #[cfg(target_os = "linux")]
+    if prefer_portal {
+        match keybind_portal::PortalBackend::start(app.clone(), initial.to_vec()) {
+            Ok(p) => {
+                tracing::info!("keybind backend: portal (Wayland)");
+                return KeybindBackend::Portal(p);
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "portal start failed; falling back to plugin backend (XWayland-only on Wayland)",
+                );
+            }
+        }
+    }
+    let registry = keybind::KeybindRegistry::default();
+    let parsed = keybind::parse_lossy(initial);
+    let failed = keybind::reconcile(app, &registry, parsed);
+    if !failed.is_empty() {
+        warn!(?failed, "some keybinds failed to register");
+    }
+    tracing::info!("keybind backend: plugin");
+    KeybindBackend::Plugin(registry)
+}
+
+/// What `settings_set` is going to apply once the file is saved.
+/// Built up-front so any parse error short-circuits before we touch
+/// disk or OS registration.
+enum ReconcilePlan {
+    Plugin(Vec<(tauri_plugin_global_shortcut::Shortcut, settings::KeyBind)>),
+    #[cfg(target_os = "linux")]
+    Portal(Vec<settings::KeyBind>),
+}
+
+/// Hyprland snippet template. Single source of truth for the bind
+/// line format. JS substitutes `{combo}` and `{id}`; nothing else
+/// re-derives this string.
+///
+/// The namespace before the colon is empty (`global, :{id}`) rather
+/// than `lutin:{id}` because xdg-desktop-portal-hyprland scopes
+/// shortcut ids by the registering D-Bus connection's app id, and we
+/// don't currently set one — matching `:` (any-app) is what the
+/// portal accepts in practice. If we ever ship a desktop file with a
+/// proper reverse-DNS app id, this template gets updated to use it.
+const HYPRLAND_SNIPPET_TEMPLATE: &str = "bind = , {combo}, global, :{id}";
+
+#[tauri::command]
+fn keybind_backend(state: State<'_, AppState>) -> KeybindBackendInfo {
+    match state.keybind_backend.get() {
+        Some(KeybindBackend::Plugin(_)) | None => KeybindBackendInfo::Plugin,
+        #[cfg(target_os = "linux")]
+        Some(KeybindBackend::Portal(_)) => KeybindBackendInfo::Portal {
+            id_prefix: keybind_portal::PORTAL_ID_PREFIX.to_owned(),
+            snippet_template: HYPRLAND_SNIPPET_TEMPLATE.to_owned(),
+        },
+    }
+}
+
+/// Report which session iframe is currently in front. Called by
+/// `<PluginIframe>` on mount (`Some`) and unmount (`None`). Drives
+/// `Target::ActiveWorkflow` dispatch and feeds the capability gate for
+/// per-session transcription delivery.
+#[tauri::command]
+fn set_active_session(state: State<'_, AppState>, active: Option<ActiveSession>) {
+    *state.active_session.lock().expect("active_session poisoned") = active;
+}
+
 #[tauri::command]
 fn settings_get(state: State<'_, AppState>) -> DesktopSettings {
     state.settings.lock().expect("settings mutex poisoned").clone()
 }
 
 #[tauri::command]
-fn settings_set(state: State<'_, AppState>, new: DesktopSettings) -> Result<(), String> {
+async fn settings_set(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    new: DesktopSettings,
+) -> Result<(), String> {
+    // Strict-parse the combos up front for the plugin backend so a
+    // bad entry is rejected before we save the file or touch OS
+    // registration. On portal the combos are descriptive hints sent
+    // to the compositor — parse failure means "the suggestion isn't
+    // a real key" and that's not a save-blocking error. Branching
+    // here also forces both arms to materialise the work they need
+    // before `new.save()`, so a parse failure doesn't leave a
+    // partially-written settings file behind.
+    let effective = new.effective_keybinds();
+    let backend = state
+        .keybind_backend
+        .get()
+        .expect("keybind backend not initialised");
+    let plan = match backend {
+        KeybindBackend::Plugin(_) => {
+            let parsed = keybind::parse(&effective).map_err(|e| {
+                format!("invalid keybind combo {:?}: {}", e.combo, e.source)
+            })?;
+            ReconcilePlan::Plugin(parsed)
+        }
+        #[cfg(target_os = "linux")]
+        KeybindBackend::Portal(_) => ReconcilePlan::Portal(effective),
+    };
     new.save()?;
     let cfg = match new.active() {
         Some(p) => profile_to_config(p)?,
         None => None,
     };
+    let new_model = new.whisper.model;
+    let transcriber = state.transcriber.clone();
+    state.tokio.spawn(async move {
+        if let Err(e) = transcriber.warmup(new_model).await {
+            warn!(error = %e, "whisper warmup after settings_set failed");
+        }
+    });
     *state.settings.lock().expect("settings mutex poisoned") = new;
+    match (plan, backend) {
+        (ReconcilePlan::Plugin(parsed), KeybindBackend::Plugin(reg)) => {
+            let failed = keybind::reconcile(&app, reg, parsed);
+            if !failed.is_empty() {
+                warn!(?failed, "some keybinds failed to register on settings_set");
+            }
+        }
+        #[cfg(target_os = "linux")]
+        (ReconcilePlan::Portal(binds), KeybindBackend::Portal(p)) => {
+            if let Err(e) = p.reconcile(binds).await {
+                warn!(error = %e, "portal reconcile failed on settings_set");
+            }
+        }
+        // Plan and backend are derived from the same `backend` ref
+        // in the same function, so a mismatch can't happen at
+        // runtime. Fail loud rather than silently if it ever does.
+        _ => unreachable!("plan/backend mismatch"),
+    }
     // Drop pending requests — they were scoped to the previous CP and
     // their senders would leak as never-fulfilled.
     state
@@ -406,6 +749,26 @@ pub fn run() {
     };
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<CpUpdate>();
     let cp = CpClient::connect(&tokio, cfg, evt_tx.clone());
+    transcribe::install_log_callback();
+    let initial_model = settings.whisper.model;
+    let transcriber = Arc::new(WhisperTranscriber::new());
+    let warmup_transcriber = transcriber.clone();
+    tokio.spawn(async move {
+        if let Err(e) = warmup_transcriber.warmup(initial_model).await {
+            warn!(error = %e, "whisper warmup failed; first PTT will retry");
+        }
+    });
+
+    // The global-shortcut Tauri plugin is always registered: even on
+    // Wayland it stays inert (its handler returns early when the
+    // backend is `Portal`), and registering it unconditionally lets
+    // us cleanly fall back to the plugin path if portal start fails
+    // — without registration here, a portal failure would leave
+    // hotkeys silently dead.
+    #[cfg(target_os = "linux")]
+    let prefer_portal = keybind_portal::is_wayland();
+    #[cfg(not(target_os = "linux"))]
+    let prefer_portal = false;
 
     let state = AppState {
         tokio: tokio.clone(),
@@ -417,15 +780,27 @@ pub fn run() {
         bundles: BundleCache::new(),
         bridges: Mutex::new(HashMap::new()),
         conn: Mutex::new(initial_conn),
+        audio: AudioHandle::new(),
+        transcriber,
+        active_session: Mutex::new(None),
+        keybind_backend: OnceLock::new(),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(keybind::plugin())
         .manage(state)
         .register_asynchronous_uri_scheme_protocol(
             plugin_protocol::SCHEME,
             |ctx, req, responder| {
                 let res = plugin_protocol::handle(ctx, req);
+                responder.respond(res);
+            },
+        )
+        .register_asynchronous_uri_scheme_protocol(
+            shim_protocol::SCHEME,
+            |ctx, req, responder| {
+                let res = shim_protocol::handle(ctx, req);
                 responder.respond(res);
             },
         )
@@ -445,6 +820,33 @@ pub fn run() {
                 .bundles
                 .init(cache_root)
                 .expect("init bundle cache");
+            // Register the user's keybinds (or the seeded default).
+            // Parse leniently at startup — a bad combo in the
+            // persisted file shouldn't disable every other hotkey, and
+            // there's no user-facing call site to return the error to.
+            let initial_binds = handle
+                .state::<AppState>()
+                .settings
+                .lock()
+                .expect("settings mutex poisoned")
+                .effective_keybinds();
+            // Sanity-check the overlay window exists. If this logs
+            // "missing", the multi-window config in tauri.conf.json
+            // wasn't picked up — usually because the Vite dev server
+            // wasn't restarted after `rollupOptions.input` changed.
+            match handle.get_webview_window("overlay") {
+                Some(_) => tracing::info!("overlay window registered"),
+                None => warn!(
+                    "overlay window not registered — restart `tauri dev` after vite.config / tauri.conf.json changes"
+                ),
+            }
+            let backend = build_keybind_backend(&handle, prefer_portal, &initial_binds);
+            handle
+                .state::<AppState>()
+                .keybind_backend
+                .set(backend)
+                .map_err(|_| ())
+                .expect("keybind_backend already initialised");
             tokio.spawn(drain_updates(handle, evt_rx));
             Ok(())
         })
@@ -458,6 +860,13 @@ pub fn run() {
             workflow_session_request,
             workflow_session_subscribe,
             workflow_session_close,
+            set_active_session,
+            whisper_known_models,
+            whisper_local_models,
+            whisper_ensure_model,
+            keybind_backend,
+            overlay::overlay_test,
+            overlay::overlay_current_phase,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

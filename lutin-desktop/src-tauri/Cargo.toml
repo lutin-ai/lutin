@@ -20,6 +20,7 @@ lutin-ids = { path = "../../crates/lutin-ids" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -33,3 +34,18 @@ dirs = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
+cpal = "0.17"
+arboard = "3"
+async-trait = "0.1"
+whisper-rs = { version = "0.16", features = ["vulkan"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+bytes = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wayland compositors don't allow X11-style global key grabs. Under
+# Wayland we register shortcuts via the xdg-desktop-portal
+# GlobalShortcuts interface and let the compositor own the actual key
+# bindings (Hyprland: `bind = , Numpad1, global, lutin:lutin-kb-0`).
+# Outside Linux this stays out of the dependency tree entirely.
+ashpd = { version = "0.13", features = ["tokio", "global_shortcuts"] }
+futures-core = "0.3"

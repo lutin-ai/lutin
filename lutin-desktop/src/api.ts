@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ActiveSession,
   ConnState,
   CpEvent,
   DesktopSettings,
@@ -38,6 +39,26 @@ export async function settingsGet(): Promise<DesktopSettings> {
 
 export async function settingsSet(settings: DesktopSettings): Promise<void> {
   return invoke("settings_set", { new: settings });
+}
+
+/// Which backend is delivering global hotkey events. `plugin` =
+/// X11/macOS/Windows (combos in our settings ARE the binding);
+/// `portal` = Wayland (compositor owns the binding, our settings
+/// strings are descriptive hints — the user re-binds in their
+/// compositor config). The portal variant carries the id prefix and
+/// snippet template so JS doesn't re-derive the format; if the wire
+/// ever changes only the Rust `HYPRLAND_SNIPPET_TEMPLATE` const is
+/// touched.
+export type KeybindBackendInfo =
+  | { kind: "plugin" }
+  | {
+      kind: "portal";
+      id_prefix: string;
+      snippet_template: string;
+    };
+
+export async function keybindBackend(): Promise<KeybindBackendInfo> {
+  return invoke("keybind_backend");
 }
 
 /// Resolve a workflow's plugin bundle to an iframe URL + manifest.
@@ -91,6 +112,39 @@ export async function workflowSessionSubscribe(
 
 export async function workflowSessionClose(session: SessionId): Promise<void> {
   return invoke("workflow_session_close", { session });
+}
+
+/// Tell Rust which session iframe is currently in front. Drives
+/// `Target::ActiveWorkflow` resolution and the capability gate for
+/// per-session transcription delivery. `null` = no plugin iframe
+/// mounted (e.g. Settings tab).
+export async function setActiveSession(active: ActiveSession | null): Promise<void> {
+  return invoke("set_active_session", { active });
+}
+
+/// Closed set, mirrors Rust `WhisperModel`. Adding a model here
+/// requires a Rust catalogue change too — the JSON tag is enforced by
+/// serde on the Rust side.
+export type WhisperModel = "large-v3-turbo" | "distil-large-v3";
+
+export type WhisperModelInfo = {
+  model: WhisperModel;
+  filename: string;
+  display_name: string;
+};
+
+export async function whisperKnownModels(): Promise<WhisperModelInfo[]> {
+  return invoke("whisper_known_models");
+}
+
+export async function whisperLocalModels(): Promise<WhisperModelInfo[]> {
+  return invoke("whisper_local_models");
+}
+
+/// Force-download a known whisper model. First call on `large-v3-turbo`
+/// pulls ~1.6 GB, so caller is expected to surface progress UI.
+export async function whisperEnsureModel(model: WhisperModel): Promise<void> {
+  return invoke("whisper_ensure_model", { model });
 }
 
 type EventHandlers = {

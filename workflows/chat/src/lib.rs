@@ -71,6 +71,15 @@ pub enum ChatRequest {
     SetPersona { name: Option<String> },
     /// Read back the current `SessionState`.
     GetState,
+    /// List installed personas (global + project-scoped) so the UI can
+    /// render a picker. Returns enough metadata to display the
+    /// dropdown without a second round-trip.
+    ListPersonas,
+    /// Run the agent loop against the existing transcript without
+    /// appending a new user message. Used by the "rerun" affordance
+    /// in the chat UI when the user wants another assistant pass on
+    /// what's already there.
+    Rerun,
 }
 
 pub type ChatResponse = Result<ChatOk, ChatError>;
@@ -89,6 +98,24 @@ pub enum ChatOk {
     Cancelled,
     StateUpdated { state: SessionState },
     State(SessionState),
+    /// Reply to `ListPersonas`.
+    Personas { personas: Vec<PersonaInfo> },
+}
+
+/// One row in the persona picker. Sourced from
+/// `lutin_entities::Persona::list` then projected to the bare minimum
+/// the chat UI needs — full Persona is heavy (system prompt, tool
+/// filters, …) and the chrome doesn't render any of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonaInfo {
+    /// Filename stem; canonical id used by `SetPersona`.
+    pub name: String,
+    pub display_name: String,
+    /// Empty string if the persona doesn't pin a model. Encoded as
+    /// `String` (not `Option<String>`) to keep the postcard layout
+    /// simple — empty-as-absent is the same convention used elsewhere
+    /// in this protocol.
+    pub model: String,
 }
 
 /// One entry in the rendered scrollback. The engine projects its full
@@ -214,6 +241,116 @@ mod tests {
             reason: "env var unset".into(),
         });
         assert_eq!(decode::<ChatResponse>(&encode(&e).unwrap()).unwrap(), e);
+    }
+
+    /// Golden bytes pinned against the JS postcard codec in
+    /// `workflows/chat/ui/src/postcard.ts` + `chat.ts`. Any change here
+    /// is a breaking change to the iframe's decoder; mirror it on the
+    /// JS side in the matching `golden_bytes` table before merging.
+    #[test]
+    fn golden_postcard_bytes() {
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("ChatRequest::Subscribe", encode(&ChatRequest::Subscribe).unwrap()),
+            (
+                "ChatRequest::SendMessage{hi}",
+                encode(&ChatRequest::SendMessage { text: "hi".into() }).unwrap(),
+            ),
+            ("ChatRequest::Cancel", encode(&ChatRequest::Cancel).unwrap()),
+            (
+                "ChatRequest::SetPersona(None)",
+                encode(&ChatRequest::SetPersona { name: None }).unwrap(),
+            ),
+            (
+                "ChatRequest::SetPersona(Some(\"alice\"))",
+                encode(&ChatRequest::SetPersona { name: Some("alice".into()) }).unwrap(),
+            ),
+            ("ChatRequest::Rerun", encode(&ChatRequest::Rerun).unwrap()),
+            (
+                "ChatEvent::Delta(\"hi\")",
+                encode(&ChatEvent::Delta("hi".into())).unwrap(),
+            ),
+            (
+                "ChatEvent::MessageFinished{7, Completed}",
+                encode(&ChatEvent::MessageFinished {
+                    turn_id: TurnId(7),
+                    reason: FinishReason::Completed,
+                })
+                .unwrap(),
+            ),
+            (
+                "ChatEvent::MessageFinished{300, Failed(\"boom\")}",
+                encode(&ChatEvent::MessageFinished {
+                    turn_id: TurnId(300),
+                    reason: FinishReason::Failed("boom".into()),
+                })
+                .unwrap(),
+            ),
+            (
+                "ChatResponse::Ok(Subscribed{empty})",
+                encode::<ChatResponse>(&Ok(ChatOk::Subscribed {
+                    state: SessionState::default(),
+                    history: vec![],
+                }))
+                .unwrap(),
+            ),
+            (
+                "ChatResponse::Ok(Subscribed{persona,1msg})",
+                encode::<ChatResponse>(&Ok(ChatOk::Subscribed {
+                    state: SessionState {
+                        persona: Some("alice".into()),
+                        model_override: None,
+                    },
+                    history: vec![HistoricalMessage {
+                        role: HistoricalRole::User,
+                        text: "hi".into(),
+                    }],
+                }))
+                .unwrap(),
+            ),
+            (
+                "ChatResponse::Err(NoTurnInFlight)",
+                encode::<ChatResponse>(&Err(ChatError::NoTurnInFlight)).unwrap(),
+            ),
+        ];
+
+        let expected: &[(&str, &[u8])] = &[
+            ("ChatRequest::Subscribe", &[0x00]),
+            ("ChatRequest::SendMessage{hi}", &[0x01, 0x02, b'h', b'i']),
+            ("ChatRequest::Cancel", &[0x02]),
+            ("ChatRequest::SetPersona(None)", &[0x03, 0x00]),
+            (
+                "ChatRequest::SetPersona(Some(\"alice\"))",
+                &[0x03, 0x01, 0x05, b'a', b'l', b'i', b'c', b'e'],
+            ),
+            ("ChatRequest::Rerun", &[0x06]),
+            ("ChatEvent::Delta(\"hi\")", &[0x00, 0x02, b'h', b'i']),
+            ("ChatEvent::MessageFinished{7, Completed}", &[0x04, 0x07, 0x00]),
+            (
+                "ChatEvent::MessageFinished{300, Failed(\"boom\")}",
+                &[0x04, 0xac, 0x02, 0x02, 0x04, b'b', b'o', b'o', b'm'],
+            ),
+            (
+                "ChatResponse::Ok(Subscribed{empty})",
+                &[0x00, 0x00, 0x00, 0x00, 0x00],
+            ),
+            (
+                "ChatResponse::Ok(Subscribed{persona,1msg})",
+                &[
+                    0x00, 0x00, // Ok, Subscribed
+                    0x01, 0x05, b'a', b'l', b'i', b'c', b'e', // Some("alice")
+                    0x00, // model_override None
+                    0x01, // history len 1
+                    0x00, // role User
+                    0x02, b'h', b'i', // text "hi"
+                ],
+            ),
+            ("ChatResponse::Err(NoTurnInFlight)", &[0x01, 0x00]),
+        ];
+
+        assert_eq!(cases.len(), expected.len());
+        for ((label, got), (_, want)) in cases.iter().zip(expected.iter()) {
+            assert_eq!(got.as_slice(), *want, "case {label}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 display_name = "Assistant"
 description = "General-purpose AI assistant."
-icon = "\u{f0d3}"
+icon = ""
 icon_color = [59, 130, 246]
 
 system_prompt = """
@@ -13,5 +13,10 @@ before continuing.
 """
 
 default_skills = []
+model = "minimax/minimax-m2.7"
+provider = "open-router"
+thinking_enabled = false
+reasoning_effort = "medium"
+
 tool_filter_mode = "blacklist"
 tool_filter_list = []

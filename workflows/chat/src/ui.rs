@@ -357,7 +357,9 @@ fn apply_chat_response(state: &mut SessionSnapshot, resp: ChatResponse) -> bool 
         }
         Ok(ChatOk::State(s)) => set_persona(state, s),
         Ok(ChatOk::StateUpdated { state: s }) => set_persona(state, s),
-        Ok(ChatOk::MessageQueued { .. }) | Ok(ChatOk::Cancelled) => false,
+        Ok(ChatOk::MessageQueued { .. })
+        | Ok(ChatOk::Cancelled)
+        | Ok(ChatOk::Personas { .. }) => false,
         Err(e) => {
             // Drop any in-flight buffer; the engine won't deliver
             // `MessageFinished` for a request it rejected.

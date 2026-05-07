@@ -3,6 +3,7 @@ import { cpSendOk, cpStatus, settingsGet, subscribeCp } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { SessionPane } from "./components/SessionPane";
 import { SettingsView } from "./components/SettingsView";
+import { TopBar } from "./components/TopBar";
 import { useApp } from "./store";
 import styles from "./App.module.css";
 
@@ -12,7 +13,6 @@ function App() {
   const projects = useApp((s) => s.projects);
   const selected = useApp((s) => s.selectedProject);
 
-  // One-time wire-up: subscribe to events, query initial settings/status.
   useEffect(() => {
     const setConn = useApp.getState().setConn;
     const applyEvent = useApp.getState().applyEvent;
@@ -31,17 +31,12 @@ function App() {
         onCpEvent: (event) => applyEvent(event),
       });
 
-      // Hydrate from the authoritative snapshot last, AFTER the
-      // listener is attached. If a `cp:connected` event slipped past
-      // before subscribe ran, the snapshot still reflects it; if one
-      // fires after this read, the listener catches it.
       setConn(await cpStatus());
     })();
 
     return () => { if (unlisten) unlisten(); };
   }, []);
 
-  // Refresh project list whenever we transition into the connected state.
   useEffect(() => {
     if (conn.kind !== "connected") return;
     const setProjects = useApp.getState().setProjects;
@@ -54,24 +49,27 @@ function App() {
 
   return (
     <div className={styles.shell}>
-      <Sidebar />
-      {view.kind === "settings" ? (
-        <SettingsView />
-      ) : activeProject ? (
-        <SessionPane project={activeProject} />
-      ) : (
-        <main className={styles.empty}>
-          {conn.kind === "noconfig" ? (
-            <NoConfig />
-          ) : conn.kind === "connecting" ? (
-            <div>Connecting to control panel…</div>
-          ) : projects.length === 0 ? (
-            <div>No projects yet. Create one in the sidebar.</div>
-          ) : (
-            <div>Select a project.</div>
-          )}
-        </main>
-      )}
+      <TopBar />
+      <div className={styles.row}>
+        <Sidebar />
+        {view.kind === "settings" ? (
+          <SettingsView />
+        ) : activeProject ? (
+          <SessionPane project={activeProject} />
+        ) : (
+          <main className={styles.empty}>
+            {conn.kind === "noconfig" ? (
+              <NoConfig />
+            ) : conn.kind === "connecting" ? (
+              <div>Connecting to control panel…</div>
+            ) : projects.length === 0 ? (
+              <div>No projects yet. Create one in the sidebar.</div>
+            ) : (
+              <div>Select a project.</div>
+            )}
+          </main>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,0 +1,15 @@
+/* Loaded once when the overlay window boots. The window itself is
+   transparent + frameless via tauri.conf.json; this file paints only
+   the pill, leaving the rest of the window see-through. */
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}

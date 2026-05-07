@@ -20,11 +20,26 @@
 # install + `bun run build`.
 FROM oven/bun:1-debian AS ui-builder
 
-WORKDIR /ui
-COPY workflows/chat/ui/package.json workflows/chat/ui/bun.lock* ./
-RUN bun install --frozen-lockfile || bun install
+# The UI is a member of the repo-root Bun workspace and depends on
+# `@lutin/chat-widgets` from `packages/chat-widgets/`. We copy only
+# what the UI build needs (no `lutin-desktop/` Tauri tree) and write
+# a slim workspace root inline so bun resolves the workspace symlink
+# without trying to install the desktop's deps.
+WORKDIR /repo
+COPY packages/ ./packages/
+COPY workflows/chat/ui/ ./workflows/chat/ui/
 
-COPY workflows/chat/ui/ ./
+RUN cat > package.json <<'JSON'
+{
+  "name": "lutin-ui-build",
+  "private": true,
+  "workspaces": ["packages/*", "workflows/*/ui"]
+}
+JSON
+
+RUN bun install
+
+WORKDIR /repo/workflows/chat/ui
 RUN bun run build
 
 # Tar the dist directory at the bundle root so chrome's BundleCache

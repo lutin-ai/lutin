@@ -290,6 +290,7 @@ name = "chat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "egui",
  "futures-util",
  "lutin-agent-sdk",
@@ -307,6 +308,7 @@ dependencies = [
  "postcard",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

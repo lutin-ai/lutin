@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolve } from "node:path";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -27,6 +28,17 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+  },
+  // Multi-page build: the main React app at `index.html` plus a
+  // small floating overlay at `overlay.html`. Both bundle into
+  // `dist/` so Tauri's `frontendDist` picks them up unchanged.
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, "index.html"),
+        overlay: resolve(__dirname, "overlay.html"),
+      },
     },
   },
 }));
