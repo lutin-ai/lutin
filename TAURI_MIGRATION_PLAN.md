@@ -77,19 +77,19 @@ Rust types.
   WS bridge (`lutin-desktop/src/bridge.rs`) — keep, they're protocol code,
   not UI.
 
-## What goes away
+## What goes away (all DONE in Phase 4)
 
-- `lutin-desktop/src/app.rs`, `view/`, `settings.rs` (UI parts) — the
-  egui chrome.
-- `lutin-desktop/src/loader.rs` — the cdylib loader.
-- `crates/lutin-workflow-ui` — the cdylib trait surface. Replaced by a
-  JSON/IPC contract.
-- `crates/lutin-ui` — egui widget kit. Gone.
-- `workflows/chat/src/ui.rs` — the chat cdylib UI. Replaced by an HTML/JS
-  bundle in `workflows/chat/ui/`.
+- `lutin-desktop-egui/` — the egui chrome (renamed during Phase 1,
+  deleted in Phase 4).
+- `crates/lutin-workflow-ui` — the cdylib trait surface. Replaced by
+  a JSON/IPC contract.
+- `crates/lutin-ui` — egui widget kit.
+- `workflows/chat/src/ui.rs` — the chat cdylib UI. Replaced by an
+  HTML/JS bundle in `workflows/chat/ui/`.
 - `workflows/chat`'s `cdylib` crate-type, the `lutin.workflow.cdylib`
-  Docker label, and CP's `read_cdylib_bytes` / `GetWorkflowCdylib` on the
-  cdylib path. Replaced by a bundle-tarball equivalent.
+  Docker label, and CP's `read_cdylib_bytes` / `GetWorkflowCdylib` /
+  `ResponseOk::WorkflowCdylib`. Replaced by the bundle-tarball
+  equivalent.
 
 ## Tech choices (locked in to avoid relitigation)
 
@@ -747,12 +747,28 @@ These shipped with Phase 3a but weren't in the original plan:
 4. **PTT semantics with no active session.** Clipboard fallback (so
    audio isn't lost). Decided.
 
-### Phase 4: Polish + cleanup
+### Phase 4: Polish + cleanup — **cleanup DONE; window state + updater deferred**
 
-- Delete dead code: `crates/lutin-workflow-ui`, `crates/lutin-ui`, all
-  egui usage. Remove `lutin.workflow.cdylib` Docker label support from
-  CP if Phase 2 left it as a dual-write.
-- Window state persistence (size/position).
+Cleanup landed:
+
+- `crates/lutin-workflow-ui`, `crates/lutin-ui`, `lutin-desktop-egui`,
+  and `workflows/chat/src/ui.rs` deleted. The chat crate no longer
+  declares a `cdylib` crate-type and drops its `egui` + `lutin-workflow-ui`
+  deps; `lib.rs` no longer re-exports a `ui` module.
+- Control protocol drops `Request::GetWorkflowCdylib` /
+  `ResponseOk::WorkflowCdylib`. CP drops `Command::GetWorkflowCdylib`
+  / `fetch_workflow_cdylib` / `read_cdylib_bytes`. The
+  `lutin.workflow.cdylib` Docker label is no longer parsed; bundle
+  label is now required, not optional.
+- Chat Dockerfile drops the `libchat.so` build-stage assertion + COPY
+  + the `lutin.workflow.cdylib` LABEL.
+- Workspace `members` no longer references `lutin-desktop-egui`;
+  `[workspace.dependencies] lutin-workflow-ui` removed.
+
+Still on the Phase 4 punch list (deferred to a later session):
+
+- Window state persistence (size/position) via
+  `tauri-plugin-window-state`.
 - Auto-update strategy (Tauri has built-in updater — wire it up against
   whatever release pipeline you settle on).
 - Linux WebKitGTK: smoke-test on Wayland. If trackpad scrolling is
@@ -788,7 +804,7 @@ lutin-desktop/              (rewritten — Tauri 2 standard layout)
 
 workflows/
   chat/
-    Cargo.toml              (engine only — no [lib], no cdylib)
+    Cargo.toml              (engine [[bin]] + rlib [lib] for tests; no cdylib)
     src/
       engine.rs             (unchanged)
       lib.rs                (engine-side helpers; UI gone)
@@ -822,20 +838,15 @@ workflows/
 
 ## What to do first when context is fresh
 
-Phases 1, 2, and 3a are landed. Next up is **Phase 4 (polish + cleanup)**:
+Phases 1, 2, 3a, and the cleanup half of Phase 4 are landed. Remaining
+work, all additive:
 
-1. **Delete dead egui code.** `crates/lutin-workflow-ui`, `crates/lutin-ui`,
-   `workflows/chat/src/ui.rs`, anything still pulling `eframe`/`egui`.
-   `lutin-desktop-egui` (the renamed pre-Tauri crate) gets dropped from
-   disk, not just from the workspace members list.
-2. **Drop `lutin.workflow.cdylib` dual-write.** CP currently accepts
-   either label; once egui is gone, require `lutin.workflow.bundle`
-   only and delete `read_cdylib_bytes` / `GetWorkflowCdylib`.
-3. **Window state persistence.** `tauri-plugin-window-state`. Main
-   window only — overlay window is positioned by the OS / our code.
-4. **Auto-update.** Wire Tauri's built-in updater against whatever
-   release pipeline ships first.
-5. **WebKitGTK smoke test on Wayland.** Trackpad scroll quality is
+1. **Window state persistence.** `tauri-plugin-window-state`. Main
+   window only — the overlay window is positioned by `overlay.rs`.
+2. **Auto-update.** Wire Tauri's built-in updater against whatever
+   release pipeline ships first; needs an updater signing keypair and
+   a manifest endpoint.
+3. **WebKitGTK smoke test on Wayland.** Trackpad scroll quality is
    the known risk; if unbearable, the escape hatch is Chromium-via-CEF,
    but we hope to avoid that.
 
@@ -846,9 +857,3 @@ Things to remember, learned the hard way:
 - **Tauri serializes `Vec<u8>` as a JSON number array** in IPC. JS
   side converts at the boundary (`Array.from(uint8)` outbound,
   `Uint8Array.from(arr)` inbound). Hidden in `api.ts` helpers.
-- **Don't re-add `lutin-desktop-egui`** to the workspace members
-  list until Phase 4 — it has an exhaustive `Response` match that
-  trips on every new variant.
-- `crates/lutin-workflow-ui`, `crates/lutin-ui`, `workflows/chat/src/ui.rs`
-  remain on disk and compile via the chat crate's own workspace.
-  Don't delete until Phase 4.

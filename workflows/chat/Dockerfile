@@ -8,11 +8,9 @@
 # ../../crates/lutin-*).
 #   docker build -f workflows/chat/Dockerfile -t lutin-workflow-chat:<version> .
 #
-# CP extracts artefacts on demand via `docker run --rm <image> cat <path>`:
-#   - cdylib UI (legacy egui, removed in Phase 4) at the path declared by
-#     the `lutin.workflow.cdylib` label.
-#   - Plugin bundle tarball (HTML/JS UI for the Tauri chrome) at the path
-#     declared by the `lutin.workflow.bundle` label.
+# CP extracts the plugin bundle tarball (HTML/JS UI for the Tauri
+# chrome) on demand via `docker run --rm <image> cat <path>`, where
+# `<path>` is declared by the `lutin.workflow.bundle` label.
 
 # ---------- ui-builder (Vite/React) ----------
 # Built first so a Rust source change doesn't bust the JS layer's cache.
@@ -73,10 +71,10 @@ COPY . .
 WORKDIR /build/workflows/chat
 RUN cargo build --release --locked
 
-# Sanity: both artifacts must exist before we copy them to the runtime
-# stage. Failing here is louder than a confusing "file not found" later.
-RUN test -f target/release/chat \
- && test -f target/release/libchat.so
+# Sanity: the engine binary must exist before we copy it to the
+# runtime stage. Failing here is louder than a confusing "file not
+# found" later.
+RUN test -f target/release/chat
 
 # ---------- runtime ----------
 FROM debian:bookworm-slim AS runtime
@@ -88,12 +86,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fixed image-side layout. CP reads each artefact path from the label
 # below, so changing them here is a one-line change.
 RUN mkdir -p /workflow /project /session
-COPY --from=builder    /build/workflows/chat/target/release/chat        /workflow/bin
-COPY --from=builder    /build/workflows/chat/target/release/libchat.so  /workflow/lib.so
-COPY --from=ui-builder /ui.tar                                          /workflow/ui.tar
+COPY --from=builder    /build/workflows/chat/target/release/chat /workflow/bin
+COPY --from=ui-builder /ui.tar                                   /workflow/ui.tar
 
 LABEL lutin.workflow.id="chat"
-LABEL lutin.workflow.cdylib="/workflow/lib.so"
 LABEL lutin.workflow.bundle="/workflow/ui.tar"
 LABEL lutin.workflow.display_name="Chat"
 LABEL lutin.workflow.icon="💬"

@@ -1,16 +1,14 @@
-//! Chat workflow protocol + per-session state, plus the `ui` submodule
-//! exporting the `cdylib` UI plugin loaded by the desktop chrome.
+//! Chat workflow protocol + per-session state.
 //!
 //! The chat workflow runs as its own subprocess (one per session)
-//! spawned by `lutin-project`. It does not share `lutin-session-protocol`
-//! with the project tier — workflows define their own request/response
-//! shapes. The wire envelope is still `lutin_protocol::Frame`; payloads
-//! ride inside `Frame::Payload.body` / `Frame::Broadcast.body` as
-//! postcard-encoded values of the types declared here. Protocol items
-//! live at the crate root so `engine.rs` can keep its existing
-//! `use chat::{ChatRequest, …}` imports.
-
-pub mod ui;
+//! spawned by CP. It does not share `lutin-session-protocol` with the
+//! project tier — workflows define their own request/response shapes.
+//! The wire envelope is `lutin_protocol::Frame`; payloads ride inside
+//! `Frame::Payload.body` / `Frame::Broadcast.body` as postcard-encoded
+//! values of the types declared here. Protocol items live at the crate
+//! root so `engine.rs` can keep its existing `use chat::{ChatRequest, …}`
+//! imports. The plugin UI lives in `ui/` (a static asset bundle shipped
+//! in the Docker image), not in this crate.
 
 use std::path::{Path, PathBuf};
 

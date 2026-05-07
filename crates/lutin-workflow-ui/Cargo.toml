@@ -1,9 +1,0 @@
-[package]
-name = "lutin-workflow-ui"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-egui = { version = "0.34.1", default-features = false, features = ["serde"] }
-tokio = { version = "1.52", default-features = false, features = ["sync"] }
-lutin-ids = { path = "../lutin-ids" }

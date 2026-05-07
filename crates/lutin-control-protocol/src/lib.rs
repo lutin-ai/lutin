@@ -89,13 +89,11 @@ pub struct ProjectInfo {
 /// `ListWorkflows`. Sourced from the workflow image's labels — see
 /// `lutin-control-panel/src/workflow_images.rs`. `digest` is the
 /// underlying Docker image id; the desktop uses it as a cache key
-/// for the cdylib bytes fetched via `GetWorkflowCdylib`.
+/// for the bundle bytes fetched via `GetWorkflowBundle`.
 ///
 /// `display_name` and `icon` come from `lutin.workflow.display_name`
 /// / `lutin.workflow.icon` Docker labels and feed chrome's sidebar
-/// + top-bar rendering. Chrome reads these from CP rather than from
-/// the cdylib so it can decorate the chrome before the cdylib is
-/// loaded (sessions trigger the dlopen).
+/// + top-bar rendering.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowInfo {
     pub id: WorkflowId,
@@ -222,18 +220,10 @@ pub enum Request {
         slug: Slug,
         session: SessionId,
     },
-    /// Fetch the cdylib bytes for a workflow image. The desktop caches
-    /// these by `digest` on its side and only requests when its cache
-    /// is missing or stale relative to the digest reported by
-    /// `ListWorkflows`.
-    GetWorkflowCdylib {
-        id: WorkflowId,
-    },
     /// Fetch the static-asset bundle (tarball) for a workflow image.
-    /// Replaces `GetWorkflowCdylib` post-Phase-2 — the bundle ships an
-    /// HTML/JS plugin UI that runs in an iframe instead of an
-    /// in-process cdylib. Same caching strategy: desktop keys by
-    /// `digest` from `ListWorkflows` and only refetches on mismatch.
+    /// The bundle ships an HTML/JS plugin UI that runs in an iframe.
+    /// Desktop caches by `(workflow_id, digest)` and only refetches
+    /// when the digest reported by `ListWorkflows` moves.
     GetWorkflowBundle {
         id: WorkflowId,
     },
@@ -314,14 +304,6 @@ pub enum ResponseOk {
     /// Reply to `OpenSession`: just an endpoint (the caller already has
     /// the `SessionInfo` from `ListSessions`).
     SessionOpened(SessionEndpoint),
-    /// Reply to `GetWorkflowCdylib`. `digest` matches the image at the
-    /// time of the read; desktop persists it alongside the bytes so
-    /// subsequent `ListWorkflows` digest comparisons can skip refetch.
-    WorkflowCdylib {
-        id: WorkflowId,
-        digest: String,
-        bytes: Vec<u8>,
-    },
     /// Reply to `GetWorkflowBundle`. `bytes` is a tar archive of the
     /// plugin UI (root-level `lutin.workflow.json` + `index.html` + any
     /// referenced assets). Desktop unpacks under its cache dir keyed

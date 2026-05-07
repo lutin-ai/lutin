@@ -73,7 +73,6 @@ export type Request =
   | { ResumeSession: { slug: Slug; session: SessionId } }
   | { DeleteSession: { slug: Slug; session: SessionId } }
   | { OpenSession: { slug: Slug; session: SessionId } }
-  | { GetWorkflowCdylib: { id: WorkflowId } }
   | { GetWorkflowBundle: { id: WorkflowId } }
   | "ListProviders"
   | { SetProviders: { providers: ProviderConfig[] } };
@@ -89,7 +88,6 @@ export type ResponseOk =
   | "SessionDeleted"
   | { SessionResumed: { info: SessionInfo; endpoint: SessionEndpoint } }
   | { SessionOpened: SessionEndpoint }
-  | { WorkflowCdylib: { id: WorkflowId; digest: string; bytes: number[] } }
   | { WorkflowBundle: { id: WorkflowId; digest: string; bytes: number[] } }
   | { Providers: ProviderConfig[] }
   | "ProvidersSaved";

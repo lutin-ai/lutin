@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  # "lutin-desktop-egui",  # dead — kept on disk during Tauri migration; re-add only if you need to compile-check it
   "lutin-desktop/src-tauri",
   "lutin-control-panel",
   "crates/*",
@@ -22,4 +21,3 @@ lutin-auth = { path = "crates/lutin-auth" }
 lutin-keypair = { path = "crates/lutin-keypair" }
 lutin-agent-sdk = { path = "crates/lutin-agent-sdk" }
 lutin-workflow-sdk = { path = "crates/lutin-workflow-sdk" }
-lutin-workflow-ui = { path = "crates/lutin-workflow-ui" }

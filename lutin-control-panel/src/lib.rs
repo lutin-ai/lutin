@@ -89,10 +89,6 @@ enum Command {
         session: SessionId,
         reply: oneshot::Sender<Response>,
     },
-    GetWorkflowCdylib {
-        id: WorkflowId,
-        reply: oneshot::Sender<Response>,
-    },
     GetWorkflowBundle {
         id: WorkflowId,
         reply: oneshot::Sender<Response>,
@@ -184,7 +180,6 @@ impl AppState {
                 session,
                 reply,
             },
-            Request::GetWorkflowCdylib { id } => Command::GetWorkflowCdylib { id, reply },
             Request::GetWorkflowBundle { id } => Command::GetWorkflowBundle { id, reply },
             Request::ListProviders => Command::ListProviders { reply },
             Request::SetProviders { providers } => Command::SetProviders { providers, reply },
@@ -301,16 +296,10 @@ async fn handle_command(
             let workflows = sessions::list_workflows();
             let _ = reply.send(Response::Ok(ResponseOk::Workflows(workflows)));
         }
-        Command::GetWorkflowCdylib { id, reply } => {
+        Command::GetWorkflowBundle { id, reply } => {
             // Detach: `docker run cat` is a multi-MB read and we don't
             // want it serialising with other commands on the supervisor
             // task. The spawned task replies on `reply` directly.
-            tokio::task::spawn_blocking(move || {
-                let response = fetch_workflow_cdylib(&id);
-                let _ = reply.send(response);
-            });
-        }
-        Command::GetWorkflowBundle { id, reply } => {
             tokio::task::spawn_blocking(move || {
                 let response = fetch_workflow_bundle(&id);
                 let _ = reply.send(response);
@@ -478,28 +467,9 @@ async fn handle_command(
     }
 }
 
-/// Find the image for a workflow id and ship its cdylib bytes back as
-/// a `WorkflowCdylib` response. Runs on a blocking thread.
-fn fetch_workflow_cdylib(id: &WorkflowId) -> Response {
-    let images = workflow_images::list_installed();
-    let Some(inst) = images.iter().find(|i| i.id == id.as_str()) else {
-        return Response::Err(ApiError::WorkflowNotFound(id.clone()));
-    };
-    match workflow_images::read_cdylib_bytes(&inst.image) {
-        Ok((digest, bytes)) => Response::Ok(ResponseOk::WorkflowCdylib {
-            id: id.clone(),
-            digest,
-            bytes,
-        }),
-        Err(e) => Response::Err(ApiError::Supervisor(format!(
-            "read cdylib for {}: {e}",
-            id.as_str()
-        ))),
-    }
-}
-
-/// Bundle counterpart to `fetch_workflow_cdylib`. Runs on a blocking
-/// thread; ships the tarball verbatim — desktop unpacks.
+/// Find the image for a workflow id and ship its plugin-bundle tarball
+/// back as a `WorkflowBundle` response. Runs on a blocking thread;
+/// ships the tarball verbatim — desktop unpacks.
 fn fetch_workflow_bundle(id: &WorkflowId) -> Response {
     let images = workflow_images::list_installed();
     let Some(inst) = images.iter().find(|i| i.id == id.as_str()) else {

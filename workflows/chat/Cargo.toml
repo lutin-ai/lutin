@@ -14,9 +14,6 @@ path = "src/engine.rs"
 
 [lib]
 path = "src/lib.rs"
-# `lib` keeps the rlib so the engine `[[bin]]` (and tests) can `use chat::*`.
-# `cdylib` produces the `.so` the desktop chrome dlopens for the UI.
-crate-type = ["lib", "cdylib"]
 
 [dependencies]
 lutin-agent-sdk = { path = "../../crates/lutin-agent-sdk" }
@@ -30,9 +27,6 @@ lutin-settings = { path = "../../crates/lutin-settings" }
 lutin-storage = { path = "../../crates/lutin-storage" }
 lutin-workflow-sdk = { path = "../../crates/lutin-workflow-sdk" }
 lutin-tools = { path = "../../crates/lutin-tools" }
-lutin-workflow-ui = { path = "../../crates/lutin-workflow-ui" }
-
-egui = { version = "0.34.1", default-features = false, features = ["serde"] }
 
 anyhow = "1"
 futures-util = "0.3"

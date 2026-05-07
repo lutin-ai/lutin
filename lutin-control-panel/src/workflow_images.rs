@@ -1,11 +1,12 @@
-//! Workflow image enumeration + on-demand cdylib byte extraction.
+//! Workflow image enumeration + on-demand bundle byte extraction.
 //!
 //! Workflows ship as Docker images labelled `lutin.workflow.id=<id>`,
-//! with the cdylib bundled inside the image at the path declared by
-//! `lutin.workflow.cdylib`. CP doesn't stage the cdylib on the host:
-//! when a desktop client asks for it via `GetWorkflowCdylib`, we shell
-//! out to docker, read the bytes out of the image, and ship them over
-//! the wire. The desktop caches by image digest on its side.
+//! with the plugin UI bundle (a tarball of static assets) bundled
+//! inside the image at the path declared by `lutin.workflow.bundle`.
+//! CP doesn't stage the bundle on the host: when a desktop client
+//! asks for it via `GetWorkflowBundle`, we shell out to docker, read
+//! the bytes out of the image, and ship them over the wire. The
+//! desktop caches by image digest on its side.
 //!
 //! Failures here are warnings, not fatal. A CP that can't reach the
 //! Docker daemon should still boot and serve everything that doesn't
@@ -15,7 +16,6 @@ use std::io;
 use std::process::Command;
 
 const ID_LABEL: &str = "lutin.workflow.id";
-const CDYLIB_LABEL: &str = "lutin.workflow.cdylib";
 const BUNDLE_LABEL: &str = "lutin.workflow.bundle";
 const DISPLAY_NAME_LABEL: &str = "lutin.workflow.display_name";
 const ICON_LABEL: &str = "lutin.workflow.icon";
@@ -26,7 +26,7 @@ pub struct InstalledWorkflow {
     pub image: String,
     /// Docker image id (e.g. `sha256:…`). Stable for the life of the
     /// image; changes when the image is rebuilt. Desktop uses it as the
-    /// cdylib cache key.
+    /// bundle cache key.
     pub digest: String,
     /// Falls back to `id` when the image omits the label.
     pub display_name: String,
@@ -77,28 +77,14 @@ pub fn list_installed() -> Vec<InstalledWorkflow> {
         .collect()
 }
 
-/// Read the cdylib bytes out of a workflow image, returning them
-/// together with the current image digest. Implemented as
+/// Read the workflow UI bundle (tar archive) out of an image,
+/// returning it together with the current image digest. Implemented as
 /// `docker run --rm <image> cat <path>` — the entrypoint of every
 /// workflow image is the engine binary, so we override it with
 /// `/bin/cat`. Stdout becomes the bytes; stderr surfaces any error.
-pub fn read_cdylib_bytes(image: &str) -> io::Result<(String, Vec<u8>)> {
-    let meta = inspect_image(image)?;
-    let path = meta.cdylib_path.as_deref().ok_or_else(|| {
-        io::Error::other(format!("{image} missing label {CDYLIB_LABEL}"))
-    })?;
-    cat_image_path(image, path).map(|bytes| (meta.digest, bytes))
-}
-
-/// Read the workflow UI bundle (tar archive) out of an image. Same
-/// shape as `read_cdylib_bytes`; the path is declared by the
-/// `lutin.workflow.bundle` Docker label.
 pub fn read_bundle_bytes(image: &str) -> io::Result<(String, Vec<u8>)> {
     let meta = inspect_image(image)?;
-    let path = meta.bundle_path.as_deref().ok_or_else(|| {
-        io::Error::other(format!("{image} missing label {BUNDLE_LABEL}"))
-    })?;
-    cat_image_path(image, path).map(|bytes| (meta.digest, bytes))
+    cat_image_path(image, &meta.bundle_path).map(|bytes| (meta.digest, bytes))
 }
 
 fn cat_image_path(image: &str, path: &str) -> io::Result<Vec<u8>> {
@@ -141,13 +127,9 @@ fn list_workflow_images() -> io::Result<Vec<String>> {
 
 struct ImageMeta {
     id: String,
-    /// `None` if the image omits the cdylib label. Required by
-    /// `read_cdylib_bytes`; optional during the bundle transition so
-    /// images that ship only a bundle still enumerate cleanly.
-    cdylib_path: Option<String>,
-    /// `None` if the image omits the bundle label. Required by
-    /// `read_bundle_bytes`.
-    bundle_path: Option<String>,
+    /// Path inside the image to the bundle tarball, declared by
+    /// `lutin.workflow.bundle`. Required.
+    bundle_path: String,
     digest: String,
     /// Empty if the image omits the label — caller picks a fallback.
     display_name: String,
@@ -166,7 +148,6 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
             "--format",
             &format!(
                 "{{{{index .Config.Labels \"{ID_LABEL}\"}}}}\n\
-                 {{{{index .Config.Labels \"{CDYLIB_LABEL}\"}}}}\n\
                  {{{{index .Config.Labels \"{BUNDLE_LABEL}\"}}}}\n\
                  {{{{.Id}}}}\n\
                  {{{{index .Config.Labels \"{DISPLAY_NAME_LABEL}\"}}}}\n\
@@ -183,7 +164,6 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
     let id = lines.next().unwrap_or("").trim().to_owned();
-    let cdylib_path = lines.next().unwrap_or("").trim().to_owned();
     let bundle_path = lines.next().unwrap_or("").trim().to_owned();
     let digest = lines.next().unwrap_or("").trim().to_owned();
     let display_name = lines.next().unwrap_or("").trim().to_owned();
@@ -193,9 +173,9 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
             "{image} missing required label {ID_LABEL}"
         )));
     }
-    if cdylib_path.is_empty() && bundle_path.is_empty() {
+    if bundle_path.is_empty() {
         return Err(io::Error::other(format!(
-            "{image} missing both {CDYLIB_LABEL} and {BUNDLE_LABEL}"
+            "{image} missing required label {BUNDLE_LABEL}"
         )));
     }
     if digest.is_empty() {
@@ -203,8 +183,7 @@ fn inspect_image(image: &str) -> io::Result<ImageMeta> {
     }
     Ok(ImageMeta {
         id,
-        cdylib_path: (!cdylib_path.is_empty()).then_some(cdylib_path),
-        bundle_path: (!bundle_path.is_empty()).then_some(bundle_path),
+        bundle_path,
         digest,
         display_name,
         icon,

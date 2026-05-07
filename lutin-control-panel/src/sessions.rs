@@ -123,7 +123,7 @@ fn resolve_workflow_image(workflow: &WorkflowId) -> Result<String, SessionError>
 /// `lutin.workflow.display_name` / `lutin.workflow.icon` Docker
 /// labels (with fallbacks applied in `workflow_images`). `digest` is
 /// the docker image id; the desktop uses it as the cache key for
-/// cdylib bytes fetched separately via `GetWorkflowCdylib`.
+/// bundle bytes fetched separately via `GetWorkflowBundle`.
 pub fn list_workflows() -> Vec<WorkflowInfo> {
     workflow_images::list_installed()
         .into_iter()
