@@ -7,6 +7,7 @@ version.workspace = true
 thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1.52", features = ["sync", "rt"] }
+crossbeam-channel = "0.5"
 encoding_rs = "0.8"
 
 llama-cpp-2 = { version = "0.1.143", features = ["vulkan"] }

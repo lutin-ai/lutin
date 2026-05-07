@@ -3190,6 +3190,7 @@ dependencies = [
 name = "lutin-tts"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "encoding_rs",
  "llama-cpp-2",
  "ort",

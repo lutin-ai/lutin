@@ -7,11 +7,13 @@ use std::path::Path;
 
 use ort::session::Session;
 
-/// Number of tokens per SNAC frame group.
-const TOKENS_PER_FRAME: usize = 7;
+/// Number of tokens per SNAC frame group. Re-exported via the
+/// `orpheus` parent so the audio-token range and the decoder both
+/// derive from one definition.
+pub(super) const TOKENS_PER_FRAME: usize = 7;
 
-/// Codebook size per layer.
-const CODEBOOK_SIZE: usize = 4096;
+/// Codebook size per layer. Same single-source-of-truth concern.
+pub(super) const CODEBOOK_SIZE: usize = 4096;
 
 pub struct SnacDecoder {
     session: Session,
@@ -66,9 +68,9 @@ impl SnacDecoder {
             codes_2.push(t(6));
         }
 
-        let shape_0 = vec![1_usize, codes_0.len()];
-        let shape_1 = vec![1_usize, codes_1.len()];
-        let shape_2 = vec![1_usize, codes_2.len()];
+        let shape_0: [usize; 2] = [1, codes_0.len()];
+        let shape_1: [usize; 2] = [1, codes_1.len()];
+        let shape_2: [usize; 2] = [1, codes_2.len()];
 
         let t0 = ort::value::Tensor::from_array((shape_0, codes_0.into_boxed_slice()))
             .map_err(|e| SnacError::Ort(e.to_string()))?;

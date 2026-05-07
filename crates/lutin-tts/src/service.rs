@@ -10,7 +10,7 @@
 //! and translates events onto the wire.
 
 use std::collections::HashMap;
-use std::sync::{mpsc as std_mpsc, Arc, Mutex};
+use std::sync::{mpsc as std_mpsc, Mutex};
 
 use tokio::sync::{mpsc, watch};
 
@@ -30,7 +30,11 @@ pub struct StreamId(pub u64);
 /// Output event. PCM is 24 kHz mono i16 LE bytes (the contract Orpheus
 /// + SNAC produce; future backends should match or document a
 /// different sample rate at their boundary).
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: chunks are forwarded once to the consumer (CP), and a
+/// derived `Clone` would invite an accidental deep copy of every
+/// 200 ms of audio.
+#[derive(Debug)]
 pub enum TtsEvent {
     Audio { stream_id: StreamId, chunk: Vec<u8> },
     /// Sent when the stream's outstanding sentence queue drains. Not
@@ -93,58 +97,73 @@ impl TtsService {
 
     /// Queue a sentence for synthesis. Non-blocking. `speed` is
     /// clamped to 0.5..=2.0; markdown is stripped from `text` before
-    /// the model sees it.
-    pub fn speak(&self, stream_id: StreamId, text: String, voice: String, speed: f32) {
+    /// the model sees it. Returns `false` if the request was rejected
+    /// (empty after cleaning, invalid voice, or service shutting
+    /// down) so callers can avoid emitting a wire `TtsFinished` for a
+    /// no-op.
+    pub fn speak(&self, stream_id: StreamId, text: &str, voice: &str, speed: f32) -> bool {
+        if !is_valid_voice(voice) {
+            tracing::warn!(voice, "rejecting TTS speak: invalid voice");
+            return false;
+        }
         let speed = speed.clamp(0.5, 2.0);
-        let clean_text = clean_for_speech(&text);
+        let clean_text = clean_for_speech(text);
         if clean_text.is_empty() {
-            return;
+            return false;
         }
 
         let cancel_rx = {
             let mut tokens = self.cancel_tokens.lock().expect("cancel tokens poisoned");
-            let tx = tokens
+            tokens
                 .entry(stream_id)
-                .or_insert_with(|| watch::channel(false).0);
-            // A stream that was previously cancelled gets a fresh
-            // token so a follow-up `speak` isn't dead on arrival.
-            if *tx.borrow() {
-                let (new_tx, rx) = watch::channel(false);
-                *tx = new_tx;
-                rx
-            } else {
-                tx.subscribe()
-            }
+                .or_insert_with(|| watch::channel(false).0)
+                .subscribe()
         };
 
-        let _ = self.request_tx.send(Request {
-            stream_id,
-            text: clean_text,
-            voice,
-            speed,
-            cancel_rx,
-        });
+        self.request_tx
+            .send(Request {
+                stream_id,
+                text: clean_text,
+                voice: voice.to_owned(),
+                speed,
+                cancel_rx,
+            })
+            .is_ok()
     }
 
     /// Cancel pending + in-progress synthesis for a stream. The watch
-    /// flag is set; workers exit early; the submitter drops queued
-    /// requests for this stream. Idempotent — cancelling an unknown
-    /// stream is a no-op.
+    /// flag is set, workers exit early, the submitter drops queued
+    /// requests for this stream, and the per-stream entry is removed
+    /// so the next `speak` starts from a fresh token (no map leak for
+    /// streams that are cancelled but never explicitly closed).
+    /// Idempotent.
     pub fn cancel(&self, stream_id: StreamId) {
-        let tokens = self.cancel_tokens.lock().expect("cancel tokens poisoned");
-        if let Some(tx) = tokens.get(&stream_id) {
-            let _ = tx.send(true);
-        }
-    }
-
-    /// Drop all state for a stream. Cancels first so anything in
-    /// flight tears down, then removes the cancel token.
-    pub fn close(&self, stream_id: StreamId) {
         let mut tokens = self.cancel_tokens.lock().expect("cancel tokens poisoned");
         if let Some(tx) = tokens.remove(&stream_id) {
             let _ = tx.send(true);
         }
     }
+
+    /// Tear down a stream. Today this is exactly `cancel` — callers
+    /// who want a separate "no future speaks" signal should track
+    /// that on their side.
+    pub fn close(&self, stream_id: StreamId) {
+        self.cancel(stream_id);
+    }
+}
+
+/// Voice names go straight into the model prompt template (e.g.
+/// `<{voice}>`), so reject anything that could break the template
+/// syntax or smuggle in extra tokens. Allow letters, digits,
+/// underscore, and hyphen — covers every documented Orpheus voice
+/// (`tara`, `leah`, …) and leaves room for community voices without
+/// opening a prompt-injection surface.
+fn is_valid_voice(voice: &str) -> bool {
+    !voice.is_empty()
+        && voice.len() <= 64
+        && voice
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn run_pool(
@@ -153,9 +172,13 @@ fn run_pool(
     sink: mpsc::UnboundedSender<TtsEvent>,
     worker_count: usize,
 ) {
-    let (job_tx, job_rx) = std_mpsc::sync_channel::<Job>(worker_count.max(1) * 4);
-    let job_rx = Arc::new(Mutex::new(job_rx));
-
+    // crossbeam-channel: native MPMC, so workers `clone()` the
+    // receiver and call `recv()` directly. The legacy std mpsc +
+    // `Arc<Mutex<Receiver>>` pattern serialised every worker on a
+    // single mutex held *across* the blocking recv — i.e. a "pool"
+    // that never had more than one worker awake at once. This
+    // version actually parallelises.
+    let (job_tx, job_rx) = crossbeam_channel::bounded::<Job>(worker_count.max(1) * 4);
     let (slot_tx, slot_rx) = std_mpsc::channel::<SentenceSlot>();
 
     std::thread::scope(|s| {
@@ -173,29 +196,26 @@ fn run_pool(
                 }
             };
 
-            s.spawn(move || loop {
-                let job = match job_rx.lock().unwrap().recv() {
-                    Ok(j) => j,
-                    Err(_) => break,
-                };
-                if *job.cancel_rx.borrow() {
-                    continue;
-                }
-                if let Err(e) = worker.generate(
-                    &job.text,
-                    &job.voice,
-                    job.speed,
-                    &job.cancel_rx,
-                    &job.audio_tx,
-                ) {
-                    tracing::error!(worker = i, error = %e, "TTS worker error");
+            s.spawn(move || {
+                while let Ok(job) = job_rx.recv() {
+                    if *job.cancel_rx.borrow() {
+                        continue;
+                    }
+                    if let Err(e) = worker.generate(
+                        &job.text,
+                        &job.voice,
+                        job.speed,
+                        &job.cancel_rx,
+                        &job.audio_tx,
+                    ) {
+                        tracing::error!(worker = i, error = %e, "TTS worker error");
+                    }
                 }
             });
         }
 
         // ----- Sender (ordered delivery per stream) -----
-        let sink_ref = sink.clone();
-        s.spawn(move || sender_loop(slot_rx, sink_ref));
+        s.spawn(move || sender_loop(slot_rx, sink));
 
         // ----- Submitter (this thread) -----
         while let Some(req) = request_rx.blocking_recv() {
@@ -218,9 +238,6 @@ fn run_pool(
                 audio_tx,
             });
         }
-
-        drop(job_tx);
-        drop(slot_tx);
     });
 }
 
@@ -351,6 +368,18 @@ fn is_line_start(text: &str, i: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_validation() {
+        assert!(is_valid_voice("tara"));
+        assert!(is_valid_voice("voice_01"));
+        assert!(is_valid_voice("a-b"));
+        assert!(!is_valid_voice(""));
+        assert!(!is_valid_voice("tara>"));
+        assert!(!is_valid_voice("a\nb"));
+        assert!(!is_valid_voice("<|eot_id|>"));
+        assert!(!is_valid_voice(&"x".repeat(65)));
+    }
 
     #[test]
     fn clean_strips_markdown() {

@@ -18,16 +18,15 @@ use tokio::sync::watch;
 
 use crate::backend::{TtsBackendFactory, TtsWorker};
 use crate::TtsError;
-use snac::SnacDecoder;
-
-/// Tokens per SNAC frame (7 token positions per frame group).
-const TOKENS_PER_FRAME: usize = 7;
+use snac::{SnacDecoder, CODEBOOK_SIZE, TOKENS_PER_FRAME};
 
 /// Maximum tokens to generate per sentence.
 const MAX_TOKENS: usize = 2000;
 
-/// 7 positions × 4096 entries each (each position has its own offset).
-const AUDIO_TOKEN_COUNT: u32 = 4096 * 7;
+/// `TOKENS_PER_FRAME` positions × `CODEBOOK_SIZE` entries each (each
+/// position has its own offset). Derived rather than hard-coded so a
+/// model-side change to either dimension can't desync silently.
+const AUDIO_TOKEN_COUNT: u32 = (CODEBOOK_SIZE * TOKENS_PER_FRAME) as u32;
 
 /// SNAC frames to accumulate before decoding and emitting a chunk.
 /// 16 frames ≈ 200 ms of audio at 24 kHz — small enough to keep
@@ -117,10 +116,15 @@ impl TtsWorker for OrpheusWorker<'_> {
         &mut self,
         text: &str,
         voice: &str,
-        _speed: f32,
+        speed: f32,
         cancel_rx: &watch::Receiver<bool>,
         audio_tx: &std_mpsc::SyncSender<Vec<u8>>,
     ) -> Result<(), TtsError> {
+        // Orpheus has no in-model speed control; SNAC output rate is
+        // fixed at 24 kHz. Resampling at the output stage would cost
+        // a perceptible quality hit, so we deliberately ignore the
+        // hint here. Documented at the trait level (`backend.rs`).
+        let _ = speed;
         let prompt = format!("<|audio|><{voice}>: {text}<|eot_id|>");
 
         let tokens = self
@@ -221,9 +225,13 @@ fn send_chunk(
     }
 }
 
-/// Find the first audio-token id by looking up `<custom_token_10>`.
-/// Orpheus reserves custom tokens 0–9 for special use; audio codes
-/// start at 10.
+/// Find the first audio-token id. Orpheus reserves custom tokens 0–9
+/// for special use; audio codes start at 10. The direct `str_to_token`
+/// lookup is the contract for current Orpheus GGUFs (Q4_K_M and the
+/// official 0.1-ft set). The vocab scan is a fallback for older or
+/// re-quantised exports whose tokeniser doesn't surface
+/// `<custom_token_10>` as a single piece — it warns when it fires so
+/// we can tell whether the fallback is still load-bearing.
 fn find_audio_token_start(model: &LlamaModel) -> Result<u32, TtsError> {
     if let Ok(ids) =
         model.str_to_token("<custom_token_10>", llama_cpp_2::model::AddBos::Never)
@@ -233,6 +241,7 @@ fn find_audio_token_start(model: &LlamaModel) -> Result<u32, TtsError> {
         }
     }
 
+    tracing::warn!("Orpheus: direct <custom_token_10> lookup failed, falling back to vocab scan");
     let n_vocab = model.n_vocab();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     for id in 0..n_vocab {
