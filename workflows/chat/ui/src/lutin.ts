@@ -24,6 +24,30 @@ export interface TranscriptionMessage {
   source: "ptt" | "openmic";
 }
 
+// TTS shim surface — only present when the workflow declares `"tts"`
+// in `capabilities`. Mirrors the chrome-side wrappers in
+// `lutin-desktop/src/api.ts`. `TtsStreamId` is opaque to JS — pass
+// what `openStream` returns straight through to the other methods.
+// Wire-shape types are shared with chrome via `@lutin/shim-types`.
+export type {
+  OrpheusModel,
+  OrpheusVoice,
+  TtsBackend,
+  TtsStreamId,
+} from "@lutin/shim-types";
+import type { TtsBackend, TtsStreamId } from "@lutin/shim-types";
+
+export interface LutinTts {
+  ensureBackend(backend: TtsBackend): Promise<void>;
+  openStream(backend: TtsBackend): Promise<TtsStreamId>;
+  /// `opts.speed` is a multiplier (`1.0` = normal); the shim converts
+  /// to the wire's integer-thousandths form. The chrome will reject
+  /// values outside `0.5..=2.0`.
+  speak(streamId: TtsStreamId, text: string, opts?: { speed?: number }): Promise<void>;
+  cancel(streamId: TtsStreamId): Promise<void>;
+  closeStream(streamId: TtsStreamId): Promise<void>;
+}
+
 export interface LutinInit {
   slug: string;
   session: string;
@@ -39,6 +63,10 @@ export interface Lutin extends LutinInit {
   /// `receive_transcription` in `capabilities`. Subscribe to receive
   /// PTT / open-mic transcription deliveries routed by chrome.
   onTranscription?(cb: (msg: TranscriptionMessage) => void): () => void;
+  /// Only present when the workflow's manifest declares `"tts"` in
+  /// `capabilities`. Audio playback is fully chrome-side; workflows
+  /// just feed text and react to `closeStream` resolutions.
+  tts?: LutinTts;
 }
 
 declare global {

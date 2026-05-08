@@ -131,6 +131,10 @@ pub struct HistoricalMessage {
 pub enum HistoricalRole {
     User,
     Assistant,
+    /// Reasoning / extended-thinking text emitted alongside an assistant
+    /// turn. Persisted so re-subscribers see the same conversation that
+    /// live listeners saw stream by.
+    Thinking,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]

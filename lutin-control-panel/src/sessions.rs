@@ -33,8 +33,8 @@ use crate::workflow_images;
 /// How long to wait for the workflow container to publish its handoff.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
 const SPAWN_POLL: Duration = Duration::from_millis(50);
-/// Session tokens live for 1h; desktop refreshes via `OpenSession` on reconnect.
-const TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+/// Session tokens live for 90 days; desktop refreshes via `OpenSession` on reconnect.
+const TOKEN_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 90);
 /// Prefix for `docker run --name`; full name is `{PREFIX}-{slug}-{session}`.
 const CONTAINER_PREFIX: &str = "lutin-session";
 

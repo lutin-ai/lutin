@@ -29,6 +29,11 @@ const TARGET_SAMPLE_RATE: u32 = 16_000;
 enum StreamCmd {
     Play,
     Pause,
+    /// Rebuild the stream on the named input device (or host default
+    /// when `None`). The control thread drops the prior stream first;
+    /// rebuild failures leave the thread without a stream and PTT
+    /// becomes a no-op until the next `SetDevice` arrives.
+    SetDevice(Option<String>),
 }
 
 /// Public handle. One owner (`AppState.audio`) for the app's
@@ -44,7 +49,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new() -> Result<Self, CaptureError> {
+    pub fn new(initial_device: Option<String>) -> Result<Self, CaptureError> {
         let recording = Arc::new(AtomicBool::new(false));
         let chunk_tx: Arc<Mutex<Option<tokio_mpsc::UnboundedSender<MonoPcm16k>>>> =
             Arc::new(Mutex::new(None));
@@ -58,7 +63,7 @@ impl Capture {
 
         std::thread::Builder::new()
             .name("audio-stream-ctrl".into())
-            .spawn(move || run_stream_thread(cb_state, cmd_rx, ready_tx))
+            .spawn(move || run_stream_thread(cb_state, cmd_rx, ready_tx, initial_device))
             .map_err(|_| CaptureError::ThreadInit)?;
 
         ready_rx.recv().map_err(|_| CaptureError::ThreadInit)??;
@@ -68,6 +73,13 @@ impl Capture {
             recording,
             chunk_tx,
         })
+    }
+
+    /// Rebuild the cpal stream on `device` (None ⇒ host default). The
+    /// previous stream is dropped on the control thread before the new
+    /// one is built, so the mic LED clears even if the rebuild fails.
+    pub fn set_device(&self, device: Option<String>) {
+        let _ = self.cmd_tx.send(StreamCmd::SetDevice(device));
     }
 
     /// Arm the capture. Returns the chunk receiver — drop it (or call
@@ -107,11 +119,12 @@ fn run_stream_thread(
     cb: CallbackState,
     cmd_rx: mpsc::Receiver<StreamCmd>,
     ready_tx: mpsc::Sender<Result<(), CaptureError>>,
+    initial_device: Option<String>,
 ) {
-    let stream = match build_stream(cb) {
+    let mut stream = match build_stream(cb.clone(), initial_device.as_deref()) {
         Ok(s) => {
             let _ = ready_tx.send(Ok(()));
-            s
+            Some(s)
         }
         Err(e) => {
             let _ = ready_tx.send(Err(e));
@@ -122,24 +135,59 @@ fn run_stream_thread(
     for cmd in cmd_rx {
         match cmd {
             StreamCmd::Play => {
-                if let Err(e) = stream.play() {
+                if let Some(s) = &stream
+                    && let Err(e) = s.play()
+                {
                     error!(error = %e, "audio stream play failed");
                 }
             }
             StreamCmd::Pause => {
-                if let Err(e) = stream.pause() {
+                if let Some(s) = &stream
+                    && let Err(e) = s.pause()
+                {
                     warn!(error = %e, "audio stream pause failed");
+                }
+            }
+            StreamCmd::SetDevice(name) => {
+                // Drop the prior stream *before* trying to build the
+                // new one — cpal will not let two streams share the
+                // same device, and on the named-device → default path
+                // they often resolve to the same device.
+                stream.take();
+                match build_stream(cb.clone(), name.as_deref()) {
+                    Ok(s) => stream = Some(s),
+                    Err(e) => {
+                        error!(error = %e, requested = ?name, "audio set_device failed");
+                    }
                 }
             }
         }
     }
 }
 
-fn build_stream(cb: CallbackState) -> Result<cpal::Stream, CaptureError> {
+/// Enumerate input device names. Errors out of cpal are flattened to an
+/// empty list — the settings UI shows "no devices" rather than a
+/// dialog, and the user can still save `None` (default).
+pub fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or(CaptureError::NoDevice)?;
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for d in devices {
+        if let Ok(desc) = d.description() {
+            out.push(desc.name().to_owned());
+        }
+    }
+    out
+}
+
+fn build_stream(
+    cb: CallbackState,
+    requested: Option<&str>,
+) -> Result<cpal::Stream, CaptureError> {
+    let host = cpal::default_host();
+    let device = pick_input_device(&host, requested)?;
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate();
     let channels = config.channels();
@@ -175,6 +223,31 @@ fn build_stream(cb: CallbackState) -> Result<cpal::Stream, CaptureError> {
         other => return Err(CaptureError::UnsupportedFormat(format!("{other:?}"))),
     };
     Ok(stream)
+}
+
+/// Resolve `requested` against the host's input devices. Falls back to
+/// the host default when the name isn't found; logs the fallback so
+/// "saved device disappeared" is visible without crashing the stream.
+fn pick_input_device(
+    host: &cpal::Host,
+    requested: Option<&str>,
+) -> Result<cpal::Device, CaptureError> {
+    if let Some(name) = requested {
+        match host.input_devices() {
+            Ok(mut iter) => {
+                if let Some(d) =
+                    iter.find(|d| d.description().ok().map(|x| x.name().to_owned()).as_deref() == Some(name))
+                {
+                    return Ok(d);
+                }
+                warn!(requested = name, "input device not found; falling back to default");
+            }
+            Err(e) => {
+                warn!(error = %e, "input_devices enumeration failed; using default");
+            }
+        }
+    }
+    host.default_input_device().ok_or(CaptureError::NoDevice)
 }
 
 fn stream_err(err: cpal::StreamError) {

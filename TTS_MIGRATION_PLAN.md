@@ -43,7 +43,29 @@ API later without churning callers.
   `drain_updates` and routed to playback — never crosses the JS
   boundary; `Event::TtsFinished` is forwarded so workflows know
   synthesis ended. Capability gate is deferred to slice 5.
-- **Slice 5 — workflow shim + capability.** Pending.
+- **Slice 5 — workflow shim + capability. DONE.** New `"tts"`
+  capability constant (`capability::TTS`). Shim
+  (`shim/lutin.js`) exposes `lutin.tts.{ensureBackend, openStream,
+  speak, cancel, closeStream}` only when the manifest declares
+  `"tts"`. iframe → chrome envelope is a new `tts-call` kind
+  sharing the existing request_id / pending map; chrome replies
+  with the same `kind: "response"` envelope. `PluginIframe.tsx`
+  capability-gates every call (defense in depth: shim hides
+  without it, chrome rejects anyway), tracks `ownedStreams` per
+  iframe so `speak`/`cancel`/`closeStream` reject stream ids the
+  workflow didn't open, and tears down dangling streams on
+  unmount. The Rust-side gate listed in the original plan was
+  dropped — Tauri commands have no workflow context, and the
+  per-iframe chrome gate mirrors the way the shim hides
+  `onTranscription` for workflows without `receive_transcription`.
+  Chat workflow opted in (`"tts"` added to `lutin.workflow.json`);
+  `workflows/chat/ui/src/tts.ts` exposes a `useChatTts(lutin,
+  enabled)` hook with a parallel broadcast subscription, sentence
+  aggregation (terminator-followed-by-whitespace, `MIN_FLUSH_LEN =
+  16`), and a cancel that pipes through the chat's existing stop
+  button. `PersonaComposer` got a TTS toggle. Speed in the shim is
+  multiplier-shaped (`opts.speed`); the shim converts to the wire's
+  integer-thousandths `TtsSpeed`.
 
 ## Locked-in design choices
 

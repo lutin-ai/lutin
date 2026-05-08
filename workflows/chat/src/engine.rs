@@ -700,22 +700,33 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// `Assistant` whose text is empty (pure tool-call rounds). Order is
 /// preserved.
 fn project_history(messages: &[lutin_llm::Message]) -> Vec<HistoricalMessage> {
-    messages
-        .iter()
-        .filter_map(|m| match m {
-            lutin_llm::Message::User(text) if !text.is_empty() => Some(HistoricalMessage {
+    let mut out = Vec::with_capacity(messages.len());
+    for m in messages {
+        match m {
+            lutin_llm::Message::User(text) if !text.is_empty() => out.push(HistoricalMessage {
                 role: HistoricalRole::User,
                 text: text.clone(),
             }),
-            lutin_llm::Message::Assistant { text, .. } if !text.is_empty() => {
-                Some(HistoricalMessage {
-                    role: HistoricalRole::Assistant,
-                    text: text.clone(),
-                })
+            lutin_llm::Message::Assistant { text, thinking, .. } => {
+                if let Some(t) = thinking
+                    && !t.is_empty()
+                {
+                    out.push(HistoricalMessage {
+                        role: HistoricalRole::Thinking,
+                        text: t.clone(),
+                    });
+                }
+                if !text.is_empty() {
+                    out.push(HistoricalMessage {
+                        role: HistoricalRole::Assistant,
+                        text: text.clone(),
+                    });
+                }
             }
-            _ => None,
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Translate one [`AgentEvent`] to zero-or-more [`ChatEvent`]s; returns

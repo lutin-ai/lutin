@@ -22,12 +22,13 @@
 //! the chrome's command handlers via an `Arc<Mutex<…>>`.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use lutin_control_protocol::{SessionId, TTS_AUDIO_SAMPLE_RATE_HZ, TtsStreamId};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Public handle held by `AppState`. Exposes the small command surface
 /// the dispatch layer needs; the cpal output stream and its callback
@@ -35,8 +36,19 @@ use tracing::{debug, error, info};
 pub struct TtsPlayback {
     state: Arc<Mutex<PlaybackState>>,
     /// Output device sample rate; chunks are resampled to this on
-    /// enqueue so the callback only needs to mix and copy.
-    device_rate: u32,
+    /// enqueue so the callback only needs to mix and copy. Atomic so
+    /// `set_device` can publish the rebuilt stream's rate without
+    /// reacquiring the playback-state mutex.
+    device_rate: Arc<AtomicU32>,
+    cmd_tx: mpsc::Sender<Cmd>,
+}
+
+enum Cmd {
+    /// Rebuild on the named output device (or host default when
+    /// `None`). The control thread drops the prior stream first;
+    /// rebuild failures leave the thread without a stream and audio
+    /// chunks become a no-op until the next `SetDevice` arrives.
+    SetDevice(Option<String>),
 }
 
 struct PlaybackState {
@@ -90,20 +102,42 @@ impl TtsPlayback {
     /// Build the cpal output stream on a control thread and start it.
     /// Returns `Err` on no-device / unsupported-format setups; chrome
     /// logs and treats TTS as unavailable in that case.
-    pub fn new() -> Result<Self, PlaybackError> {
+    pub fn new(initial_device: Option<String>) -> Result<Self, PlaybackError> {
         let state = Arc::new(Mutex::new(PlaybackState {
             streams: Vec::new(),
             active_session: None,
             last_drop_warn: None,
         }));
+        let device_rate = Arc::new(AtomicU32::new(0));
         let (ready_tx, ready_rx) = mpsc::channel::<Result<u32, PlaybackError>>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let cb_state = state.clone();
+        let rate_pub = device_rate.clone();
         std::thread::Builder::new()
             .name("tts-playback-ctrl".into())
-            .spawn(move || run_stream_thread(cb_state, ready_tx))
+            .spawn(move || {
+                run_stream_thread(cb_state, ready_tx, cmd_rx, rate_pub, initial_device)
+            })
             .map_err(|_| PlaybackError::ThreadInit)?;
-        let device_rate = ready_rx.recv().map_err(|_| PlaybackError::ThreadInit)??;
-        Ok(Self { state, device_rate })
+        let initial_rate = ready_rx.recv().map_err(|_| PlaybackError::ThreadInit)??;
+        device_rate.store(initial_rate, Ordering::Release);
+        Ok(Self { state, device_rate, cmd_tx })
+    }
+
+    /// Rebuild the output stream on `device` (None ⇒ host default).
+    /// Pending queues are cleared on the control thread because
+    /// already-resampled samples target the *old* device rate; mixing
+    /// them post-swap would briefly play at the wrong pitch.
+    pub fn set_device(&self, device: Option<String>) {
+        // Clear queues here too so the swap is visible to the next
+        // enqueue immediately, even before the control thread picks
+        // up the command.
+        let mut s = self.state.lock().expect("tts_playback state poisoned");
+        for (_, slot) in s.streams.iter_mut() {
+            slot.reset();
+        }
+        drop(s);
+        let _ = self.cmd_tx.send(Cmd::SetDevice(device));
     }
 
     /// Bind `stream_id` to `session`. Subsequent `enqueue` calls for
@@ -135,7 +169,13 @@ impl TtsPlayback {
             active_session,
             last_drop_warn,
         } = &mut *s;
-        let device_rate = self.device_rate;
+        let device_rate = self.device_rate.load(Ordering::Acquire);
+        if device_rate == 0 {
+            // No output stream is currently bound (post-failed
+            // SetDevice). Drop the chunk rather than divide-by-zero
+            // in the resampler.
+            return;
+        }
         let Some((_, slot)) = streams.iter_mut().find(|(id, _)| *id == stream_id) else {
             return;
         };
@@ -202,34 +242,73 @@ impl TtsPlayback {
 fn run_stream_thread(
     state: Arc<Mutex<PlaybackState>>,
     ready_tx: mpsc::Sender<Result<u32, PlaybackError>>,
+    cmd_rx: mpsc::Receiver<Cmd>,
+    device_rate: Arc<AtomicU32>,
+    initial_device: Option<String>,
 ) {
-    let (stream, sample_rate) = match build_stream(state) {
-        Ok(s) => s,
+    let mut stream = match build_and_start(state.clone(), initial_device.as_deref()) {
+        Ok((s, rate)) => {
+            let _ = ready_tx.send(Ok(rate));
+            Some(s)
+        }
         Err(e) => {
             let _ = ready_tx.send(Err(e));
             return;
         }
     };
-    if let Err(e) = stream.play() {
-        let _ = ready_tx.send(Err(PlaybackError::Play(e)));
-        return;
+    // Process device-swap commands. The cpal `Stream` is `!Send` and
+    // must drop on this thread, so the swap happens here rather than
+    // on the chrome side.
+    for cmd in cmd_rx {
+        match cmd {
+            Cmd::SetDevice(name) => {
+                stream.take(); // drop old stream first; releases the device
+                device_rate.store(0, Ordering::Release);
+                match build_and_start(state.clone(), name.as_deref()) {
+                    Ok((s, rate)) => {
+                        device_rate.store(rate, Ordering::Release);
+                        stream = Some(s);
+                    }
+                    Err(e) => {
+                        error!(error = %e, requested = ?name, "tts set_device failed");
+                    }
+                }
+            }
+        }
     }
-    let _ = ready_tx.send(Ok(sample_rate));
-    // Park the thread to keep `stream` alive. cpal drives the callback
-    // from its own audio thread; this thread only owns the (`!Send`)
-    // `Stream` value.
-    loop {
-        std::thread::park();
+}
+
+fn build_and_start(
+    state: Arc<Mutex<PlaybackState>>,
+    requested: Option<&str>,
+) -> Result<(cpal::Stream, u32), PlaybackError> {
+    let (stream, rate) = build_stream(state, requested)?;
+    stream.play().map_err(PlaybackError::Play)?;
+    Ok((stream, rate))
+}
+
+/// Enumerate output device names. See `audio::list_input_devices` for
+/// the same fallback rationale.
+pub fn list_output_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for d in devices {
+        if let Ok(desc) = d.description() {
+            out.push(desc.name().to_owned());
+        }
     }
+    out
 }
 
 fn build_stream(
     state: Arc<Mutex<PlaybackState>>,
+    requested: Option<&str>,
 ) -> Result<(cpal::Stream, u32), PlaybackError> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or(PlaybackError::NoDevice)?;
+    let device = pick_output_device(&host, requested)?;
     let supported = device
         .supported_output_configs()
         .map_err(|e| PlaybackError::Config(e.to_string()))?
@@ -265,6 +344,28 @@ fn build_stream(
         )
         .map_err(PlaybackError::Build)?;
     Ok((stream, sample_rate))
+}
+
+fn pick_output_device(
+    host: &cpal::Host,
+    requested: Option<&str>,
+) -> Result<cpal::Device, PlaybackError> {
+    if let Some(name) = requested {
+        match host.output_devices() {
+            Ok(mut iter) => {
+                if let Some(d) =
+                    iter.find(|d| d.description().ok().map(|x| x.name().to_owned()).as_deref() == Some(name))
+                {
+                    return Ok(d);
+                }
+                warn!(requested = name, "output device not found; falling back to default");
+            }
+            Err(e) => {
+                warn!(error = %e, "output_devices enumeration failed; using default");
+            }
+        }
+    }
+    host.default_output_device().ok_or(PlaybackError::NoDevice)
 }
 
 /// Mix every active-session stream's queue into the output frame

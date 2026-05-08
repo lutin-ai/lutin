@@ -13,6 +13,7 @@ import {
 import { initialSnapshot, reduce } from "./session";
 import { toViewModel } from "./adapter";
 import { makePersonaComposer } from "./PersonaComposer";
+import { useChatTts } from "./tts";
 
 interface Props {
   lutin: Lutin;
@@ -22,6 +23,8 @@ export function App({ lutin }: Props) {
   const [snap, dispatch] = useReducer(reduce, initialSnapshot);
   const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
   const [draft, setDraft] = useState("");
+  const [ttsOn, setTtsOn] = useState(false);
+  const tts = useChatTts(lutin, ttsOn);
 
   // Wire PTT / open-mic transcription deliveries into the composer.
   // We append rather than replace so the user can stack voice input
@@ -180,7 +183,10 @@ export function App({ lutin }: Props) {
     // straight into the next thing I queued."
     queueRef.current.length = 0;
     lutin.request(encodeChatRequest({ kind: "cancel" })).catch(() => {});
-  }, [lutin]);
+    // Silence in-flight TTS at the same time. Without this the user
+    // hears the rest of the last queued sentence after pressing stop.
+    tts.cancel();
+  }, [lutin, tts]);
 
   const changePersona = useCallback(
     (name: string | null) => {
@@ -194,6 +200,9 @@ export function App({ lutin }: Props) {
     [lutin],
   );
 
+  const ttsAvailable = lutin.tts !== undefined;
+  const onToggleTts = useCallback(() => setTtsOn((v) => !v), []);
+
   const Composer = useMemo(
     () =>
       makePersonaComposer({
@@ -201,8 +210,12 @@ export function App({ lutin }: Props) {
         activePersona: snap.persona,
         onChangePersona: changePersona,
         onRerun: rerun,
+        ttsAvailable,
+        ttsOn,
+        ttsLoading: tts.loading,
+        onToggleTts,
       }),
-    [personas, snap.persona, changePersona, rerun],
+    [personas, snap.persona, changePersona, rerun, ttsAvailable, ttsOn, tts.loading, onToggleTts],
   );
 
   const vm = toViewModel(snap);

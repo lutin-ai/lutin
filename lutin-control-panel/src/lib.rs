@@ -362,7 +362,7 @@ impl AppState {
     }
 
     async fn handle_ensure_tts_backend(&self, backend: &TtsBackend) -> Response {
-        match self.tts_backends.ensure(backend).await {
+        match self.tts_backends.ensure(backend, &self.events).await {
             Ok(()) => Response::Ok(ResponseOk::TtsBackendReady),
             Err(e) => Response::Err(ApiError::TtsBackendUnavailable(format!("{e:#}"))),
         }

@@ -169,13 +169,21 @@ pub struct ActiveSession {
 pub struct AudioHandle(Option<Capture>);
 
 impl AudioHandle {
-    pub fn new() -> Self {
-        match Capture::new() {
+    pub fn new(initial_device: Option<String>) -> Self {
+        match Capture::new(initial_device) {
             Ok(c) => Self(Some(c)),
             Err(e) => {
                 warn!(error = %e, "audio capture unavailable; hotkey PTT will no-op");
                 Self(None)
             }
+        }
+    }
+
+    /// Forward a device swap to the underlying `Capture`. No-op when
+    /// the constructor failed (no mic available).
+    pub fn set_device(&self, device: Option<String>) {
+        if let Some(c) = &self.0 {
+            c.set_device(device);
         }
     }
 
@@ -202,13 +210,19 @@ impl AudioHandle {
 pub struct TtsPlaybackHandle(Option<TtsPlayback>);
 
 impl TtsPlaybackHandle {
-    pub fn new() -> Self {
-        match TtsPlayback::new() {
+    pub fn new(initial_device: Option<String>) -> Self {
+        match TtsPlayback::new(initial_device) {
             Ok(p) => Self(Some(p)),
             Err(e) => {
                 warn!(error = %e, "tts playback unavailable; audio chunks will be dropped");
                 Self(None)
             }
+        }
+    }
+
+    pub fn set_device(&self, device: Option<String>) {
+        if let Some(p) = &self.0 {
+            p.set_device(device);
         }
     }
 
@@ -620,6 +634,16 @@ fn set_active_session(state: State<'_, AppState>, active: Option<ActiveSession>)
 }
 
 #[tauri::command]
+fn audio_input_devices() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
+fn audio_output_devices() -> Vec<String> {
+    tts_playback::list_output_devices()
+}
+
+#[tauri::command]
 fn settings_get(state: State<'_, AppState>) -> DesktopSettings {
     state.settings.lock().expect("settings mutex poisoned").clone()
 }
@@ -658,6 +682,20 @@ async fn settings_set(
         Some(p) => profile_to_config(p)?,
         None => None,
     };
+    // Apply audio device pinning if it changed. Comparing against the
+    // currently-loaded settings (under the lock) avoids re-issuing a
+    // SetDevice — and the queue clear it carries — when the user
+    // saves an unrelated tab.
+    let prev_audio = {
+        let g = state.settings.lock().expect("settings mutex poisoned");
+        g.audio.clone()
+    };
+    if prev_audio.input != new.audio.input {
+        state.audio.set_device(new.audio.input.clone());
+    }
+    if prev_audio.output != new.audio.output {
+        state.tts_playback.set_device(new.audio.output.clone());
+    }
     *state.settings.lock().expect("settings mutex poisoned") = new;
     match (plan, backend) {
         (ReconcilePlan::Plugin(parsed), KeybindBackend::Plugin(reg)) => {
@@ -803,6 +841,8 @@ pub fn run() {
     #[cfg(not(target_os = "linux"))]
     let prefer_portal = false;
 
+    let audio_input = settings.audio.input.clone();
+    let audio_output = settings.audio.output.clone();
     let state = AppState {
         tokio: tokio.clone(),
         cp: Mutex::new(cp),
@@ -813,11 +853,11 @@ pub fn run() {
         bundles: BundleCache::new(),
         bridges: Mutex::new(HashMap::new()),
         conn: Mutex::new(initial_conn),
-        audio: AudioHandle::new(),
+        audio: AudioHandle::new(audio_input),
         active_ptt: Mutex::new(None),
         active_session: Mutex::new(None),
         keybind_backend: OnceLock::new(),
-        tts_playback: TtsPlaybackHandle::new(),
+        tts_playback: TtsPlaybackHandle::new(audio_output),
     };
 
     tauri::Builder::default()
@@ -903,6 +943,8 @@ pub fn run() {
             tts_dispatch::tts_speak,
             tts_dispatch::tts_cancel,
             tts_dispatch::tts_close_stream,
+            audio_input_devices,
+            audio_output_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

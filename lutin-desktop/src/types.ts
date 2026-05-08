@@ -106,7 +106,19 @@ export type CpEvent =
   | { ProjectCreated: ProjectInfo }
   | { ProjectDeleted: { slug: Slug } }
   | { SessionStarted: { slug: Slug; info: SessionInfo } }
-  | { SessionEnded: { slug: Slug; session: SessionId } };
+  | { SessionEnded: { slug: Slug; session: SessionId } }
+  // `TtsAudio` is intercepted in Rust (`drain_updates`) and routed
+  // to the playback module — never reaches JS — so it's intentionally
+  // not in this union. The remaining TTS variants do.
+  | { TtsFinished: { stream_id: number } }
+  | {
+      TtsBackendDownload: {
+        backend: TtsBackend;
+        file: string;
+        downloaded: number;
+        total: number | null;
+      };
+    };
 
 export interface ConnectionProfile {
   name: string;
@@ -135,6 +147,25 @@ export interface KeyBind {
 
 export type WhisperModel = "large-v3-turbo" | "distil-large-v3";
 
+// Wire-shape TTS types are shared with the workflow side via
+// `@lutin/shim-types`; re-exported here so `api.ts` / `PluginIframe`
+// callers don't have to reach into the shared package directly.
+import type { TtsBackend } from "@lutin/shim-types";
+export type {
+  OrpheusModel,
+  OrpheusVoice,
+  TtsBackend,
+  TtsStreamId,
+} from "@lutin/shim-types";
+
+// `TtsSpeed` is integer thousandths in `[500, 2000]`. The Rust
+// `Deserialize` impl rejects out-of-range values at the Tauri serde
+// boundary, so a bad number surfaces as an invoke error. `1000` ≡
+// 1.0×; treat this as opaque on the JS side and let helpers build it.
+// Workflow side never sees this form — the shim takes a `1.0×`-style
+// multiplier and converts — so it doesn't live in `@lutin/shim-types`.
+export type TtsSpeed = number;
+
 /// Mirrors Rust `WhisperConfig`. `beam_size` is persisted as a small
 /// integer (0/1 ⇒ greedy, n ⇒ beam width n); we keep that shape so
 /// edits round-trip cleanly through the chrome's draft state.
@@ -144,11 +175,19 @@ export interface WhisperConfig {
   beam_size: number;
 }
 
+/// Mirrors Rust `AudioSettings` (settings.rs). `null` ⇒ host default;
+/// values are cpal device names (`Device::description().name()`).
+export interface AudioSettings {
+  input: string | null;
+  output: string | null;
+}
+
 export interface DesktopSettings {
   default: string;
   connections: ConnectionProfile[];
   keybinds: KeyBind[];
   whisper: WhisperConfig;
+  audio: AudioSettings;
 }
 
 // Mirrors Rust `PluginManifest` + `PluginOpened` (lib.rs). `url` is

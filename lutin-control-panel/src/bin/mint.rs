@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut subject = String::from("admin");
-    let mut ttl_secs: u64 = 24 * 60 * 60;
+    let mut ttl_secs: u64 = 60 * 60 * 24 * 90;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

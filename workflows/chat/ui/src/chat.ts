@@ -16,7 +16,7 @@ export interface SessionState {
   modelOverride: string | null;
 }
 
-export type HistoricalRole = "user" | "assistant";
+export type HistoricalRole = "user" | "assistant" | "thinking";
 
 export interface HistoricalMessage {
   role: HistoricalRole;
@@ -80,6 +80,7 @@ function readHistoricalRole(r: pc.Reader): HistoricalRole {
   const v = pc.readVariant(r);
   if (v === 0) return "user";
   if (v === 1) return "assistant";
+  if (v === 2) return "thinking";
   throw new Error(`postcard: invalid HistoricalRole ${v}`);
 }
 

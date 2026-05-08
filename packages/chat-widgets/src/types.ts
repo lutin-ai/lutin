@@ -27,6 +27,10 @@ export interface ThinkingMessage {
   kind: "thinking";
   id?: string;
   text: string;
+  /** True while reasoning is actively streaming — the widget defaults
+   *  this open so users see tokens as they arrive. Completed/historical
+   *  thinking defaults closed to keep the transcript scannable. */
+  streaming?: boolean;
 }
 
 export interface ToolCallMessage {

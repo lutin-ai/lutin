@@ -11,6 +11,9 @@ import type {
   ResponseOk,
   SessionId,
   Slug,
+  TtsBackend,
+  TtsSpeed,
+  TtsStreamId,
   WorkflowId,
 } from "./types";
 
@@ -39,6 +42,16 @@ export async function settingsGet(): Promise<DesktopSettings> {
 
 export async function settingsSet(settings: DesktopSettings): Promise<void> {
   return invoke("settings_set", { new: settings });
+}
+
+/// List cpal input device names. Empty list ⇒ no devices (or
+/// enumeration failed) — UI falls back to "host default" only.
+export async function audioInputDevices(): Promise<string[]> {
+  return invoke("audio_input_devices");
+}
+
+export async function audioOutputDevices(): Promise<string[]> {
+  return invoke("audio_output_devices");
 }
 
 /// Which backend is delivering global hotkey events. `plugin` =
@@ -120,6 +133,40 @@ export async function workflowSessionClose(session: SessionId): Promise<void> {
 /// mounted (e.g. Settings tab).
 export async function setActiveSession(active: ActiveSession | null): Promise<void> {
   return invoke("set_active_session", { active });
+}
+
+/// Pre-download / pre-load TTS weights for a backend. Slow on first
+/// call (model fetch + Vulkan init); cheap thereafter — CP keeps the
+/// service loaded for the process lifetime. Resolves only once the
+/// backend is ready, so chrome can show progress around it.
+export async function ttsEnsureBackend(backend: TtsBackend): Promise<void> {
+  return invoke("tts_ensure_backend", { backend });
+}
+
+/// Open a TTS stream bound to `session`. Audio chunks for streams
+/// whose bound session isn't the chrome-active one are dropped on the
+/// playback side.
+export async function ttsOpenStream(
+  backend: TtsBackend,
+  session: SessionId,
+): Promise<TtsStreamId> {
+  return invoke("tts_open_stream", { backend, session });
+}
+
+export async function ttsSpeak(
+  streamId: TtsStreamId,
+  text: string,
+  speed: TtsSpeed,
+): Promise<void> {
+  return invoke("tts_speak", { streamId, text, speed });
+}
+
+export async function ttsCancel(streamId: TtsStreamId): Promise<void> {
+  return invoke("tts_cancel", { streamId });
+}
+
+export async function ttsCloseStream(streamId: TtsStreamId): Promise<void> {
+  return invoke("tts_close_stream", { streamId });
 }
 
 type EventHandlers = {

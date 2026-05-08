@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SessionPane } from "./components/SessionPane";
 import { SettingsView } from "./components/SettingsView";
 import { TopBar } from "./components/TopBar";
+import { TtsDownloadToast } from "./components/TtsDownloadToast";
 import { useApp } from "./store";
 import styles from "./App.module.css";
 
@@ -49,6 +50,7 @@ function App() {
 
   return (
     <div className={styles.shell}>
+      <TtsDownloadToast />
       <TopBar />
       <div className={styles.row}>
         <Sidebar />

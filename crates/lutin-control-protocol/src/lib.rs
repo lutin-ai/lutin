@@ -797,6 +797,18 @@ pub enum Event {
     /// `SpeakTts`, *not* with the stream lifetime — the same stream
     /// emits one `Finished` per utterance.
     TtsFinished { stream_id: TtsStreamId },
+    /// Progress on a backend weight download triggered by
+    /// `EnsureTtsBackend`. Throttled CP-side to ~one event every
+    /// couple of seconds plus a final 100% emission. `total` is `None`
+    /// when the server didn't advertise `Content-Length`. `file` is
+    /// the on-disk filename so the UI can disambiguate Orpheus GGUF
+    /// vs. SNAC ONNX without needing to know the URL set.
+    TtsBackendDownload {
+        backend: TtsBackend,
+        file: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
 }
 
 #[derive(Debug, Error)]

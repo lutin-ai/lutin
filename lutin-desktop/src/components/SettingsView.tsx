@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  audioInputDevices,
+  audioOutputDevices,
   cpSendOk,
   keybindBackend,
   settingsGet,
@@ -27,7 +29,7 @@ const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
   { value: "open_ai_compat", label: "OpenAI-compatible" },
 ];
 
-type Tab = "connections" | "keybinds" | "providers";
+type Tab = "connections" | "keybinds" | "audio" | "providers";
 
 const ACTION_LABELS: Record<Action["kind"], string> = {
   ptt: "Push-to-talk (PTT)",
@@ -82,6 +84,13 @@ export function SettingsView() {
           </button>
           <button
             className={styles.tab}
+            data-active={tab === "audio"}
+            onClick={() => setTab("audio")}
+          >
+            Audio
+          </button>
+          <button
+            className={styles.tab}
             data-active={tab === "providers"}
             onClick={() => setTab("providers")}
           >
@@ -97,6 +106,8 @@ export function SettingsView() {
           <KeybindsPanel initial={settings} connected={conn.kind === "connected"} />
         )}
         {tab === "keybinds" && !settings && <Loading />}
+        {tab === "audio" && settings && <AudioPanel initial={settings} />}
+        {tab === "audio" && !settings && <Loading />}
         {tab === "providers" && <ProvidersPanel connected={conn.kind === "connected"} />}
       </div>
     </main>
@@ -222,6 +233,120 @@ function ConnectionsPanel({ initial }: { initial: DesktopSettings }) {
         label="Save & reconnect"
       />
     </>
+  );
+}
+
+/* ───────── Audio ───────── */
+
+function AudioPanel({ initial }: { initial: DesktopSettings }) {
+  const setSettings = useApp((s) => s.setSettings);
+  const [draft, setDraft] = useState(initial.audio);
+  const [inputs, setInputs] = useState<string[] | null>(null);
+  const [outputs, setOutputs] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initial.audio);
+
+  useEffect(() => {
+    // Re-enumerate every time the panel mounts so a hot-plugged USB
+    // mic shows up without an app restart. The lists are tiny and
+    // cpal enumeration is cheap.
+    audioInputDevices().then(setInputs).catch((e) => setError(String(e)));
+    audioOutputDevices().then(setOutputs).catch((e) => setError(String(e)));
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = { ...initial, audio: draft };
+      await settingsSet(next);
+      setSettings(next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Card
+        title="Microphone"
+        description="Used for push-to-talk capture. Saving rebuilds the cpal stream on the new device — no restart needed."
+      >
+        <DevicePicker
+          label="Input device"
+          devices={inputs}
+          value={draft.input}
+          onChange={(input) => setDraft({ ...draft, input })}
+        />
+      </Card>
+
+      <Card
+        title="Speakers"
+        description="Used for TTS playback. Switching devices clears any in-flight TTS audio because already-resampled samples target the previous device's rate."
+      >
+        <DevicePicker
+          label="Output device"
+          devices={outputs}
+          value={draft.output}
+          onChange={(output) => setDraft({ ...draft, output })}
+        />
+      </Card>
+
+      {error && <div className={styles.error}>{error}</div>}
+
+      <SaveBar
+        dirty={dirty}
+        saving={saving}
+        onSave={save}
+        onRevert={() => setDraft(initial.audio)}
+        label="Save audio devices"
+      />
+    </>
+  );
+}
+
+function DevicePicker({
+  label,
+  devices,
+  value,
+  onChange,
+}: {
+  label: string;
+  devices: string[] | null;
+  value: string | null;
+  onChange: (value: string | null) => void;
+}) {
+  // Show the saved selection even when it isn't currently in the
+  // enumerated list — a USB mic disappearing shouldn't silently flip
+  // the dropdown to "host default" and erase the saved preference.
+  const hasSaved =
+    value != null && (devices?.includes(value) ?? false) === false;
+
+  return (
+    <Field label={label}>
+      <select
+        className={styles.input}
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+        disabled={devices == null}
+      >
+        <option value="">Host default</option>
+        {hasSaved && value != null && (
+          <option value={value}>{value} (not currently available)</option>
+        )}
+        {(devices ?? []).map((name) => (
+          <option key={name} value={name}>{name}</option>
+        ))}
+      </select>
+      {devices != null && devices.length === 0 && (
+        <span className={styles.fieldHint}>
+          No devices reported by cpal — only "host default" is available.
+        </span>
+      )}
+    </Field>
   );
 }
 

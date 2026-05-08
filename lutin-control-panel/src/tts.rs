@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use lutin_control_protocol::{OrpheusModel, OrpheusVoice, TtsBackend};
+use lutin_control_protocol::{Event, OrpheusModel, OrpheusVoice, TtsBackend};
 use lutin_tts::{DEFAULT_WORKER_COUNT, OrpheusFactory, TtsEvent, TtsService};
 use tokio::fs;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc};
 use tracing::{info, warn};
 
 /// Identity that determines weights-on-GPU. Two `TtsBackend`s with
@@ -34,16 +34,21 @@ fn identity(b: &TtsBackend) -> BackendIdentity {
     }
 }
 
+// Repo lives at the upper-case URL but the actual GGUF file inside
+// the repo is lower-case (`q4_k_m.gguf`). The legacy engine pointed
+// at the upper-case filename which now 404s. Keep the on-disk cache
+// filename matching the upstream filename so a future repo move only
+// changes one place.
 fn orpheus_filename(m: OrpheusModel) -> &'static str {
     match m {
-        OrpheusModel::ThreeBQ4KM => "orpheus-3b-0.1-ft-Q4_K_M.gguf",
+        OrpheusModel::ThreeBQ4KM => "orpheus-3b-0.1-ft-q4_k_m.gguf",
     }
 }
 
 fn orpheus_url(m: OrpheusModel) -> &'static str {
     match m {
         OrpheusModel::ThreeBQ4KM => {
-            "https://huggingface.co/isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF/resolve/main/orpheus-3b-0.1-ft-Q4_K_M.gguf"
+            "https://huggingface.co/isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF/resolve/main/orpheus-3b-0.1-ft-q4_k_m.gguf"
         }
     }
 }
@@ -85,9 +90,35 @@ fn models_dir(global_config_dir: &Path) -> PathBuf {
     global_config_dir.join("models").join("orpheus")
 }
 
-async fn ensure_orpheus_gguf(global_config_dir: &Path, model: OrpheusModel) -> Result<PathBuf> {
+/// Broadcast `TtsBackendDownload` progress for `file` against
+/// `backend`. `send` errors are ignored — they only happen when no
+/// subscribers exist (the broadcast is fan-out, not request/reply),
+/// and the download itself shouldn't fail just because no one's
+/// listening.
+fn emit_progress(
+    events: &broadcast::Sender<Event>,
+    backend: &TtsBackend,
+    file: &str,
+    downloaded: u64,
+    total: Option<u64>,
+) {
+    let _ = events.send(Event::TtsBackendDownload {
+        backend: backend.clone(),
+        file: file.to_owned(),
+        downloaded,
+        total,
+    });
+}
+
+async fn ensure_orpheus_gguf(
+    global_config_dir: &Path,
+    model: OrpheusModel,
+    backend: &TtsBackend,
+    events: &broadcast::Sender<Event>,
+) -> Result<PathBuf> {
     let dir = models_dir(global_config_dir);
-    let path = dir.join(orpheus_filename(model));
+    let filename = orpheus_filename(model);
+    let path = dir.join(filename);
     if path.exists() {
         return Ok(path);
     }
@@ -95,12 +126,19 @@ async fn ensure_orpheus_gguf(global_config_dir: &Path, model: OrpheusModel) -> R
         .await
         .with_context(|| format!("create {}", dir.display()))?;
     info!(model = ?model, url = orpheus_url(model), "downloading orpheus gguf");
-    crate::downloads::download_to(orpheus_url(model), &path).await?;
+    crate::downloads::download_to_with_progress(orpheus_url(model), &path, |downloaded, total| {
+        emit_progress(events, backend, filename, downloaded, total);
+    })
+    .await?;
     info!(model = ?model, path = %path.display(), "orpheus gguf ready");
     Ok(path)
 }
 
-async fn ensure_snac_onnx(global_config_dir: &Path) -> Result<PathBuf> {
+async fn ensure_snac_onnx(
+    global_config_dir: &Path,
+    backend: &TtsBackend,
+    events: &broadcast::Sender<Event>,
+) -> Result<PathBuf> {
     let dir = models_dir(global_config_dir);
     let path = dir.join(SNAC_FILENAME);
     if path.exists() {
@@ -110,7 +148,10 @@ async fn ensure_snac_onnx(global_config_dir: &Path) -> Result<PathBuf> {
         .await
         .with_context(|| format!("create {}", dir.display()))?;
     info!(url = SNAC_URL, "downloading snac decoder onnx");
-    crate::downloads::download_to(SNAC_URL, &path).await?;
+    crate::downloads::download_to_with_progress(SNAC_URL, &path, |downloaded, total| {
+        emit_progress(events, backend, SNAC_FILENAME, downloaded, total);
+    })
+    .await?;
     info!(path = %path.display(), "snac decoder ready");
     Ok(path)
 }
@@ -132,6 +173,15 @@ pub struct TtsBackends {
 
 struct Inner {
     services: Mutex<Vec<(BackendIdentity, Arc<TtsService>)>>,
+    /// Per-identity gate held across the slow path of `ensure` — the
+    /// download + factory load. Two concurrent `EnsureTtsBackend`
+    /// requests for the same identity (e.g. from React StrictMode's
+    /// double-mounted effect, or a user toggle bouncing) would
+    /// otherwise both call `download_to_with_progress` against the
+    /// same `<dest>.tmp` file and trample each other so neither
+    /// finishes. With this gate, the second call awaits the first
+    /// and then hits `lookup`'s fast path.
+    ensure_gates: Mutex<Vec<(BackendIdentity, Arc<TokioMutex<()>>)>>,
     sink: mpsc::UnboundedSender<TtsEvent>,
     config_dir: PathBuf,
 }
@@ -141,10 +191,21 @@ impl TtsBackends {
         Self {
             inner: Arc::new(Inner {
                 services: Mutex::new(Vec::new()),
+                ensure_gates: Mutex::new(Vec::new()),
                 sink,
                 config_dir,
             }),
         }
+    }
+
+    fn ensure_gate(&self, id: BackendIdentity) -> Arc<TokioMutex<()>> {
+        let mut guard = self.inner.ensure_gates.lock().expect("ensure_gates poisoned");
+        if let Some((_, m)) = guard.iter().find(|(k, _)| *k == id) {
+            return m.clone();
+        }
+        let m = Arc::new(TokioMutex::new(()));
+        guard.push((id, m.clone()));
+        m
     }
 
     pub fn lookup(&self, backend: &TtsBackend) -> Option<Arc<TtsService>> {
@@ -160,15 +221,29 @@ impl TtsBackends {
     /// `OpenTtsStream` for the same identity resolves in
     /// [`Self::lookup`]. Idempotent: a second `ensure` for an
     /// already-loaded identity returns immediately without touching
-    /// disk.
-    pub async fn ensure(&self, backend: &TtsBackend) -> Result<()> {
+    /// disk. `events` is used to broadcast `TtsBackendDownload`
+    /// progress while weights are being fetched; a no-op channel is
+    /// fine (`send` errors are ignored).
+    pub async fn ensure(
+        &self,
+        backend: &TtsBackend,
+        events: &broadcast::Sender<Event>,
+    ) -> Result<()> {
         let id = identity(backend);
         if self.lookup(backend).is_some() {
             return Ok(());
         }
+        // Serialize the slow path per identity. A second caller waits
+        // here until the first finishes, then re-checks `lookup` —
+        // the winner installed the service, so the loser is a no-op.
+        let gate = self.ensure_gate(id);
+        let _gate_guard = gate.lock().await;
+        if self.lookup(backend).is_some() {
+            return Ok(());
+        }
         let TtsBackend::Orpheus { model, .. } = backend;
-        let gguf = ensure_orpheus_gguf(&self.inner.config_dir, *model).await?;
-        let snac = ensure_snac_onnx(&self.inner.config_dir).await?;
+        let gguf = ensure_orpheus_gguf(&self.inner.config_dir, *model, backend, events).await?;
+        let snac = ensure_snac_onnx(&self.inner.config_dir, backend, events).await?;
         let sink = self.inner.sink.clone();
         let service = tokio::task::spawn_blocking(move || -> Result<Arc<TtsService>> {
             let factory = OrpheusFactory::load(&gguf, &snac)

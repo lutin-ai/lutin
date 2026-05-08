@@ -19,7 +19,12 @@ export function toViewModel(snap: SessionSnapshot): ChatViewModel {
     if (snap.turn.stream === "assistant") {
       messages.push({ kind: "assistant", id: "live", text: snap.turn.buf, streaming: true });
     } else {
-      messages.push({ kind: "thinking", id: "live-thinking", text: snap.turn.buf });
+      messages.push({
+        kind: "thinking",
+        id: "live-thinking",
+        text: snap.turn.buf,
+        streaming: true,
+      });
     }
     return { messages, turn: { kind: "streaming" } };
   }

@@ -1,7 +1,7 @@
 {
   "entry": "index.html",
   "permissions": [],
-  "capabilities": ["receive_transcription"],
+  "capabilities": ["receive_transcription", "tts"],
   "display_name": "Chat",
   "icon": "💬"
 }

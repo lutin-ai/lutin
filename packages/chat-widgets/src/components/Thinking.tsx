@@ -3,7 +3,7 @@ import { Markdown } from "../markdown";
 import type { ThinkingProps } from "../slots";
 
 export function Thinking({ message }: ThinkingProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(message.streaming ?? false);
   return (
     <details
       className="lutin-chat__thinking"

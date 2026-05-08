@@ -17,10 +17,13 @@ use tokio::sync::{mpsc, watch};
 use crate::backend::TtsBackendFactory;
 use crate::TtsError;
 
-/// Default worker count. Two workers cover the common case (one
-/// running, one warm) without doubling GPU memory beyond what a 3B
-/// Orpheus model needs.
-pub const DEFAULT_WORKER_COUNT: usize = 2;
+/// Default worker count. One is enough: a single GPU time-slices
+/// concurrent decodes (no throughput win from N>1), `sender_loop`
+/// serialises audio across sentences anyway (no latency win from
+/// generating sentence N+1 in parallel with N), and generation runs
+/// ~5× faster than realtime so the queue stays ahead of playback.
+/// Bumping above 1 only helps with multiple GPUs.
+pub const DEFAULT_WORKER_COUNT: usize = 1;
 
 /// Opaque, caller-allocated stream identifier. The crate never mints
 /// these — CP allocates and maps to its protocol id.

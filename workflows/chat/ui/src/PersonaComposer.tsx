@@ -14,6 +14,12 @@ export interface PersonaComposerExtra {
   /** Run the agent loop against the existing transcript without
    * appending a new user message. */
   onRerun: () => void;
+  /** TTS toggle. `available` is `false` when chrome didn't expose
+   * `lutin.tts` (capability missing); the button is hidden then. */
+  ttsAvailable: boolean;
+  ttsOn: boolean;
+  ttsLoading: boolean;
+  onToggleTts: () => void;
 }
 
 export function makePersonaComposer(extra: PersonaComposerExtra) {
@@ -39,6 +45,10 @@ function Inner({
   activePersona,
   onChangePersona,
   onRerun,
+  ttsAvailable,
+  ttsOn,
+  ttsLoading,
+  onToggleTts,
 }: InnerProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -112,6 +122,27 @@ function Inner({
             <CompactIcon />
             <span>Compact</span>
           </button>
+          {ttsAvailable && (
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={onToggleTts}
+              disabled={ttsLoading}
+              title={
+                ttsLoading
+                  ? "Loading TTS model…"
+                  : ttsOn
+                    ? "Disable spoken responses"
+                    : "Speak assistant replies"
+              }
+              aria-label="Toggle TTS"
+              aria-pressed={ttsOn}
+              data-active={ttsOn ? "true" : undefined}
+            >
+              <SpeakerIcon muted={!ttsOn} />
+              <span>{ttsLoading ? "TTS…" : ttsOn ? "TTS on" : "TTS"}</span>
+            </button>
+          )}
           <button
             type="button"
             className={styles.toolBtn}
@@ -278,6 +309,34 @@ function CompactIcon() {
         strokeWidth="1.2"
         strokeLinecap="round"
       />
+    </svg>
+  );
+}
+
+function SpeakerIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path
+        d="M3 5h2l3-2.5v9L5 9H3V5z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      {muted ? (
+        <path
+          d="M10 5l3 4M13 5l-3 4"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+        />
+      ) : (
+        <path
+          d="M10 4.5a3.5 3.5 0 0 1 0 5M11.5 3a5.5 5.5 0 0 1 0 8"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+        />
+      )}
     </svg>
   );
 }

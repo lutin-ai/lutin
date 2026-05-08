@@ -2,13 +2,26 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   setActiveSession,
+  ttsCancel,
+  ttsCloseStream,
+  ttsEnsureBackend,
+  ttsOpenStream,
+  ttsSpeak,
   workflowOpenPlugin,
   workflowSessionClose,
   workflowSessionOpen,
   workflowSessionRequest,
   workflowSessionSubscribe,
 } from "../api";
-import type { PluginOpened, SessionId, Slug, WorkflowId } from "../types";
+import type {
+  PluginOpened,
+  SessionId,
+  Slug,
+  TtsBackend,
+  TtsSpeed,
+  TtsStreamId,
+  WorkflowId,
+} from "../types";
 import styles from "./SessionPane.module.css";
 
 interface Props {
@@ -93,7 +106,20 @@ export function PluginIframe(props: Props) {
 
     type RequestMsg = { kind: "request"; request_id: number; body: Uint8Array | number[] };
     type NotificationMsg = { kind: "notification"; body: string; title?: string };
-    type IframeMsg = RequestMsg | NotificationMsg;
+    type TtsCallMsg = {
+      kind: "tts-call";
+      request_id: number;
+      method: "ensureBackend" | "openStream" | "speak" | "cancel" | "closeStream";
+      // Method-shaped args; we type-narrow below.
+      args: Record<string, unknown>;
+    };
+    type IframeMsg = RequestMsg | NotificationMsg | TtsCallMsg;
+
+    // Tracks streams opened by *this* iframe so cancel/close/speak
+    // calls can't reach across to a stream id leaked from another
+    // workflow. Pure defense-in-depth: every TTS command is already
+    // capability-gated, but capability + ownership is the right shape.
+    const ownedStreams = new Set<TtsStreamId>();
 
     const handleRequest = async (port: MessagePort, msg: RequestMsg) => {
       const bytes = msg.body instanceof Uint8Array ? msg.body : Uint8Array.from(msg.body);
@@ -109,6 +135,92 @@ export function PluginIframe(props: Props) {
           request_id: msg.request_id,
           error: String(err),
         });
+      }
+    };
+
+    const hasTts = (opened.manifest.capabilities ?? []).includes("tts");
+
+    const handleTtsCall = async (port: MessagePort, msg: TtsCallMsg) => {
+      const reply = (body?: unknown, error?: string) => {
+        const env: Record<string, unknown> = { kind: "response", request_id: msg.request_id };
+        if (error !== undefined) env.error = error;
+        else env.body = body;
+        port.postMessage(env);
+      };
+      if (!hasTts) {
+        // Mirror the Rust capability message shape so workflows can
+        // detect the failure mode without parsing strings — but a
+        // plain message is fine for v1, this should never fire from
+        // a well-formed plugin since the shim doesn't expose
+        // `lutin.tts` without the capability.
+        console.warn(`[plugin ${workflow}] denied: tts not in manifest.capabilities`);
+        reply(undefined, "tts capability not declared");
+        return;
+      }
+      // Pull a stream id out of `args`, defending against a bad-shape
+      // envelope. Without this, a non-number `streamId` would slip
+      // past `ownedStreams.has` (always `false`) and surface as
+      // "stream not owned by this workflow" — misleading. Tauri serde
+      // is the authoritative parse for the rest of the args; this is
+      // the one field we reuse locally so it has to be checked here.
+      const ownedStreamId = (args: Record<string, unknown>): TtsStreamId | string => {
+        const id = args.streamId;
+        if (typeof id !== "number" || !Number.isFinite(id)) {
+          return "streamId missing or not a number";
+        }
+        if (!ownedStreams.has(id)) return "stream not owned by this workflow";
+        return id;
+      };
+      try {
+        switch (msg.method) {
+          case "ensureBackend": {
+            const { backend } = msg.args as { backend: TtsBackend };
+            await ttsEnsureBackend(backend);
+            reply(null);
+            return;
+          }
+          case "openStream": {
+            const { backend } = msg.args as { backend: TtsBackend };
+            const id = await ttsOpenStream(backend, session);
+            ownedStreams.add(id);
+            reply(id);
+            return;
+          }
+          case "speak": {
+            const id = ownedStreamId(msg.args);
+            if (typeof id !== "number") return reply(undefined, id);
+            const { text, speed } = msg.args as { text: string; speed: TtsSpeed };
+            await ttsSpeak(id, text, speed);
+            reply(null);
+            return;
+          }
+          case "cancel": {
+            const id = ownedStreamId(msg.args);
+            if (typeof id !== "number") return reply(undefined, id);
+            await ttsCancel(id);
+            reply(null);
+            return;
+          }
+          case "closeStream": {
+            const id = ownedStreamId(msg.args);
+            if (typeof id !== "number") return reply(undefined, id);
+            await ttsCloseStream(id);
+            ownedStreams.delete(id);
+            reply(null);
+            return;
+          }
+          default: {
+            // Unknown method — without this branch the iframe's
+            // promise would hang forever (the shim's pending map
+            // never resolves). The TS union narrows `msg.method` to
+            // `never` here, so cast to surface the bad value.
+            const m = (msg as { method: string }).method;
+            reply(undefined, `unknown tts method: ${m}`);
+            return;
+          }
+        }
+      } catch (err) {
+        reply(undefined, String(err));
       }
     };
 
@@ -133,6 +245,7 @@ export function PluginIframe(props: Props) {
       const msg = e.data as IframeMsg | undefined;
       if (!msg || !port) return;
       if (msg.kind === "request") void handleRequest(port, msg);
+      else if (msg.kind === "tts-call") void handleTtsCall(port, msg);
       else if (msg.kind === "notification") handleNotification(msg);
     };
     port.start();
@@ -186,6 +299,14 @@ export function PluginIframe(props: Props) {
 
     return () => {
       cancelled = true;
+      // Tear down any TTS streams the workflow opened but didn't
+      // close. Without this, the CP-side stream registry leaks slots
+      // (and a queued utterance could keep playing after the iframe
+      // is gone). Close is best-effort — transport drops are fine.
+      for (const id of ownedStreams) {
+        ttsCloseStream(id).catch(() => {});
+      }
+      ownedStreams.clear();
       port?.close();
       transcriptionUnlisten.then((u) => u()).catch(() => {});
       // Best-effort clear; if another iframe mounts immediately it

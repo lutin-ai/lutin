@@ -59,6 +59,20 @@ pub struct KeyBind {
     pub target: Target,
 }
 
+/// Per-machine audio device pinning. Names are cpal device names
+/// (`Device::name()`); `None` means "use the host default", so settings
+/// stay portable across machines where the named device doesn't exist.
+/// Devices are matched by exact name on apply; if the saved name isn't
+/// present (USB mic unplugged, etc.) we fall back to the default rather
+/// than failing — losing PTT/TTS because of a transient device change
+/// is worse than ignoring the saved preference.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    pub input: Option<String>,
+    pub output: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopSettings {
@@ -74,6 +88,8 @@ pub struct DesktopSettings {
     /// Defaults to large-v3-turbo with autodetect; first PTT after a
     /// fresh install triggers the download.
     pub whisper: WhisperConfig,
+    /// Pinned input/output devices. Defaults to host defaults.
+    pub audio: AudioSettings,
 }
 
 impl DesktopSettings {
