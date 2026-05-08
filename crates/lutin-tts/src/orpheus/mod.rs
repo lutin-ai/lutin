@@ -34,6 +34,15 @@ const AUDIO_TOKEN_COUNT: u32 = (CODEBOOK_SIZE * TOKENS_PER_FRAME) as u32;
 const STREAM_CHUNK_FRAMES: usize = 16;
 const STREAM_CHUNK_TOKENS: usize = STREAM_CHUNK_FRAMES * TOKENS_PER_FRAME;
 
+/// Frames of previously-emitted tokens to feed back into SNAC as
+/// decoder context. SNAC is convolutional — without lookback, samples
+/// near each chunk boundary are computed without their full receptive
+/// support and you hear a click / pitch wobble at every join. 4
+/// frames is enough to cover the dilated-conv stack without inflating
+/// per-chunk cost.
+const LOOKBACK_FRAMES: usize = 4;
+const LOOKBACK_TOKENS: usize = LOOKBACK_FRAMES * TOKENS_PER_FRAME;
+
 /// Shared model state. Owns the LlamaModel + backend so workers can
 /// borrow them when constructing per-thread contexts inside the pool's
 /// `thread::scope`.
@@ -121,9 +130,10 @@ impl TtsWorker for OrpheusWorker<'_> {
         audio_tx: &std_mpsc::SyncSender<Vec<u8>>,
     ) -> Result<(), TtsError> {
         // Orpheus has no in-model speed control; SNAC output rate is
-        // fixed at 24 kHz. Resampling at the output stage would cost
-        // a perceptible quality hit, so we deliberately ignore the
-        // hint here. Documented at the trait level (`backend.rs`).
+        // fixed at 24 kHz. Speed is applied chrome-side in
+        // `tts_playback::resample_into` (pitch-shift via the existing
+        // 24 kHz → device-rate resampler), so the worker ignores the
+        // hint and emits 1.0× audio.
         let _ = speed;
         let prompt = format!("<|audio|><{voice}>: {text}<|eot_id|>");
 
@@ -147,13 +157,22 @@ impl TtsWorker for OrpheusWorker<'_> {
             .decode(&mut batch)
             .map_err(|e| TtsError::Llama(e.to_string()))?;
 
+        // Orpheus is highly sensitive to its sampler config — the
+        // upstream README explicitly requires a repetition penalty
+        // ≥ 1.1 for stable, non-monotone prosody. Without it the
+        // generated audio sounds robotic and over-regular even though
+        // it's intelligible. top_k=50 + top_p=0.9 + temp=0.6 mirror
+        // the canopylabs reference implementation's defaults.
         let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::temp(0.6),
+            LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
+            LlamaSampler::top_k(50),
             LlamaSampler::top_p(0.9, 1),
+            LlamaSampler::temp(0.6),
             LlamaSampler::dist(0),
         ]);
 
         let mut audio_tokens: Vec<u32> = Vec::new();
+        let mut lookback: Vec<u32> = Vec::with_capacity(LOOKBACK_TOKENS);
         let mut n_generated = 0;
 
         loop {
@@ -175,7 +194,13 @@ impl TtsWorker for OrpheusWorker<'_> {
                 if audio_tokens.len() >= STREAM_CHUNK_TOKENS {
                     let usable =
                         (audio_tokens.len() / TOKENS_PER_FRAME) * TOKENS_PER_FRAME;
-                    send_chunk(&mut self.snac, &audio_tokens[..usable], audio_tx);
+                    send_chunk(
+                        &mut self.snac,
+                        &lookback,
+                        &audio_tokens[..usable],
+                        audio_tx,
+                    );
+                    update_lookback(&mut lookback, &audio_tokens[..usable]);
                     audio_tokens.drain(..usable);
                 }
             }
@@ -203,19 +228,36 @@ impl TtsWorker for OrpheusWorker<'_> {
         // Flush remaining tokens (rounded down to the nearest frame).
         let usable = (audio_tokens.len() / TOKENS_PER_FRAME) * TOKENS_PER_FRAME;
         if usable >= TOKENS_PER_FRAME {
-            send_chunk(&mut self.snac, &audio_tokens[..usable], audio_tx);
+            send_chunk(&mut self.snac, &lookback, &audio_tokens[..usable], audio_tx);
         }
 
         Ok(())
     }
 }
 
+fn update_lookback(lookback: &mut Vec<u32>, just_emitted: &[u32]) {
+    // Keep the last LOOKBACK_TOKENS of the running stream. If the
+    // chunk we just emitted is itself longer than the window, take
+    // its tail; otherwise append and trim from the front.
+    if just_emitted.len() >= LOOKBACK_TOKENS {
+        lookback.clear();
+        lookback.extend_from_slice(&just_emitted[just_emitted.len() - LOOKBACK_TOKENS..]);
+    } else {
+        lookback.extend_from_slice(just_emitted);
+        if lookback.len() > LOOKBACK_TOKENS {
+            let drop = lookback.len() - LOOKBACK_TOKENS;
+            lookback.drain(..drop);
+        }
+    }
+}
+
 fn send_chunk(
     snac: &mut SnacDecoder,
+    lookback: &[u32],
     tokens: &[u32],
     audio_tx: &std_mpsc::SyncSender<Vec<u8>>,
 ) {
-    match snac.decode(tokens) {
+    match snac.decode(lookback, tokens) {
         Ok(pcm) if !pcm.is_empty() => {
             let data: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
             let _ = audio_tx.send(data);

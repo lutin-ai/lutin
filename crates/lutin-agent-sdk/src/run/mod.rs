@@ -77,6 +77,7 @@ pub async fn drive(
         recovery,
         pre_round,
         stream_inactivity_timeout,
+        message_projector,
     } = loop_config;
 
     // Current system prompt; may be overridden per-round by `pre_round`. The
@@ -133,8 +134,20 @@ pub async fn drive(
             }
         }
 
+        // Per-round projection: hosts can narrow the slice the model
+        // sees (e.g. sliding window) without mutating the agent's owned
+        // transcript. `view` keeps the projected vec alive for the
+        // duration of `build_request`.
+        let view: Vec<Message>;
+        let messages_view: &[Message] = match message_projector.as_ref() {
+            Some(p) => {
+                view = p(&messages);
+                &view
+            }
+            None => &messages,
+        };
         let request =
-            build_request(&model, &sampling, &current_system, &messages, &tool_schemas);
+            build_request(&model, &sampling, &current_system, messages_view, &tool_schemas);
 
         let stream_result = open_stream(&*provider, &request, &recovery).await;
         let stream = match stream_result {
@@ -207,6 +220,21 @@ pub async fn drive(
 
         let _ = events.send(AgentEvent::RoundEnded { round, had_tool_calls });
 
+        // Diagnostic: surface what the round actually produced so we can tell
+        // whether `StopCondition::NoToolCalls` *should* fire. Logs the names
+        // of every tool call the parser materialized — a phantom call from
+        // a provider quirk shows up here even when the UI doesn't render it.
+        let tool_names: Vec<&str> = tool_calls.iter().map(|c| c.name.as_str()).collect();
+        tracing::info!(
+            round,
+            had_tool_calls,
+            tool_call_count = tool_calls.len(),
+            text_len,
+            tool_names = ?tool_names,
+            stop_condition = ?std::mem::discriminant(&stop_condition),
+            "round complete"
+        );
+
         if let Some(reason) = detector.check(&tool_calls) {
             // LoopDetected is a terminal failure: emit AgentEvent::Error so
             // observers see the underlying cause, but use the dedicated
@@ -218,9 +246,11 @@ pub async fn drive(
         }
 
         if should_stop(&stop_condition, &summary, &records, round, max_rounds) {
+            tracing::info!(round, "stop condition met — ending run");
             finish = FinishReason::Stopped;
             break;
         }
+        tracing::info!(round, had_tool_calls, "stop condition not met — continuing to next round");
 
         if round == max_rounds {
             // Same shape as LoopDetected above: surface the underlying error
@@ -278,6 +308,7 @@ fn build_request(
         messages: out_msgs,
         tools: tools.to_vec(),
         temperature: sampling.temperature,
+        presence_penalty: sampling.penalties.as_ref().map(|p| p.presence),
         max_tokens: sampling.max_tokens,
         thinking_enabled: sampling.thinking_enabled,
         extensions: lutin_llm::Extensions {

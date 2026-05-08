@@ -10,16 +10,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lutin_agent_sdk::{
-    Agent, AgentConfig, LoopConfig, SamplingParams, Tool, ToolPolicy, Toolbox,
+    slide_window_by_user_turns, Agent, AgentConfig, LoopConfig, SamplingParams, Tool, ToolPolicy,
+    Toolbox,
 };
 use lutin_entities::{Persona, ToolFilterMode};
 use lutin_llm::anthropic::{AnthropicAuth, AnthropicProvider, OAuthCredentialStore};
 use lutin_llm::ollama::{OllamaConfig, OllamaProvider};
+use lutin_llm::openai_compat_provider::{OpenAiCompatConfig, OpenAiCompatProvider};
 use lutin_llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use lutin_llm::{LlmProvider, ModelId};
 use lutin_settings::{ProviderConfig, ProviderKind, ResolvedAuth, Settings};
 use lutin_tools::{FilterMode, ReadState, ToolContext};
 use thiserror::Error;
+
+use crate::prompt::{self, PromptContext, PromptExtras};
 
 #[derive(Debug, Error)]
 pub enum BuildError {
@@ -47,11 +51,20 @@ pub struct BuildArgs<'a> {
     pub sandbox_root: PathBuf,
     /// Per-session model override; when `Some`, beats `persona.model`.
     pub model_override: Option<String>,
-    /// Tools to splice in alongside the standard toolset. They bypass
-    /// the persona filter — workflows use this for chat-control tools
-    /// the LLM should always see (mirrors the old engine's "pinned"
-    /// concept). Pass `Vec::new()` if not needed.
+    /// Tools to splice in alongside the standard toolset. Workflow
+    /// hooks live here — e.g. the chat workflow's sub-agent registry
+    /// tools (`spawn_agent`, `get_agent`, `stop_agent`). Like the
+    /// default tools they go through the persona's `tool_filter_list`
+    /// filter, so a persona that doesn't whitelist them simply doesn't
+    /// see them. Pass `Vec::new()` if not needed.
     pub extra_tools: Vec<Box<dyn Tool>>,
+    /// Workflow-supplied chat state for `%placeholder%` substitution
+    /// in the persona's system prompt. The SDK fills `persona:*` and
+    /// `cwd` automatically; everything else (message_count, attached
+    /// agents, latest response, variables, …) the workflow provides.
+    /// Defaults to empty — placeholders for unset fields collapse to
+    /// empty strings, so personas without placeholders don't notice.
+    pub prompt_extras: PromptExtras,
 }
 
 /// Assemble an [`Agent`] ready to run one round-loop. Workflows that
@@ -99,6 +112,7 @@ fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildErro
         sandbox_root,
         model_override,
         extra_tools,
+        prompt_extras,
     } = args;
 
     let provider_name = persona
@@ -122,6 +136,12 @@ fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildErro
     let sampling = SamplingParams {
         temperature: persona.temperature,
         thinking_enabled: persona.thinking_enabled,
+        penalties: persona
+            .presence_penalty
+            .map(|presence| lutin_agent_sdk::PenaltyParams {
+                presence,
+                frequency: 0.0,
+            }),
         ..SamplingParams::default()
     };
 
@@ -129,27 +149,39 @@ fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildErro
         root: sandbox_root.clone(),
         env: Arc::from([]),
         http: reqwest::Client::new(),
-        read_state: Arc::new(ReadState::new(sandbox_root)),
+        read_state: Arc::new(ReadState::new(sandbox_root.clone())),
     });
     let mode = match persona.tool_filter_mode {
         ToolFilterMode::Whitelist => FilterMode::Whitelist,
         ToolFilterMode::Blacklist => FilterMode::Blacklist,
     };
-    let tools = lutin_tools::default_tools(
+    let mut tools = lutin_tools::default_tools(
         Arc::clone(&tool_ctx),
         settings.web_search.brave_api_key.clone(),
     );
-    let mut tools = lutin_tools::filter_by_name(tools, mode, &persona.tool_filter_list);
     tools.extend(extra_tools);
+    let tools = lutin_tools::filter_by_name(tools, mode, &persona.tool_filter_list);
     let toolbox = Toolbox::new(tools).map_err(|e| BuildError::Toolbox(e.to_string()))?;
+
+    let mut loop_config = LoopConfig::default();
+    if let Some(n) = persona.sliding_window_messages {
+        let n = n as usize;
+        loop_config.message_projector = Some(Arc::new(move |msgs: &[lutin_llm::Message]| {
+            slide_window_by_user_turns(msgs, n)
+        }));
+    }
+
+    let cwd = sandbox_root.to_string_lossy().to_string();
+    let prompt_ctx = PromptContext::from_parts(persona, &cwd, &prompt_extras);
+    let system = prompt::resolve(&persona.system_prompt, &prompt_ctx);
 
     let config = AgentConfig {
         provider,
         model: ModelId::new(model),
         sampling,
-        system: persona.system_prompt.clone(),
+        system,
         tool_policy: ToolPolicy::default(),
-        loop_config: LoopConfig::default(),
+        loop_config,
     };
     Ok((config, toolbox))
 }
@@ -226,10 +258,33 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, Buil
             Arc::new(AnthropicProvider::new(auth))
         }
         ProviderKind::OpenAiCompat => {
-            return Err(BuildError::ProviderUnsupported(format!(
-                "provider '{}': openai_compat is not yet implemented",
-                cfg.name
-            )));
+            let base_url = cfg.base_url.clone().ok_or_else(|| {
+                BuildError::ProviderMisconfigured {
+                    name: cfg.name.clone(),
+                    reason: "openai_compat requires base_url".into(),
+                }
+            })?;
+            // Inline key, env-var key, or no auth — OAuth doesn't apply here.
+            let api_key = match &auth {
+                ResolvedAuth::Inline(k) => Some(k.clone()),
+                ResolvedAuth::FromEnv(var) => {
+                    Some(std::env::var(var).map_err(|_| BuildError::ProviderMisconfigured {
+                        name: cfg.name.clone(),
+                        reason: format!("env var {var} unset"),
+                    })?)
+                }
+                ResolvedAuth::None => None,
+                ResolvedAuth::OAuth => {
+                    return Err(BuildError::ProviderMisconfigured {
+                        name: cfg.name.clone(),
+                        reason: "openai_compat does not support use_oauth".into(),
+                    });
+                }
+            };
+            Arc::new(OpenAiCompatProvider::new(
+                OpenAiCompatConfig { base_url, api_key },
+                http,
+            ))
         }
     })
 }

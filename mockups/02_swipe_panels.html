@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lutin — Swipe Panels Mockup</title>
+<style>
+  :root  { --bg: #0b0b0d; --surface: #16161a; --surface-2: #1c1c21; --border: #1b1b20; --border-strong: #23232a; --text: #f2f2f4; --text-muted: #e2e2e6; --text-faint: #b4b4bc; --text-dim: #8a8a93; --accent: #e8743b; --accent-hover: #f08246; --accent-soft: rgba(232, 116, 59, 0.14); --err: #b86a6a; --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --font: -apple-system, "Inter", "Segoe UI", sans-serif; --mono: ui-monospace, "SF Mono", Menlo, monospace; }
+  * { box-sizing: border-box; }
+  html, body  { margin: 0; padding: 0; background: #0a0a0c; color: var(--text); font-family: var(--font); -webkit-font-smoothing: antialiased; font-size: 14px; }
+  .page  { max-width: 480px; margin: 0 auto; padding: 32px 16px 64px; display: flex; flex-direction: column; gap: 36px; align-items: center; }
+  .page > header  { width: 100%; text-align: center; color: var(--text-faint); }
+  .page > header h1 { color: var(--text); font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: 0.2px; }
+  .page > header p { margin: 0; font-size: 12px; color: var(--text-dim); }
+  .frame-block { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .caption { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-dim); font-weight: 600; }
+  .caption b { color: var(--accent); font-weight: 600; }
+
+  /* Phone frame */
+  .phone  { width: 390px; height: 844px; background: var(--bg); border-radius: 44px; border: 1px solid #2a2a32; box-shadow: 0 30px 80px -30px rgba(0,0,0,0.8), 0 0 0 8px #18181c, 0 0 0 9px #2a2a32; position: relative; overflow: hidden; color: var(--text); display: flex; flex-direction: column; }
+  .notch  { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); width: 120px; height: 30px; background: #000; border-radius: 20px; z-index: 50; }
+  .statusbar  { height: 50px; padding: 18px 28px 0; display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--text); flex: 0 0 auto; }
+  .statusbar .icons { display: flex; gap: 6px; align-items: center; color: var(--text-muted); }
+  .dot-icons { display: inline-flex; gap: 3px; }
+  .dot-icons span { width: 4px; height: 4px; border-radius: 50%; background: var(--text-muted); }
+
+  /* Page indicator (3 dots, top of frame content) */
+  .pgind { display: flex; gap: 6px; justify-content: center; padding: 8px 0 4px; flex: 0 0 auto; }
+  .pgind i { width: 5px; height: 5px; border-radius: 50%; background: var(--border-strong); display: block; transition: background 0.2s; }
+  .pgind i.on { background: var(--accent); }
+
+  .panel  { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+  /* Top app bar */
+  .appbar  { padding: 6px 16px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+  .appbar h2 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
+  .appbar .sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+  .iconbtn  { width: 32px; height: 32px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border-strong); display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer; }
+  .iconbtn svg { width: 16px; height: 16px; }
+  .pulse  { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-soft); animation: pulse 1.6s infinite; display: inline-block; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(232,116,59,0.5); }
+    70% { box-shadow: 0 0 0 8px rgba(232,116,59,0); }
+    100% { box-shadow: 0 0 0 0 rgba(232,116,59,0); }
+  }
+
+  /* ----- Chat panel ----- */
+  .chat-scroll { flex: 1 1 auto; overflow-y: auto; padding: 12px 14px 12px; display: flex; flex-direction: column; gap: 14px; }
+  .msg-row { display: flex; gap: 8px; max-width: 100%; }
+  .msg-row.user { justify-content: flex-end; }
+  .bubble  { max-width: 82%; padding: 10px 12px; border-radius: var(--r-lg); font-size: 14px; line-height: 1.42; border: 1px solid var(--border-strong); background: var(--surface); }
+  .bubble.user { background: var(--accent-soft); border-color: rgba(232,116,59,0.28); color: var(--text); }
+  .bubble.assistant { background: var(--surface); }
+  .bubble h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--text); }
+  .bubble p { margin: 0 0 8px; color: var(--text-muted); }
+  .bubble p:last-child { margin-bottom: 0; }
+  .meta-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  .avatar  { width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), #a04020); color: #fff; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; margin-top: 2px; }
+
+  /* Card list inside assistant message */
+  .card-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .card-list .card  { border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: var(--r-md); padding: 8px 10px; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; }
+  .card-list .card .k { color: var(--accent); font-weight: 600; font-family: var(--mono); font-size: 12px; }
+  .card-list .card .v { color: var(--text-muted); }
+
+  /* Tool call */
+  .toolcall  { border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: var(--r-md); padding: 0; font-size: 12px; overflow: hidden; width: 100%; max-width: 320px; }
+  .toolcall .head  { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .toolcall .name { font-family: var(--mono); color: var(--text); font-weight: 600; flex: 1; font-size: 12px; }
+  .toolcall .state { width: 7px; height: 7px; border-radius: 50%; background: #6ed18a; box-shadow: 0 0 8px rgba(110,209,138,0.6); }
+  .toolcall .state.run { background: var(--accent); animation: pulse 1.6s infinite; }
+  .toolcall .body { padding: 8px 10px; color: var(--text-faint); font-family: var(--mono); font-size: 11px; line-height: 1.5; }
+  .toolcall .body .arg { color: var(--text-dim); }
+
+  /* Thinking */
+  .thinking  { border: 1px dashed var(--border-strong); border-radius: var(--r-md); padding: 8px 10px; font-size: 12px; color: var(--text-faint); background: rgba(255,255,255,0.015); width: 100%; max-width: 320px; }
+  .thinking summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-weight: 500; }
+  .thinking summary::-webkit-details-marker { display: none; }
+  .thinking summary svg { width: 12px; height: 12px; }
+  .thinking[open] summary { margin-bottom: 6px; color: var(--text-faint); }
+  .thinking p { margin: 0; font-style: italic; line-height: 1.5; }
+
+  /* Composer */
+  .composer  { border-top: 1px solid var(--border); padding: 10px 12px 22px; display: flex; gap: 8px; align-items: flex-end; background: var(--bg); flex: 0 0 auto; }
+  .composer .ta  { flex: 1; min-height: 38px; max-height: 80px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 18px; padding: 9px 14px; color: var(--text); font-family: var(--font); font-size: 14px; display: flex; align-items: center; }
+  .composer .ta.placeholder { color: var(--text-dim); }
+  .composer .send  { width: 38px; height: 38px; border-radius: 50%; background: var(--accent); border: none; display: inline-flex; align-items: center; justify-content: center; color: #fff; cursor: pointer; }
+  .composer .send svg { width: 16px; height: 16px; }
+  .composer .mic  { width: 38px; height: 38px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border-strong); display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer; }
+  .composer .mic svg { width: 16px; height: 16px; }
+
+  /* ----- Sessions panel ----- */
+  .chips { display: flex; gap: 6px; padding: 8px 14px 12px; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+  .chip  { padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--text-faint); border: 1px solid var(--border-strong); white-space: nowrap; }
+  .chip.on { background: var(--accent-soft); color: var(--accent); border-color: rgba(232,116,59,0.35); }
+  .session-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .session  { display: flex; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); align-items: flex-start; }
+  .session.active { background: rgba(232,116,59,0.05); }
+  .session.active::before  { content: ""; position: absolute; left: 0; width: 3px; height: 36px; background: var(--accent); border-radius: 0 2px 2px 0; }
+  .session { position: relative; }
+  .s-av  { width: 36px; height: 36px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--border-strong); display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 14px; flex: 0 0 auto; }
+  .s-av.aria { background: linear-gradient(135deg, #4d6fa8, #2a3e60); color: #fff; }
+  .s-av.dax { background: linear-gradient(135deg, var(--accent), #8c3a18); color: #fff; }
+  .s-av.elea { background: linear-gradient(135deg, #6c5cb1, #3a3270); color: #fff; }
+  .s-body { flex: 1; min-width: 0; }
+  .s-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .s-top .name { font-size: 14px; font-weight: 600; color: var(--text); }
+  .s-top .time { font-size: 11px; color: var(--text-dim); flex: 0 0 auto; }
+  .s-persona { font-size: 11px; color: var(--accent); font-weight: 500; margin: 1px 0 3px; }
+  .s-prev { font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.35; }
+  .s-tag  { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--surface-2); color: var(--text-dim); margin-left: 6px; vertical-align: 1px; border: 1px solid var(--border-strong); }
+
+  /* Sessions header with gear */
+  .sess-head { display: flex; align-items: center; padding: 6px 14px 12px; border-bottom: 1px solid var(--border); }
+  .sess-head h2 { margin: 0; font-size: 22px; font-weight: 700; flex: 1; letter-spacing: -0.3px; }
+  .sess-head .new  { background: var(--accent); color: #fff; border: none; border-radius: 50%; width: 32px; height: 32px; margin-right: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .sess-head .new svg { width: 16px; height: 16px; }
+
+  /* ----- Inspector panel ----- */
+  .insp-scroll { flex: 1; overflow-y: auto; padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+  .insp-section h4  { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-dim); font-weight: 600; }
+  .persona-card  { background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg); padding: 14px; display: flex; gap: 12px; align-items: center; }
+  .persona-card .av  { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), #8c3a18); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; }
+  .persona-card .name { font-size: 15px; font-weight: 600; }
+  .persona-card .tag { font-size: 11px; color: var(--text-faint); margin-top: 2px; font-family: var(--mono); }
+
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat  { background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-md); padding: 10px 12px; }
+  .stat .l { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .stat .v { font-size: 18px; color: var(--text); font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 11px; color: var(--text-dim); font-weight: 400; margin-left: 3px; }
+
+  .tool-hist { display: flex; flex-direction: column; gap: 4px; }
+  .tool-hist .row  { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-md); font-size: 12px; }
+  .tool-hist .row .nm { font-family: var(--mono); color: var(--text); flex: 1; }
+  .tool-hist .row .t { color: var(--text-dim); font-size: 11px; }
+  .tool-hist .row .d { width: 6px; height: 6px; border-radius: 50%; background: #6ed18a; }
+  .tool-hist .row .d.fail { background: var(--err); }
+
+  .attach-stub  { border: 1px dashed var(--border-strong); border-radius: var(--r-md); padding: 14px; text-align: center; font-size: 12px; color: var(--text-dim); }
+
+  .actions { display: flex; flex-direction: column; gap: 8px; }
+  .btn  { width: 100%; padding: 11px; border-radius: var(--r-md); font-size: 14px; font-weight: 500; cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
+  .btn.ghost { background: transparent; }
+  .btn.danger { color: var(--err); border-color: rgba(184,106,106,0.3); }
+
+  /* ----- Settings sheet (modal) ----- */
+  .sheet-frame { position: relative; }
+  .sheet-overlay  { position: absolute; inset: 0; background: rgba(0,0,0,0.55); border-radius: 36px; z-index: 60; display: flex; align-items: flex-end; justify-content: stretch; }
+  .sheet  { width: 100%; height: 78%; background: var(--surface); border-radius: 18px 18px 36px 36px; border-top: 1px solid var(--border-strong); display: flex; flex-direction: column; overflow: hidden; }
+  .sheet-grab { width: 36px; height: 4px; background: var(--border-strong); border-radius: 2px; margin: 8px auto 0; flex: 0 0 auto; }
+  .sheet-head  { padding: 10px 18px 14px; display: flex; align-items: center; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+  .sheet-head h3 { margin: 0; flex: 1; font-size: 17px; font-weight: 600; }
+  .sheet-head .x { color: var(--accent); font-size: 14px; font-weight: 500; cursor: pointer; }
+  .sheet-body { flex: 1; overflow-y: auto; padding: 12px 0; }
+  .sect-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-dim); padding: 12px 18px 6px; font-weight: 600; }
+  .row-list { background: var(--surface-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .row-list .item  { display: flex; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .row-list .item:last-child { border-bottom: none; }
+  .row-list .item .lbl { flex: 1; color: var(--text); }
+  .row-list .item .val { color: var(--text-faint); font-size: 13px; }
+  .row-list .item .val.acc { color: var(--accent); }
+  .row-list .item .chev { color: var(--text-dim); margin-left: 6px; }
+  .toggle  { width: 38px; height: 22px; background: var(--accent); border-radius: 12px; position: relative; flex: 0 0 auto; }
+  .toggle::after { content: ""; position: absolute; top: 2px; left: 18px; width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+  .toggle.off { background: var(--border-strong); }
+  .toggle.off::after { left: 2px; }
+
+  /* Interactive demo */
+  .demo-frame .panel-track  { display: flex; width: 300%; height: 100%; transition: transform 0.35s cubic-bezier(.2,.8,.2,1); }
+  .demo-frame .panel-slot { width: 33.333%; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .demo-nav { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 70; display: flex; gap: 8px; }
+  .demo-nav button  { background: rgba(255,255,255,0.06); border: 1px solid var(--border-strong); color: var(--text-faint); border-radius: 999px; padding: 6px 12px; font-size: 11px; font-family: var(--font); cursor: pointer; }
+  .demo-nav button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .demo-hint { font-size: 10px; color: var(--text-dim); text-align: center; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <header>
+    <h1>Lutin — Mobile Mockup #2</h1>
+    <p>Horizontal swipe panels · Sessions ↔ Chat ↔ Inspector · 390×844</p>
+  </header>
+
+  <!-- ============ INTERACTIVE DEMO FRAME ============ -->
+  <div class="frame-block">
+    <div class="caption">Interactive · tap a label below to swipe</div>
+    <div class="phone demo-frame" id="demo">
+      <div class="notch"></div>
+      <div class="statusbar">
+        <span>9:41</span>
+        <span class="icons"><span class="dot-icons"><span></span><span></span><span></span></span> 5G ◼</span>
+      </div>
+      <div class="pgind" id="demoPg"><i></i><i class="on"></i><i></i></div>
+      <div style="flex:1; overflow:hidden; position:relative;">
+        <div class="panel-track" id="track" style="transform: translateX(-33.333%);">
+          <!-- Sessions slim -->
+          <div class="panel-slot">
+            <div class="sess-head">
+              <h2>Sessions</h2>
+              <button class="new" title="New"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg></button>
+              <button class="iconbtn" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+            </div>
+            <div class="chips">
+              <span class="chip on">All</span><span class="chip">Chat</span><span class="chip">Coding</span>
+            </div>
+            <div class="session-list">
+              <div class="session active">
+                <div class="s-av dax">D</div>
+                <div class="s-body">
+                  <div class="s-top"><span class="name">Trip planning</span><span class="time">2m</span></div>
+                  <div class="s-persona">Dax · default</div>
+                  <div class="s-prev">Sure — three options near Lyon...</div>
+                </div>
+              </div>
+              <div class="session">
+                <div class="s-av aria">A</div>
+                <div class="s-body">
+                  <div class="s-top"><span class="name">Refactor agent loop</span><span class="time">1h</span></div>
+                  <div class="s-persona">Aria · coding</div>
+                  <div class="s-prev">Extracted run/mod into smaller fns</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Chat slim -->
+          <div class="panel-slot">
+            <div class="appbar">
+              <div class="iconbtn" title="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+              <div style="flex:1">
+                <h2>Trip planning</h2>
+                <div class="sub"><span class="pulse"></span> streaming · Dax</div>
+              </div>
+              <div class="iconbtn" title="info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v.01M11 12h1v4h1"/></svg></div>
+            </div>
+            <div class="chat-scroll">
+              <div class="msg-row user"><div class="bubble user">Plan a 3-day trip to Lyon for next month, low-key.</div></div>
+              <div class="msg-row">
+                <div class="avatar">D</div>
+                <div class="bubble assistant">
+                  <h3>Lyon · low-key 3 days</h3>
+                  <p>Here's a calmer take focused on food and walking.</p>
+                </div>
+              </div>
+              <div class="msg-row" style="padding-left:32px">
+                <div class="toolcall">
+                  <div class="head"><span class="state run"></span><span class="name">web.search</span><span style="color:var(--text-dim)">running</span></div>
+                  <div class="body"><span class="arg">query:</span> "Lyon weather June"</div>
+                </div>
+              </div>
+            </div>
+            <div class="composer">
+              <div class="ta placeholder">Message Dax…</div>
+              <button class="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+              <button class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l14-7-7 14-2-5-5-2z"/></svg></button>
+            </div>
+          </div>
+          <!-- Inspector slim -->
+          <div class="panel-slot">
+            <div class="appbar"><h2 style="font-size:15px">Inspector</h2><div class="iconbtn" title="more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></div></div>
+            <div class="insp-scroll">
+              <div class="insp-section">
+                <h4>Persona</h4>
+                <div class="persona-card"><div class="av">D</div><div><div class="name">Dax</div><div class="tag">claude-opus-4-7 · 0.7</div></div></div>
+              </div>
+              <div class="insp-section">
+                <h4>Stats</h4>
+                <div class="stat-grid">
+                  <div class="stat"><div class="l">Tokens</div><div class="v">12.4k</div></div>
+                  <div class="stat"><div class="l">Latency</div><div class="v">820<small>ms</small></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="demo-nav">
+        <button data-i="0">Sessions</button>
+        <button data-i="1" class="on">Chat</button>
+        <button data-i="2">Inspector</button>
+      </div>
+    </div>
+    <div class="demo-hint">Single phone, three panels behind it. Tap labels to slide.</div>
+  </div>
+
+  <!-- ============ FRAME 1: SESSIONS ============ -->
+  <div class="frame-block">
+    <div class="caption">Frame 1 · <b>Sessions</b> (swipe right from chat)</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span class="icons"><span class="dot-icons"><span></span><span></span><span></span></span> 5G ◼</span></div>
+      <div class="pgind"><i class="on"></i><i></i><i></i></div>
+      <div class="panel">
+        <div class="sess-head">
+          <h2>Sessions</h2>
+          <button class="new" title="New session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="iconbtn" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
+        </div>
+        <div class="chips">
+          <span class="chip on">All</span>
+          <span class="chip">Chat</span>
+          <span class="chip">Coding</span>
+          <span class="chip">Research</span>
+          <span class="chip">Voice</span>
+        </div>
+        <div class="session-list">
+          <div class="session active">
+            <div class="s-av dax">D</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">Trip planning <span class="s-tag">chat</span></span><span class="time">2m</span></div>
+              <div class="s-persona">Dax · default</div>
+              <div class="s-prev">Sure — three low-key options near Lyon, focused on food.</div>
+            </div>
+          </div>
+          <div class="session">
+            <div class="s-av aria">A</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">Refactor agent loop <span class="s-tag">code</span></span><span class="time">1h</span></div>
+              <div class="s-persona">Aria · coding</div>
+              <div class="s-prev">Extracted run/mod.rs into smaller functions; tests still green.</div>
+            </div>
+          </div>
+          <div class="session">
+            <div class="s-av elea">E</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">Reading list draft <span class="s-tag">chat</span></span><span class="time">Yest</span></div>
+              <div class="s-persona">Elea · research</div>
+              <div class="s-prev">I grouped the papers by methodology and added priority tags.</div>
+            </div>
+          </div>
+          <div class="session">
+            <div class="s-av dax">D</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">Grocery brainstorm</span><span class="time">Mon</span></div>
+              <div class="s-persona">Dax · default</div>
+              <div class="s-prev">Quick weekday meals using what's already in the fridge.</div>
+            </div>
+          </div>
+          <div class="session">
+            <div class="s-av aria">A</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">TTS pipeline review</span><span class="time">Sun</span></div>
+              <div class="s-persona">Aria · coding</div>
+              <div class="s-prev">orpheus snac decoder — looks fine, two minor allocs to remove.</div>
+            </div>
+          </div>
+          <div class="session">
+            <div class="s-av elea">E</div>
+            <div class="s-body">
+              <div class="s-top"><span class="name">Garden notes</span><span class="time">May 3</span></div>
+              <div class="s-persona">Elea · research</div>
+              <div class="s-prev">Week 2 observations: tomatoes ahead of schedule, basil slow.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ FRAME 2: CHAT ============ -->
+  <div class="frame-block">
+    <div class="caption">Frame 2 · <b>Chat</b> (default / center)</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span class="icons"><span class="dot-icons"><span></span><span></span><span></span></span> 5G ◼</span></div>
+      <div class="pgind"><i></i><i class="on"></i><i></i></div>
+      <div class="panel">
+        <div class="appbar">
+          <div class="iconbtn" title="sessions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+          <div style="flex:1; min-width:0">
+            <h2 style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Trip planning</h2>
+            <div class="sub"><span class="pulse"></span> streaming · Dax · chat workflow</div>
+          </div>
+          <div class="iconbtn" title="inspector"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+        <div class="chat-scroll">
+          <div class="msg-row user">
+            <div>
+              <div class="bubble user">Plan a 3-day trip to Lyon for next month — low-key, food-focused, max 2 museums.</div>
+              <div class="meta-row" style="justify-content:flex-end">9:38</div>
+            </div>
+          </div>
+          <div class="msg-row">
+            <div class="avatar">D</div>
+            <div style="min-width:0; flex:1">
+              <div class="bubble assistant">
+                <h3>Lyon · low-key 3 days</h3>
+                <p>Here's a calmer take. Focus on Vieux Lyon for walking, two market mornings, and just two cultural stops so you don't burn out.</p>
+                <div class="card-list">
+                  <div class="card"><span class="k">Day 1</span><span class="v">Arrive · bouchon dinner near Saint-Jean</span></div>
+                  <div class="card"><span class="k">Day 2</span><span class="v">Marché Saint-Antoine → Musée des Confluences</span></div>
+                  <div class="card"><span class="k">Day 3</span><span class="v">Croix-Rousse traboules · slow café morning</span></div>
+                </div>
+              </div>
+              <div class="meta-row">9:39 · Dax</div>
+            </div>
+          </div>
+          <div class="msg-row" style="padding-left: 32px">
+            <details class="thinking" open>
+              <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a8 8 0 0 0-5 14.3V20h10v-3.7A8 8 0 0 0 12 2z"/></svg> Thinking · 4s</summary>
+              <p>User wants low-key, so I should avoid overstuffing day 2. Confluences is enough; skip Beaux-Arts to keep the pace gentle…</p>
+            </details>
+          </div>
+          <div class="msg-row" style="padding-left: 32px">
+            <div class="toolcall">
+              <div class="head">
+                <span class="state run"></span>
+                <span class="name">web.search</span>
+                <span style="color:var(--text-dim)">running…</span>
+              </div>
+              <div class="body">
+                <span class="arg">query:</span> "Lyon weather mid June 2026"<br>
+                <span class="arg">max:</span> 5
+              </div>
+            </div>
+          </div>
+          <div class="msg-row" style="padding-left: 32px">
+            <div class="toolcall">
+              <div class="head">
+                <span class="state"></span>
+                <span class="name">calendar.find_free</span>
+                <span style="color:var(--text-dim)">2 slots</span>
+              </div>
+              <div class="body">
+                <span class="arg">range:</span> Jun 10–25 · weekends ok
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="ta placeholder">Message Dax…</div>
+          <button class="mic" title="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></button>
+          <button class="send" title="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12l14-7-7 14-2-5-5-2z"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ FRAME 3: INSPECTOR ============ -->
+  <div class="frame-block">
+    <div class="caption">Frame 3 · <b>Inspector</b> (swipe left from chat)</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span class="icons"><span class="dot-icons"><span></span><span></span><span></span></span> 5G ◼</span></div>
+      <div class="pgind"><i></i><i></i><i class="on"></i></div>
+      <div class="panel">
+        <div class="appbar">
+          <div class="iconbtn" title="back to chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+          <div style="flex:1"><h2>Inspector</h2><div class="sub">Trip planning · live</div></div>
+          <div class="iconbtn" title="more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></div>
+        </div>
+        <div class="insp-scroll">
+          <div class="insp-section">
+            <h4>Persona</h4>
+            <div class="persona-card">
+              <div class="av">D</div>
+              <div style="flex:1">
+                <div class="name">Dax</div>
+                <div class="tag">claude-opus-4-7 · temp 0.7 · chat</div>
+              </div>
+              <button class="iconbtn" title="edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4z"/></svg></button>
+            </div>
+          </div>
+
+          <div class="insp-section">
+            <h4>Mini-stats</h4>
+            <div class="stat-grid">
+              <div class="stat"><div class="l">Tokens</div><div class="v">12,402</div></div>
+              <div class="stat"><div class="l">Avg latency</div><div class="v">820<small>ms</small></div></div>
+              <div class="stat"><div class="l">Tool calls</div><div class="v">7</div></div>
+              <div class="stat"><div class="l">Cost</div><div class="v">$0.18</div></div>
+            </div>
+          </div>
+
+          <div class="insp-section">
+            <h4>Recent tools</h4>
+            <div class="tool-hist">
+              <div class="row"><span class="d"></span><span class="nm">web.search</span><span class="t">just now</span></div>
+              <div class="row"><span class="d"></span><span class="nm">calendar.find_free</span><span class="t">9:39</span></div>
+              <div class="row"><span class="d"></span><span class="nm">notes.append</span><span class="t">9:38</span></div>
+              <div class="row"><span class="d fail"></span><span class="nm">maps.directions</span><span class="t">9:37</span></div>
+              <div class="row"><span class="d"></span><span class="nm">web.search</span><span class="t">9:36</span></div>
+            </div>
+          </div>
+
+          <div class="insp-section">
+            <h4>Attachments</h4>
+            <div class="attach-stub">No attachments. Tap + to add a file or image.</div>
+          </div>
+
+          <div class="insp-section">
+            <h4>Actions</h4>
+            <div class="actions">
+              <button class="btn"><span style="margin-right:6px">📌</span>Pin session</button>
+              <button class="btn ghost">Export transcript</button>
+              <button class="btn danger">End session</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ FRAME 4: SETTINGS SHEET ============ -->
+  <div class="frame-block">
+    <div class="caption">Frame 4 · <b>Settings</b> sheet (modal from Sessions gear)</div>
+    <div class="phone sheet-frame">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span class="icons"><span class="dot-icons"><span></span><span></span><span></span></span> 5G ◼</span></div>
+      <div class="pgind"><i class="on"></i><i></i><i></i></div>
+      <!-- background panel (Sessions, dimmed) -->
+      <div class="panel" style="filter:blur(0.4px); opacity:0.55">
+        <div class="sess-head"><h2>Sessions</h2></div>
+        <div class="chips"><span class="chip on">All</span><span class="chip">Chat</span><span class="chip">Coding</span></div>
+        <div class="session-list">
+          <div class="session active"><div class="s-av dax">D</div><div class="s-body"><div class="s-top"><span class="name">Trip planning</span><span class="time">2m</span></div><div class="s-persona">Dax</div><div class="s-prev">Sure — three options near Lyon...</div></div></div>
+          <div class="session"><div class="s-av aria">A</div><div class="s-body"><div class="s-top"><span class="name">Refactor agent loop</span><span class="time">1h</span></div><div class="s-persona">Aria</div><div class="s-prev">Extracted run/mod into smaller fns</div></div></div>
+        </div>
+      </div>
+      <!-- Sheet overlay -->
+      <div class="sheet-overlay">
+        <div class="sheet">
+          <div class="sheet-grab"></div>
+          <div class="sheet-head">
+            <h3>Settings</h3>
+            <span class="x">Done</span>
+          </div>
+          <div class="sheet-body">
+            <div class="sect-label">Connection</div>
+            <div class="row-list">
+              <div class="item"><span class="lbl">Backend</span><span class="val acc">localhost:7890</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl">Default model</span><span class="val">claude-opus-4-7</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl">Stream tokens</span><div class="toggle"></div></div>
+            </div>
+
+            <div class="sect-label">Audio</div>
+            <div class="row-list">
+              <div class="item"><span class="lbl">TTS voice</span><span class="val">Orpheus · Tara</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl">Auto-play replies</span><div class="toggle"></div></div>
+              <div class="item"><span class="lbl">Push-to-talk</span><div class="toggle off"></div></div>
+              <div class="item"><span class="lbl">Mic gain</span><span class="val">+3 dB</span><span class="chev">›</span></div>
+            </div>
+
+            <div class="sect-label">Notifications</div>
+            <div class="row-list">
+              <div class="item"><span class="lbl">When reply finishes</span><div class="toggle"></div></div>
+              <div class="item"><span class="lbl">Tool errors</span><div class="toggle"></div></div>
+              <div class="item"><span class="lbl">Quiet hours</span><span class="val">22:00 – 08:00</span><span class="chev">›</span></div>
+            </div>
+
+            <div class="sect-label">Personas</div>
+            <div class="row-list">
+              <div class="item"><span class="lbl">Dax</span><span class="val acc">default</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl">Aria</span><span class="val">coding</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl">Elea</span><span class="val">research</span><span class="chev">›</span></div>
+              <div class="item"><span class="lbl" style="color:var(--accent)">+ New persona</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // Tiny demo: tap labels to swipe between the three panels
+  (function () {
+    const track = document.getElementById('track');
+    const pg = document.getElementById('demoPg').children;
+    const btns = document.querySelectorAll('.demo-nav button');
+    function go(i) {
+      track.style.transform = 'translateX(' + (-i * 33.333) + '%)';
+      [...btns].forEach((b, k) => b.classList.toggle('on', k === i));
+      [...pg].forEach((d, k) => d.classList.toggle('on', k === i));
+    }
+    btns.forEach(b => b.addEventListener('click', () => go(parseInt(b.dataset.i, 10))));
+    // start on chat (index 1) - already set inline
+  })();
+</script>
+
+</body>
+</html>

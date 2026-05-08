@@ -16,11 +16,13 @@
   --chat-border-strong: var(--border-2, #23232a);
 
   /* Slightly brighter than the host text-1 so chat copy stays
-   * readable inside the dimmer scrollback area. */
+   * readable inside the dimmer scrollback area. The faint/dim ramps
+   * are pulled up vs. the host tokens so meta rows, tool headers
+   * and the thinking label remain legible at small sizes. */
   --chat-text: var(--text-1-strong, #f2f2f4);
-  --chat-text-muted: var(--text-1, #d6d6da);
-  --chat-text-faint: var(--text-2, #9a9aa3);
-  --chat-text-dim: var(--text-3, #6b6b74);
+  --chat-text-muted: #e2e2e6;
+  --chat-text-faint: #b4b4bc;
+  --chat-text-dim: #8a8a93;
 
   --chat-accent: var(--accent, #e8743b);
   --chat-accent-hover: var(--accent-hover, #f08246);
@@ -47,10 +49,13 @@
   --chat-s-4: var(--s-4, 16px);
   --chat-s-5: var(--s-5, 20px);
 
-  --chat-fs-sm: var(--fs-sm, 11px);
-  --chat-fs-md: var(--fs-md, 12px);
-  --chat-fs-lg: var(--fs-lg, 13px);
-  --chat-fs-xl: var(--fs-xl, 14px);
+  /* Chat-local font ramp. We don't inherit the host's --fs-* tokens
+   * here because the chat scrollback runs at a comfortable reading
+   * size that's independent of the desktop chrome. */
+  --chat-fs-sm: 12px;
+  --chat-fs-md: 13px;
+  --chat-fs-lg: 14px;
+  --chat-fs-xl: 15px;
 
   --chat-font: var(--font-sans, -apple-system, "Inter", "Segoe UI", sans-serif);
   --chat-font-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
@@ -163,24 +168,61 @@
 .lutin-chat__msg--user { align-items: flex-end; }
 .lutin-chat__msg--assistant { align-items: stretch; }
 .lutin-chat__msg--system { align-self: center; max-width: 480px; }
+.lutin-chat__msg--tool { align-items: stretch; }
 /* Sub-agent reply: orchestrator-attributed turn. Indented from the
  * left with a colored side-rule so it visually nests under the
  * orchestrator's `spawn_agent` tool call but stays distinct from the
  * persona's own assistant turn. */
 .lutin-chat__msg--agent {
   align-items: stretch;
-  border-left: 3px solid var(--chat-accent);
+  border-left: 2px dashed var(--chat-border-strong);
   padding-left: var(--chat-s-3);
-  margin-left: var(--chat-s-2);
+  color: var(--chat-text-dim);
+  opacity: 0.82;
+}
+.lutin-chat__msg--agent[open] { opacity: 1; }
+.lutin-chat__msg--agent:hover { opacity: 1; }
+.lutin-chat__msg--agent[open] {
+  border-left-style: solid;
+  border-left-color: var(--chat-text-faint);
 }
 .lutin-chat__msg--agent .lutin-chat__role {
-  color: var(--chat-accent);
+  color: var(--chat-text-faint);
   text-transform: none;
   letter-spacing: 0;
   font-family: var(--chat-font-mono);
+  font-size: 12px;
+}
+.lutin-chat__msg--agent .lutin-chat__msg-body {
+  color: var(--chat-text-muted);
+  font-size: 14px;
+}
+.lutin-chat__agent-head {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  margin-bottom: 0;
+}
+.lutin-chat__agent-head::-webkit-details-marker { display: none; }
+.lutin-chat__msg--agent[open] .lutin-chat__agent-head {
+  margin-bottom: var(--chat-s-2);
+}
+.lutin-chat__agent-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--chat-text-dim);
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .lutin-chat__msg--agent-failed {
   border-left-color: var(--chat-err);
+  opacity: 1;
 }
 .lutin-chat__msg--agent-failed .lutin-chat__role {
   color: var(--chat-err);
@@ -208,8 +250,8 @@
   align-items: center;
   gap: var(--chat-s-2);
   margin-bottom: var(--chat-s-2);
-  font-size: 11px;
-  color: var(--chat-text-dim);
+  font-size: 12px;
+  color: var(--chat-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 600;
@@ -221,13 +263,13 @@
   color: var(--chat-text);
   text-transform: none;
   letter-spacing: 0;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
 }
 .lutin-chat__role {
   color: var(--chat-accent);
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -235,7 +277,7 @@
   margin-left: auto;
   font-family: var(--chat-font-mono);
   font-weight: 500;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--chat-accent);
 }
 
@@ -246,12 +288,19 @@
 .lutin-chat__msg-metrics {
   margin-left: auto;
   font-family: var(--chat-font-mono);
-  font-weight: 500;
-  font-size: 10.5px;
+  font-weight: 400;
+  font-size: 11px;
   color: var(--chat-text-dim);
   text-transform: none;
   letter-spacing: 0;
   white-space: nowrap;
+}
+/* Inside tool/agent collapsed headers the metrics line should be even
+ * quieter — these rows repeat and were dominating the scrollback. */
+.lutin-chat__tool-head .lutin-chat__msg-metrics,
+.lutin-chat__agent-head .lutin-chat__msg-metrics {
+  font-size: 10.5px;
+  opacity: 0.7;
 }
 /* When `msg-status` is also present (streaming), let metrics sit next
  * to it without both fighting for `margin-left: auto`. */
@@ -261,7 +310,7 @@
 
 .lutin-chat__msg-body {
   color: var(--chat-text);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.65;
 }
 .lutin-chat__msg-live {
@@ -316,21 +365,24 @@
   width: 100%;
   max-width: min(920px, 100%);
   margin: 0 auto;
-  background: var(--chat-bg-1);
-  border: 1px solid var(--chat-border);
-  border-left: 2px solid var(--chat-accent);
+  background: transparent;
+  border: 1px dashed var(--chat-border);
   border-radius: var(--chat-r-md);
-  color: var(--chat-text-muted);
+  color: var(--chat-text-dim);
   font-size: 13px;
+  opacity: 0.78;
 }
+.lutin-chat__thinking:hover { opacity: 1; }
 .lutin-chat__thinking[open] {
-  background: var(--chat-surface);
+  background: var(--chat-bg-1);
+  border-style: solid;
+  opacity: 1;
 }
 .lutin-chat__thinking-head {
   display: flex;
   align-items: center;
   gap: var(--chat-s-2);
-  padding: 10px var(--chat-s-3);
+  padding: 8px var(--chat-s-3);
   cursor: pointer;
   list-style: none;
   user-select: none;
@@ -341,12 +393,12 @@
   letter-spacing: 0.08em;
   font-size: 11px;
   font-weight: 600;
-  color: var(--chat-accent);
+  color: var(--chat-text-faint);
 }
 .lutin-chat__thinking-toggle {
   margin-left: auto;
   font-family: var(--chat-font-mono);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--chat-text-faint);
   width: 16px;
   text-align: center;
@@ -387,16 +439,19 @@
 .lutin-md h3 { font-size: 15px; }
 .lutin-md h4 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--chat-text-muted); }
 
-.lutin-md ul { margin: 4px 0 14px; padding-left: 22px; }
+/* Default ul (only applies to nested lists thanks to the > ul rules
+ * below taking over top-level lists). */
+.lutin-md ul { margin: 4px 0 14px; padding-left: 22px; list-style: disc; }
 .lutin-md ul li { margin: 4px 0; }
 .lutin-md ul li > p { margin: 0 0 6px; }
 
-/* Top-level ordered lists render as numbered "meta cards" — each
- * item is a bordered surface with an accent badge counter on the
- * left. Nested ol/ul fall back to default styling. */
+/* Top-level lists render as stacked "meta cards" — each item is its
+ * own bordered surface with an accent badge marker. Ordered lists
+ * use a counter; unordered lists use a small filled disc in the same
+ * slot. Matches the lutin-v1 02_modern.html reference. Nested lists
+ * fall back to default disc/decimal. */
 .lutin-md > ol,
-.lutin-md > ol ol {
-  counter-reset: lutin-meta;
+.lutin-md > ul {
   list-style: none;
   padding: 0;
   margin: 14px 0 18px;
@@ -404,21 +459,27 @@
   flex-direction: column;
   gap: 10px;
 }
+.lutin-md > ol { counter-reset: lutin-meta; }
 .lutin-md > ol > li,
-.lutin-md > ol ol > li {
-  counter-increment: lutin-meta;
+.lutin-md > ul > li {
   background: var(--chat-bg-1);
   border: 1px solid var(--chat-border);
   border-radius: var(--chat-r-md);
   padding: 12px 16px 12px 44px;
   position: relative;
   color: var(--chat-text);
-  font-size: 13px;
+  font-size: 13.5px;
   line-height: 1.55;
   margin: 0;
 }
-.lutin-md > ol > li::before,
-.lutin-md > ol ol > li::before {
+.lutin-md > ol > li > p,
+.lutin-md > ul > li > p { margin: 0 0 6px; }
+.lutin-md > ol > li > p:last-child,
+.lutin-md > ul > li > p:last-child { margin-bottom: 0; }
+.lutin-md > ol > li > p:first-child,
+.lutin-md > ul > li > p:first-child { margin-top: 0; }
+.lutin-md > ol > li::before {
+  counter-increment: lutin-meta;
   content: counter(lutin-meta);
   position: absolute;
   left: 14px;
@@ -435,6 +496,47 @@
   align-items: center;
   justify-content: center;
 }
+.lutin-md > ul > li::before {
+  content: "";
+  position: absolute;
+  left: 21px;
+  top: 19px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+}
+/* Nested lists inside the card-style outer fall back to plain glyphs. */
+.lutin-md > ol ol,
+.lutin-md > ol ul,
+.lutin-md > ul ol,
+.lutin-md > ul ul {
+  display: block;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0 0 0 22px;
+  margin: 6px 0;
+  gap: 0;
+}
+.lutin-md > ol ol { list-style: decimal; }
+.lutin-md > ol ul,
+.lutin-md > ul ul { list-style: disc; }
+.lutin-md > ol ol > li,
+.lutin-md > ol ul > li,
+.lutin-md > ul ol > li,
+.lutin-md > ul ul > li {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 4px 0;
+  font-size: inherit;
+}
+.lutin-md > ol ol > li::before,
+.lutin-md > ol ul > li::before,
+.lutin-md > ul ol > li::before,
+.lutin-md > ul ul > li::before { content: none; }
 .lutin-md > ol > li > p:last-child,
 .lutin-md > ol ol > li > p:last-child { margin-bottom: 0; }
 .lutin-md > ol > li > p:first-child,
@@ -547,7 +649,7 @@
   width: 100%;
   border-collapse: collapse;
   margin: 12px 0 18px;
-  font-size: 13px;
+  font-size: 13.5px;
   background: var(--chat-bg-1);
   border: 1px solid var(--chat-border);
   border-radius: var(--chat-r-md);
@@ -556,7 +658,7 @@
 .lutin-md th {
   background: var(--chat-surface);
   color: var(--chat-text-faint);
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -575,27 +677,47 @@
 /* ----- Tool call ----- */
 
 .lutin-chat__tool {
-  align-self: flex-start;
-  max-width: min(720px, 100%);
-  background: var(--chat-surface);
+  align-self: stretch;
+  width: 100%;
+  background: var(--chat-bg-1);
   border: 1px solid var(--chat-border-strong);
   border-radius: var(--chat-r-md);
   font-size: var(--chat-fs-md);
   overflow: hidden;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+.lutin-chat__tool[data-state="running"] {
+  border-color: var(--chat-accent-soft);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25), 0 0 0 1px var(--chat-accent-soft);
+}
+.lutin-chat__tool[data-state="failed"] {
+  border-color: var(--chat-err-border);
+}
+.lutin-chat__tool[data-state="pending"] {
+  border-color: var(--chat-accent);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25), 0 0 0 1px var(--chat-accent-soft);
 }
 .lutin-chat__tool-head {
   display: flex;
   align-items: center;
   gap: var(--chat-s-2);
-  padding: 6px var(--chat-s-3);
+  padding: 9px var(--chat-s-3);
   font-family: var(--chat-font-mono);
+  font-size: 13px;
   /* Whole header is a button: drop default chrome but keep a focus ring. */
-  background: transparent;
+  background: var(--chat-surface);
   border: 0;
+  border-bottom: 1px solid var(--chat-border);
   width: 100%;
   text-align: left;
   color: inherit;
   cursor: pointer;
+}
+.lutin-chat__tool:not(:has(.lutin-chat__tool-detail)) .lutin-chat__tool-head {
+  border-bottom: 0;
+}
+.lutin-chat__tool-head:hover {
+  background: var(--chat-surface-2);
 }
 .lutin-chat__tool-head:focus-visible {
   outline: 2px solid var(--chat-focus-ring);
@@ -603,13 +725,31 @@
 }
 .lutin-chat__tool-caret {
   color: var(--chat-text-faint);
-  font-size: var(--chat-fs-sm);
+  font-size: 12px;
   width: 0.9em;
   flex: none;
 }
+/* State dot: replaces the chevron in the header. Colored disc shows
+ * the tool's outcome at a glance. Pending/running pulses; completed
+ * is a calm green; failed is red. */
+.lutin-chat__tool-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--chat-text-dim);
+  box-shadow: 0 0 0 2px var(--chat-bg-1);
+}
+.lutin-chat__tool-dot[data-state="completed"] { background: #6db97a; }
+.lutin-chat__tool-dot[data-state="failed"] { background: var(--chat-err); }
+.lutin-chat__tool-dot[data-state="running"],
+.lutin-chat__tool-dot[data-state="pending"] {
+  background: var(--chat-accent);
+  animation: lutin-chat-pulse 1.4s ease-in-out infinite;
+}
 .lutin-chat__tool-summary {
   color: var(--chat-text-faint);
-  font-size: var(--chat-fs-sm);
+  font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -624,7 +764,7 @@
   gap: var(--chat-s-1);
 }
 .lutin-chat__tool-label {
-  font-size: var(--chat-fs-sm);
+  font-size: 11.5px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--chat-text-faint);
@@ -632,10 +772,15 @@
   margin-top: var(--chat-s-1);
 }
 .lutin-chat__tool-label:first-child { margin-top: 0; }
-.lutin-chat__tool-name { color: var(--chat-text); font-weight: 500; flex: none; }
+.lutin-chat__tool-name {
+  color: var(--chat-text);
+  font-weight: 600;
+  font-size: 13px;
+  flex: none;
+}
 .lutin-chat__tool-state {
   margin-left: auto;
-  font-size: var(--chat-fs-sm);
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -646,10 +791,90 @@
 .lutin-chat__tool-body {
   padding: var(--chat-s-2) var(--chat-s-3);
   font-family: var(--chat-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
   color: var(--chat-text-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* Structured tool input: each top-level field is a labelled row. The
+ * key column sizes to its content but caps so long-running prose values
+ * still get most of the width. Block strings and JSON dumps drop onto
+ * their own line beneath the key. */
+.lutin-chat__tool-args {
+  margin: 0;
+  padding: var(--chat-s-1) var(--chat-s-3) var(--chat-s-2);
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) 1fr;
+  column-gap: var(--chat-s-3);
+  row-gap: 6px;
+  font-family: var(--chat-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.lutin-chat__tool-arg {
+  display: contents;
+}
+.lutin-chat__tool-arg-key {
+  margin: 0;
+  color: var(--chat-text-faint);
+  font-weight: 600;
+  white-space: nowrap;
+  align-self: start;
+}
+.lutin-chat__tool-arg-val {
+  margin: 0;
+  color: var(--chat-text-muted);
+  min-width: 0;
+  word-break: break-word;
+}
+.lutin-chat__tool-arg-str {
+  color: var(--chat-text);
+}
+.lutin-chat__tool-arg-str--block {
+  display: block;
+  white-space: pre-wrap;
+  background: var(--chat-bg-1);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-r-sm);
+  padding: 6px 10px;
+  max-height: 280px;
+  overflow: auto;
+}
+.lutin-chat__tool-arg-bool { color: var(--chat-accent); }
+.lutin-chat__tool-arg-num { color: #d4b787; }
+.lutin-chat__tool-arg-null {
+  color: var(--chat-text-dim);
+  font-style: italic;
+}
+.lutin-chat__tool-arg-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lutin-chat__tool-arg-chip {
+  background: var(--chat-bg-1);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-r-sm);
+  padding: 1px 6px;
+  font-size: 12px;
+  color: var(--chat-text);
+}
+.lutin-chat__tool-arg-json {
+  margin: 0;
+  background: var(--chat-bg-1);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-r-sm);
+  padding: 6px 10px;
+  font-family: var(--chat-font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--chat-text-muted);
+  white-space: pre;
+  max-height: 280px;
+  overflow: auto;
+}
+
 .lutin-chat__tool-actions {
   display: flex;
   gap: var(--chat-s-1);

@@ -150,6 +150,17 @@ pub struct SessionSummary {
     pub last_activity: Option<String>,
     /// One-line preview body. Chat: last assistant message snippet.
     pub preview: Option<String>,
+    /// Active persona id/name (chat workflow). Other workflows leave None.
+    pub persona: Option<String>,
+    /// Model identifier the workflow is currently using (e.g. provider/model).
+    pub model: Option<String>,
+    /// Cumulative tokens spent across the lifetime of the session.
+    pub total_prompt_tokens: Option<u64>,
+    pub total_completion_tokens: Option<u64>,
+    /// Most recent prompt-token count — proxy for current context-window fill.
+    pub context_tokens: Option<u32>,
+    /// Number of visible (user/assistant) messages in the conversation.
+    pub message_count: Option<u32>,
 }
 
 /// Where a started workflow session listens, and the token a client
@@ -240,6 +251,15 @@ pub enum Request {
     /// `toml::Value`, swapping the providers key, and writing back.
     SetProviders {
         providers: Vec<ProviderConfig>,
+    },
+    /// Read the `[web_search]` section of the global `settings.toml`.
+    /// Mirrors the providers RPC: only this section round-trips through
+    /// CP; other settings sections are still edited out-of-band and
+    /// preserved verbatim on save.
+    GetWebSearch,
+    /// Replace the `[web_search]` section of the global `settings.toml`.
+    SetWebSearch {
+        settings: WebSearchSettings,
     },
     /// Open a streaming transcription. Desktop calls this on PTT down,
     /// then pumps `TranscribeChunk` frames carrying mic samples while
@@ -571,6 +591,15 @@ pub struct ProviderConfig {
 /// to match `lutin_settings::ProviderKind` so the on-disk
 /// `settings.toml` written by the CP handler stays compatible with
 /// the engine-side loader.
+/// Plain DTO mirroring `lutin_settings::WebSearchSettings`. Held here
+/// for the same reason as [`ProviderConfig`] — keeps the protocol crate
+/// dep-light.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSearchSettings {
+    #[serde(default)]
+    pub brave_api_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -623,6 +652,10 @@ pub enum ResponseOk {
     Providers(Vec<ProviderConfig>),
     /// Reply to `SetProviders`.
     ProvidersSaved,
+    /// Reply to `GetWebSearch`.
+    WebSearch(WebSearchSettings),
+    /// Reply to `SetWebSearch`.
+    WebSearchSaved,
     /// Reply to `OpenTranscription`.
     TranscriptionOpened {
         stream_id: TranscriptionStreamId,

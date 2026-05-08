@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lutin — Mobile · Bottom Tabs + Drawer</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --surface: #16161a;
+    --surface-2: #1c1c21;
+    --border: #1b1b20;
+    --border-strong: #23232a;
+    --text: #f2f2f4;
+    --text-muted: #e2e2e6;
+    --text-faint: #b4b4bc;
+    --text-dim: #8a8a93;
+    --accent: #e8743b;
+    --accent-hover: #f08246;
+    --accent-soft: rgba(232,116,59,0.14);
+    --err: #b86a6a;
+    --r-sm: 4px;
+    --r-md: 6px;
+    --r-lg: 10px;
+    --font: -apple-system, "Inter", "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #050506;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    padding: 32px 16px 64px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    justify-content: center;
+    align-items: flex-start;
+  }
+  .frame-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .caption {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  /* Phone frame ~ iPhone 14 Pro silhouette */
+  .phone {
+    width: 390px;
+    height: 844px;
+    background: var(--bg);
+    border-radius: 44px;
+    border: 8px solid #18181c;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.55), inset 0 0 0 1px #2a2a31;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  .notch {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 110px; height: 28px; background: #000; border-radius: 18px; z-index: 50;
+  }
+  .status-bar {
+    height: 44px; flex: 0 0 44px;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0 26px; font-size: 13px; font-weight: 600; color: var(--text);
+  }
+  .status-bar .right { display: flex; gap: 5px; align-items: center; }
+  .status-bar svg { width: 14px; height: 14px; }
+
+  /* App header */
+  .app-header {
+    flex: 0 0 52px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .app-header .title {
+    font-size: 15px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .app-header .sub { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+  .icon-btn {
+    width: 36px; height: 36px; border-radius: var(--r-md);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-faint); background: transparent; border: 1px solid transparent;
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--surface); color: var(--text); }
+  .icon-btn svg { width: 18px; height: 18px; }
+  .grow { flex: 1; }
+
+  /* Pulsing streaming dot */
+  .pulse-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 0 var(--accent-soft);
+    animation: pulse 1.6s ease-out infinite;
+    flex: 0 0 auto;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(232,116,59,0.55); }
+    70%  { box-shadow: 0 0 0 10px rgba(232,116,59,0); }
+    100% { box-shadow: 0 0 0 0 rgba(232,116,59,0); }
+  }
+
+  /* Body / scroll area */
+  .body {
+    flex: 1 1 auto; overflow-y: auto;
+    padding: 14px 14px 20px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+
+  /* Bottom tab bar */
+  .tabbar {
+    flex: 0 0 76px;
+    border-top: 1px solid var(--border);
+    background: rgba(11,11,13,0.92);
+    backdrop-filter: blur(20px);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 6px 4px 18px;
+  }
+  .tab {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; padding: 6px 0;
+    color: var(--text-dim); font-size: 10px; font-weight: 500;
+    border-radius: var(--r-md); cursor: pointer;
+  }
+  .tab svg { width: 22px; height: 22px; stroke-width: 1.8; }
+  .tab.active { color: var(--accent); }
+  .tab.active svg { color: var(--accent); }
+
+  /* Composer */
+  .composer {
+    flex: 0 0 auto;
+    padding: 8px 10px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+    display: flex; align-items: flex-end; gap: 8px;
+  }
+  .composer .field {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    resize: none;
+    min-height: 40px;
+    max-height: 120px;
+    outline: none;
+  }
+  .composer .field::placeholder { color: var(--text-dim); }
+  .composer .field:focus { border-color: var(--accent); }
+  .pill-btn {
+    width: 40px; height: 40px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border-strong); background: var(--surface);
+    color: var(--text-faint); cursor: pointer; flex: 0 0 auto;
+  }
+  .pill-btn.send { background: var(--accent); border-color: var(--accent); color: #1a0d05; }
+  .pill-btn.send:hover { background: var(--accent-hover); }
+  .pill-btn svg { width: 18px; height: 18px; }
+
+  /* Messages */
+  .msg-row { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+  .msg-row.user { align-items: flex-end; }
+  .bubble {
+    max-width: 86%;
+    padding: 10px 13px;
+    border-radius: 14px;
+    font-size: 14px; line-height: 1.5;
+    color: var(--text);
+    word-wrap: break-word;
+  }
+  .bubble.user {
+    background: var(--accent);
+    color: #1a0d05;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.assistant {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-bottom-left-radius: 4px;
+    max-width: 100%;
+  }
+  .bubble.assistant h4 {
+    margin: 2px 0 6px; font-size: 14px; font-weight: 600; color: var(--text);
+  }
+  .bubble.assistant p { margin: 0 0 8px; color: var(--text-muted); }
+  .bubble.assistant p:last-child { margin-bottom: 0; }
+  .meta {
+    font-size: 10px; color: var(--text-dim);
+    padding: 0 6px;
+  }
+
+  /* Card list (rendered list items) */
+  .card-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 2px; }
+  .card-list .card {
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: 8px 10px;
+    display: flex; gap: 8px; align-items: flex-start;
+    font-size: 13px; color: var(--text-muted);
+  }
+  .card-list .card .bullet {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--accent); margin-top: 8px; flex: 0 0 auto;
+  }
+
+  /* Tool call */
+  .tool {
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    overflow: hidden;
+    font-size: 13px;
+  }
+  .tool .head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    color: var(--text-muted);
+  }
+  .tool .head .name { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .tool .head .args { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .tool .head .chev { color: var(--text-dim); }
+  .state-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+  }
+  .state-dot.ok { background: #5fa37b; }
+  .state-dot.run { background: var(--accent); animation: pulse 1.6s ease-out infinite; }
+  .state-dot.err { background: var(--err); }
+  .tool .body {
+    border-top: 1px solid var(--border-strong);
+    padding: 10px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text-faint);
+    background: var(--bg);
+    white-space: pre-wrap;
+  }
+
+  /* Thinking */
+  .thinking {
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--r-md);
+    font-size: 13px;
+  }
+  .thinking .head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-style: italic;
+  }
+  .thinking .body {
+    padding: 0 10px 10px;
+    color: var(--text-faint);
+    font-size: 12px;
+    font-style: italic;
+    line-height: 1.55;
+  }
+
+  /* Sessions list */
+  .session-search {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: 9px 12px;
+    font-size: 13px;
+    color: var(--text-faint);
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .session-row {
+    display: flex; gap: 12px; align-items: center;
+    padding: 12px 10px;
+    border-radius: var(--r-md);
+    cursor: pointer;
+  }
+  .session-row:hover { background: var(--surface); }
+  .session-row.active { background: var(--accent-soft); }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    color: var(--text-muted);
+    flex: 0 0 auto;
+  }
+  .avatar.a1 { background: linear-gradient(135deg, #e8743b, #b8431a); color: #fff; border-color: transparent; }
+  .avatar.a2 { background: linear-gradient(135deg, #5b8def, #2d4ea8); color: #fff; border-color: transparent; }
+  .avatar.a3 { background: linear-gradient(135deg, #6abf8a, #2f6b48); color: #fff; border-color: transparent; }
+  .session-row .info { flex: 1; min-width: 0; }
+  .session-row .info .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .session-row .info .title { font-size: 14px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-row .info .ts { font-size: 11px; color: var(--text-dim); flex: 0 0 auto; }
+  .session-row .info .preview { font-size: 12px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-row .badge {
+    background: var(--accent); color: #1a0d05;
+    font-size: 10px; font-weight: 700;
+    border-radius: 999px; padding: 2px 6px;
+    flex: 0 0 auto;
+  }
+  .section-label {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 4px 4px 6px;
+    margin-top: 4px;
+  }
+
+  /* Workflow picker */
+  .wf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .wf-card {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-lg);
+    padding: 14px 12px;
+    display: flex; flex-direction: column; gap: 8px;
+    cursor: pointer; min-height: 124px;
+    position: relative;
+  }
+  .wf-card:hover { border-color: var(--accent); }
+  .wf-card.featured { border-color: var(--accent); background: linear-gradient(180deg, rgba(232,116,59,0.10), var(--surface)); }
+  .wf-card .wf-icon {
+    width: 32px; height: 32px; border-radius: var(--r-md);
+    background: var(--accent-soft);
+    color: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .wf-card .wf-icon svg { width: 18px; height: 18px; }
+  .wf-card .wf-name { font-size: 14px; font-weight: 600; color: var(--text); }
+  .wf-card .wf-desc { font-size: 12px; color: var(--text-faint); line-height: 1.4; }
+  .wf-card .wf-tag {
+    position: absolute; top: 10px; right: 10px;
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .wf-card.featured .wf-tag { color: var(--accent); }
+
+  /* Settings */
+  .settings-section { margin-bottom: 6px; }
+  .settings-section h3 {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-dim); font-weight: 600;
+    margin: 14px 4px 6px;
+  }
+  .settings-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+  }
+  .settings-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px; color: var(--text);
+  }
+  .settings-row:last-child { border-bottom: 0; }
+  .settings-row .label { flex: 1; }
+  .settings-row .value { color: var(--text-faint); font-size: 13px; }
+  .settings-row .chev { color: var(--text-dim); }
+  .switch {
+    width: 36px; height: 20px; border-radius: 999px;
+    background: var(--border-strong); position: relative; flex: 0 0 auto;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--text-faint); transition: all 0.2s;
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { left: 18px; background: #fff; }
+
+  /* Drawer (illustration of sessions-as-drawer alt) */
+  .drawer-demo { position: relative; }
+  .drawer-overlay {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.5);
+    pointer-events: none;
+  }
+  .drawer-panel {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    width: 78%;
+    background: var(--bg);
+    border-right: 1px solid var(--border-strong);
+    box-shadow: 4px 0 24px rgba(0,0,0,0.5);
+    display: flex; flex-direction: column;
+    padding: 14px;
+    gap: 10px;
+  }
+
+  /* Chips row in header */
+  .wf-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 8px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 999px;
+    font-size: 11px; font-weight: 500;
+    border: 1px solid rgba(232,116,59,0.25);
+  }
+  .wf-chip svg { width: 11px; height: 11px; }
+</style>
+</head>
+<body>
+
+<!--
+  Lutin mobile · Bottom Tabs + Drawer mockup
+  ------------------------------------------
+  Navigation rationale:
+   * Bottom tab bar has 4 destinations: Chat, Sessions, Workflows, Settings.
+   * "Chat" is the active session (foregrounded). "Sessions" is its own tab,
+     not a left drawer — on a phone the session list deserves a full-screen
+     home, and a drawer competes with the system back-swipe gesture.
+   * "Workflows" is first-class because more workflow types are coming
+     (chat is just one). New session creation always routes through here.
+   * Settings gets its own tab so power-user knobs (Connection / Audio /
+     Notifications / Personas) stay one tap away.
+   * The hamburger in the chat header still opens a quick "session switcher"
+     drawer (shown in the 5th frame) so users can hop sessions without
+     leaving the conversation context — drawer + tab are complementary,
+     not redundant.
+-->
+
+<div class="page">
+
+  <!-- ============================================================ -->
+  <!-- 1. CHAT SCREEN                                                -->
+  <!-- ============================================================ -->
+  <div class="frame-wrap">
+    <div class="caption">1 · Chat (active session)</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="status-bar">
+        <span>9:41</span>
+        <span class="right">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 17h2v3H2zm4-3h2v6H6zm4-4h2v10h-2zm4-4h2v14h-2zm4-4h2v18h-2z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14 0M8.5 16.4a6 6 0 0 1 7 0M12 20h.01"/></svg>
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 7h18v10H2zm19 3v4h1v-4z"/></svg>
+        </span>
+      </div>
+
+      <div class="app-header">
+        <button class="icon-btn" title="Open sessions drawer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </button>
+        <div>
+          <div class="title">
+            Lumen
+            <span class="pulse-dot" title="streaming"></span>
+          </div>
+          <div class="sub">Coding assistant · streaming</div>
+        </div>
+        <div class="grow"></div>
+        <button class="icon-btn" title="More">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+        </button>
+      </div>
+
+      <div class="body">
+        <div class="msg-row user">
+          <div class="bubble user">Can you summarize the SNAC encoder changes and check if tests pass?</div>
+          <div class="meta">9:38</div>
+        </div>
+
+        <div class="msg-row">
+          <div class="thinking">
+            <div class="head">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/></svg>
+              <span>Thinking · 4s</span>
+              <span class="grow"></span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+            <div class="body">Need to inspect snac.rs, then run cargo test for lutin-tts. Let me read the file first…</div>
+          </div>
+        </div>
+
+        <div class="msg-row">
+          <div class="tool">
+            <div class="head">
+              <span class="state-dot ok"></span>
+              <span class="name">read_file</span>
+              <span class="args">crates/lutin-tts/src/orpheus/snac.rs</span>
+              <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 15l-6-6-6 6"/></svg>
+            </div>
+            <div class="body">// expanded — 312 lines read
+pub struct SnacEncoder {
+    sample_rate: u32,
+    codebook: Codebook,
+    …
+}</div>
+          </div>
+        </div>
+
+        <div class="msg-row">
+          <div class="tool">
+            <div class="head">
+              <span class="state-dot run"></span>
+              <span class="name">run_command</span>
+              <span class="args">cargo test -p lutin-tts</span>
+              <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg-row">
+          <div class="bubble assistant">
+            <h4>SNAC encoder summary</h4>
+            <p>Three meaningful changes landed in the recent commits:</p>
+            <div class="card-list">
+              <div class="card"><span class="bullet"></span><span>Switched residual quantizer to 4 codebooks at 8/16/32/64 strides for tighter lo-band fidelity.</span></div>
+              <div class="card"><span class="bullet"></span><span>Added streaming chunk handoff so synthesis no longer blocks the audio thread.</span></div>
+              <div class="card"><span class="bullet"></span><span>Replaced f32 windowing with SIMD path on aarch64 — about 2.3x faster on M-series.</span></div>
+            </div>
+            <p style="margin-top: 8px;">Tests are still running; I'll follow up once they finish.</p>
+          </div>
+          <div class="meta">9:39 · Lumen</div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <button class="pill-btn" title="Voice">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        </button>
+        <textarea class="field" rows="1" placeholder="Message Lumen…"></textarea>
+        <button class="pill-btn send" title="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l14-7-5 16-3-7-6-2z"/></svg>
+        </button>
+      </div>
+
+      <nav class="tabbar" data-tabs="0"></nav>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 2. SESSIONS                                                  -->
+  <!-- ============================================================ -->
+  <div class="frame-wrap">
+    <div class="caption">2 · Sessions</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="status-bar">
+        <span>9:41</span>
+        <span class="right">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 17h2v3H2zm4-3h2v6H6zm4-4h2v10h-2zm4-4h2v14h-2zm4-4h2v18h-2z"/></svg>
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 7h18v10H2zm19 3v4h1v-4z"/></svg>
+        </span>
+      </div>
+
+      <div class="app-header">
+        <div>
+          <div class="title">Sessions</div>
+          <div class="sub">12 conversations</div>
+        </div>
+        <div class="grow"></div>
+        <button class="icon-btn" title="New">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+
+      <div class="body">
+        <div class="session-search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <span>Search sessions…</span>
+        </div>
+
+        <div class="section-label">Pinned</div>
+        <div class="session-row active">
+          <div class="avatar a1">L</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Lumen — coding assistant</span>
+              <span class="ts">now</span>
+            </div>
+            <div class="preview">SNAC encoder summary…</div>
+          </div>
+          <span class="pulse-dot"></span>
+        </div>
+        <div class="session-row">
+          <div class="avatar a2">M</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Marlow — research</span>
+              <span class="ts">2h</span>
+            </div>
+            <div class="preview">Found 3 relevant papers on RVQ codecs…</div>
+          </div>
+          <span class="badge">2</span>
+        </div>
+
+        <div class="section-label">Recent</div>
+        <div class="session-row">
+          <div class="avatar a3">T</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Trip planner</span>
+              <span class="ts">Yesterday</span>
+            </div>
+            <div class="preview">Lisbon → Porto train options compared</div>
+          </div>
+        </div>
+        <div class="session-row">
+          <div class="avatar">FB</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Daily standup notes</span>
+              <span class="ts">Mon</span>
+            </div>
+            <div class="preview">Voice transcript · 12 min</div>
+          </div>
+        </div>
+        <div class="session-row">
+          <div class="avatar">SK</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Refactor Tauri overlay</span>
+              <span class="ts">May 4</span>
+            </div>
+            <div class="preview">Closed · 38 messages</div>
+          </div>
+        </div>
+        <div class="session-row">
+          <div class="avatar">CH</div>
+          <div class="info">
+            <div class="top">
+              <span class="title">Cooking — Thai curry</span>
+              <span class="ts">May 2</span>
+            </div>
+            <div class="preview">Substituted galangal with ginger + lime…</div>
+          </div>
+        </div>
+      </div>
+
+      <nav class="tabbar" data-tabs="1"></nav>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 3. WORKFLOWS                                                 -->
+  <!-- ============================================================ -->
+  <div class="frame-wrap">
+    <div class="caption">3 · Workflow picker</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="status-bar"><span>9:41</span><span class="right"></span></div>
+      <div class="app-header">
+        <div>
+          <div class="title">New session</div>
+          <div class="sub">Pick a workflow to start with</div>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="section-label">Featured</div>
+        <div class="wf-grid">
+          <div class="wf-card featured">
+            <span class="wf-tag">Default</span>
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+            <div class="wf-name">Chat</div>
+            <div class="wf-desc">Open-ended conversation with tools, voice and personas.</div>
+          </div>
+          <div class="wf-card">
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div>
+            <div class="wf-name">Voice notes</div>
+            <div class="wf-desc">Push-to-talk capture with auto-summarize.</div>
+          </div>
+          <div class="wf-card">
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 17l9 4 9-4M3 12l9 4 9-4"/></svg></div>
+            <div class="wf-name">Research</div>
+            <div class="wf-desc">Multi-source web search with citations.</div>
+          </div>
+          <div class="wf-card">
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></div>
+            <div class="wf-name">Code review</div>
+            <div class="wf-desc">Diff-aware reviewer with repo context.</div>
+          </div>
+        </div>
+
+        <div class="section-label" style="margin-top:14px;">More</div>
+        <div class="wf-grid">
+          <div class="wf-card">
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></div>
+            <div class="wf-name">Daily plan</div>
+            <div class="wf-desc">Calendar + tasks rollup.</div>
+          </div>
+          <div class="wf-card">
+            <div class="wf-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z"/></svg></div>
+            <div class="wf-name">Custom…</div>
+            <div class="wf-desc">Build your own workflow.</div>
+          </div>
+        </div>
+      </div>
+
+      <nav class="tabbar" data-tabs="2"></nav>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 4. SETTINGS                                                  -->
+  <!-- ============================================================ -->
+  <div class="frame-wrap">
+    <div class="caption">4 · Settings</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="status-bar"><span>9:41</span><span class="right"></span></div>
+      <div class="app-header">
+        <div>
+          <div class="title">Settings</div>
+          <div class="sub">william.enander@deved.se</div>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="settings-section">
+          <h3>Connection</h3>
+          <div class="settings-group">
+            <div class="settings-row">
+              <span class="label">Server</span>
+              <span class="value">lutin.local:8788</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="settings-row">
+              <span class="label">Model</span>
+              <span class="value">Claude Opus 4.7</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="settings-row">
+              <span class="label">API key</span>
+              <span class="value">sk-…f4a2</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Audio</h3>
+          <div class="settings-group">
+            <div class="settings-row">
+              <span class="label">TTS voice</span>
+              <span class="value">Orpheus · Lumen</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="settings-row">
+              <span class="label">Auto-play replies</span>
+              <span class="switch on"></span>
+            </div>
+            <div class="settings-row">
+              <span class="label">Wake word</span>
+              <span class="value">"Hey Lutin"</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Notifications</h3>
+          <div class="settings-group">
+            <div class="settings-row"><span class="label">Push when complete</span><span class="switch on"></span></div>
+            <div class="settings-row"><span class="label">Tool-call alerts</span><span class="switch"></span></div>
+            <div class="settings-row"><span class="label">Quiet hours</span><span class="value">22:00 — 7:30</span><svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Personas</h3>
+          <div class="settings-group">
+            <div class="settings-row">
+              <div class="avatar a1" style="width:28px;height:28px;font-size:11px;">L</div>
+              <span class="label">Lumen</span>
+              <span class="value">Default</span>
+            </div>
+            <div class="settings-row">
+              <div class="avatar a2" style="width:28px;height:28px;font-size:11px;">M</div>
+              <span class="label">Marlow</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="settings-row">
+              <span class="label" style="color: var(--accent);">+ Add persona</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <nav class="tabbar" data-tabs="3"></nav>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 5. DRAWER OVER CHAT                                          -->
+  <!-- ============================================================ -->
+  <div class="frame-wrap">
+    <div class="caption">5 · Quick session drawer (over chat)</div>
+    <div class="phone drawer-demo">
+      <div class="notch"></div>
+      <div class="status-bar"><span>9:41</span><span class="right"></span></div>
+      <div class="app-header">
+        <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+        <div><div class="title">Lumen <span class="pulse-dot"></span></div><div class="sub">Coding assistant</div></div>
+      </div>
+      <div class="body">
+        <div class="msg-row user"><div class="bubble user">…</div></div>
+        <div class="msg-row"><div class="bubble assistant">…</div></div>
+      </div>
+      <div class="composer">
+        <button class="pill-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/></svg></button>
+        <textarea class="field" rows="1" placeholder="Message…"></textarea>
+        <button class="pill-btn send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12l14-7-5 16-3-7-6-2z"/></svg></button>
+      </div>
+      <nav class="tabbar" data-tabs="0"></nav>
+
+      <div class="drawer-overlay"></div>
+      <div class="drawer-panel">
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 4px 8px;border-bottom:1px solid var(--border);">
+          <span class="wf-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Chat
+          </span>
+          <span style="color: var(--text-dim); font-size: 11px;">workflow</span>
+        </div>
+        <div class="session-row active">
+          <div class="avatar a1">L</div>
+          <div class="info"><div class="top"><span class="title">Lumen</span><span class="ts">now</span></div><div class="preview">SNAC encoder summary…</div></div>
+        </div>
+        <div class="session-row">
+          <div class="avatar a2">M</div>
+          <div class="info"><div class="top"><span class="title">Marlow</span><span class="ts">2h</span></div><div class="preview">Found 3 papers…</div></div>
+        </div>
+        <div class="session-row">
+          <div class="avatar a3">T</div>
+          <div class="info"><div class="top"><span class="title">Trip planner</span><span class="ts">1d</span></div><div class="preview">Lisbon → Porto…</div></div>
+        </div>
+        <div style="margin-top:auto;padding-top:8px;border-top:1px solid var(--border);">
+          <div class="session-row" style="color: var(--accent);">
+            <div class="avatar" style="background: var(--accent-soft); color: var(--accent); border-color: transparent;">+</div>
+            <div class="info"><div class="title" style="color: var(--accent);">New session…</div><div class="preview">Pick a workflow</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script>
+  // Render the bottom tab bar across all 5 phone frames.
+  // The data-tabs attribute is the index of the active tab.
+  const TABS = [
+    { label: "Chat",      svg: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>' },
+    { label: "Sessions",  svg: '<path d="M4 6h16M4 12h16M4 18h10"/>' },
+    { label: "Workflows", svg: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>' },
+    { label: "Settings",  svg: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>' },
+  ];
+  document.querySelectorAll(".tabbar[data-tabs]").forEach(bar => {
+    const active = +bar.dataset.tabs;
+    bar.innerHTML = TABS.map((t, i) =>
+      `<div class="tab${i === active ? " active" : ""}">
+         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">${t.svg}</svg>
+         <span>${t.label}</span>
+       </div>`).join("");
+  });
+</script>
+</body>
+</html>

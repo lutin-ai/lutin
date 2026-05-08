@@ -240,6 +240,7 @@ name = "chat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "futures-util",
  "lutin-agent-sdk",
@@ -1665,6 +1666,7 @@ dependencies = [
 name = "lutin-workflow-sdk"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "lutin-agent-sdk",
  "lutin-entities",
  "lutin-llm",

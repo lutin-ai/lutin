@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   setActiveSession,
   ttsCancel,
@@ -284,6 +285,20 @@ export function PluginIframe(props: Props) {
       capabilities: opened.manifest.capabilities ?? [],
     }).catch(() => { /* non-fatal — gate falls back to clipboard */ });
 
+    // Markdown links inside the iframe can't navigate the system
+    // browser themselves (sandbox blocks `target="_blank"` + popups,
+    // and a default click would replace the iframe document with the
+    // remote page). The iframe forwards click intent here as a
+    // `lutin-open-url` window message; we hand the URL to the OS.
+    const onOpenUrl = (e: MessageEvent) => {
+      if (e.source !== iframe.contentWindow) return;
+      const data = e.data as { type?: string; url?: string } | null;
+      if (!data || data.type !== "lutin-open-url" || typeof data.url !== "string") return;
+      if (!/^(https?|mailto):/i.test(data.url)) return;
+      openUrl(data.url).catch(() => { /* non-fatal */ });
+    };
+    window.addEventListener("message", onOpenUrl);
+
     const targetOrigin = originOf(opened.url);
     iframe.contentWindow?.postMessage(
       {
@@ -299,6 +314,7 @@ export function PluginIframe(props: Props) {
 
     return () => {
       cancelled = true;
+      window.removeEventListener("message", onOpenUrl);
       // Tear down any TTS streams the workflow opened but didn't
       // close. Without this, the CP-side stream registry leaks slots
       // (and a queued utterance could keep playing after the iframe

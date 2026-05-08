@@ -10,5 +10,21 @@ tokio = { version = "1.52", features = ["sync", "rt"] }
 crossbeam-channel = "0.5"
 encoding_rs = "0.8"
 
-llama-cpp-2 = { version = "0.1.143", features = ["vulkan"] }
-ort = "2.0.0-rc.12"
+llama-cpp-2 = "0.1.143"
+# load-dynamic: we link against a system-built libonnxruntime located via
+# ORT_DYLIB_PATH at runtime. The pyke prebuilt binaries don't ship Blackwell
+# (sm_120) kernels, so we need a from-source ORT built with both CUDA and
+# TensorRT. See README for build instructions.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "tracing", "api-24"] }
+
+[features]
+default = ["cuda"]
+# Nvidia CUDA. Default for Lutin's target hardware (RTX PRO 6000 Blackwell).
+# Enables both the TensorRT and CUDA execution providers in the SNAC decoder;
+# TRT is preferred and CUDA is the fallback for unsupported ops. Both come
+# from the dynamically-loaded libonnxruntime, so the ort/cuda + ort/tensorrt
+# features only opt in to the Rust-side option types.
+cuda = ["llama-cpp-2/cuda", "ort/cuda", "ort/tensorrt"]
+# Cross-vendor GPU fallback. Llama.cpp on Vulkan; SNAC stays on CPU
+# (ort has no Vulkan EP). Pick this for AMD/Intel GPUs.
+vulkan = ["llama-cpp-2/vulkan"]

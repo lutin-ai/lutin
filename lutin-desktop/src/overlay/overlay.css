@@ -7,9 +7,18 @@
   color-scheme: dark;
 }
 
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
 body {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100vh;
+}
+#overlay-root {
+  display: contents;
 }

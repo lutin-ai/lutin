@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
+use crate::projection::MessageProjector;
+
 /// Outcome class for a completed tool call. Distinguishes successful dispatch
 /// from any failure mode (denied by approval, errored, timed out, invalid args)
 /// without conflating them into a single boolean.
@@ -78,6 +80,11 @@ pub struct LoopConfig {
     /// Maximum time to wait between stream events before aborting the round
     /// with `AgentError::StreamStalled`. `None` = no inactivity limit.
     pub stream_inactivity_timeout: Option<Duration>,
+    /// Projector applied to the agent's owned transcript right before each
+    /// round's `CompletionRequest` is built. The agent's `messages` are not
+    /// mutated — only the slice sent to the provider is narrowed. `None` =
+    /// send the full transcript.
+    pub message_projector: Option<MessageProjector>,
 }
 
 impl Default for LoopConfig {
@@ -89,6 +96,7 @@ impl Default for LoopConfig {
             recovery: RecoveryPolicy::FailFast,
             pre_round: None,
             stream_inactivity_timeout: None,
+            message_projector: None,
         }
     }
 }

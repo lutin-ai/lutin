@@ -71,6 +71,10 @@ pub async fn tts_speak(
     text: String,
     speed: TtsSpeed,
 ) -> Result<(), String> {
+    // Speed is applied playback-side (backend-agnostic resample);
+    // CP receives it too in case a future backend grows native rate
+    // control, but it's a no-op there today.
+    state.tts_playback.set_speed(stream_id, speed.as_f32());
     match cp_dispatch(
         &state,
         Request::SpeakTts {

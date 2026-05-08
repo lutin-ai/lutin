@@ -39,13 +39,13 @@ export function MetricsHeader({ meta }: { meta?: MessageMeta }) {
   if (meta.completionTokens !== null && meta.completionTokens !== undefined) {
     parts.push(`${formatTokens(meta.completionTokens)} out`);
   }
-  const ts = formatTimestamp(meta.timestamp);
+  const ts = formatTime(meta.time);
   if (ts) parts.push(ts);
   if (parts.length === 0) return null;
   return (
     <span
       className="lutin-chat__msg-metrics"
-      title={meta.timestamp || undefined}
+      title={meta.time?.toISOString()}
     >
       {parts.join(" · ")}
     </span>
@@ -66,10 +66,13 @@ function formatTokens(n: number): string {
   return `${(n / 1000).toFixed(n < 10_000 ? 2 : 1)}k`;
 }
 
-function formatTimestamp(ts: string): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "";
+/// Render a wall-clock chip. Same-day messages get HH:MM; older
+/// messages get YYYY-MM-DD HH:MM. The "is today?" check reads the
+/// system clock, which is the only impure bit of MetricsHeader —
+/// localized here so a future refactor can inject `now` without
+/// touching anything else.
+function formatTime(d: Date | null): string {
+  if (d === null) return "";
   const now = new Date();
   const sameDay =
     d.getFullYear() === now.getFullYear() &&
@@ -87,10 +90,11 @@ export function UserBubble({ message, actions }: UserMessageProps) {
   const menu = useMessageMenu({ id: message.id, text: message.text, actions });
   return (
     <div className="lutin-chat__msg lutin-chat__msg--user" onContextMenu={menu.onContextMenu}>
-      <div className="lutin-chat__msg-meta">
-        <span className="lutin-chat__msg-role">you</span>
-        <MetricsHeader meta={message.meta} />
-      </div>
+      {message.meta && (
+        <div className="lutin-chat__msg-meta">
+          <MetricsHeader meta={message.meta} />
+        </div>
+      )}
       {menu.editing ? (
         menu.editor
       ) : (
@@ -134,15 +138,14 @@ export function AssistantBubble({ message, actions }: AssistantMessageProps) {
       className="lutin-chat__msg lutin-chat__msg--assistant"
       onContextMenu={menu.onContextMenu}
     >
-      <div className="lutin-chat__msg-meta">
-        <span className="lutin-chat__who">
-          <span className="lutin-chat__role">assistant</span>
-        </span>
-        {streaming && (
-          <span className="lutin-chat__msg-status" aria-live="polite">streaming</span>
-        )}
-        {!streaming && <MetricsHeader meta={message.meta} />}
-      </div>
+      {(streaming || message.meta) && (
+        <div className="lutin-chat__msg-meta">
+          {streaming && (
+            <span className="lutin-chat__msg-status" aria-live="polite">streaming</span>
+          )}
+          {!streaming && <MetricsHeader meta={message.meta} />}
+        </div>
+      )}
       <div className="lutin-chat__msg-body">
         {menu.editing ? (
           menu.editor
@@ -164,6 +167,7 @@ export function AssistantBubble({ message, actions }: AssistantMessageProps) {
 }
 
 export function AgentBubble({ message, actions }: AgentMessageProps) {
+  const [open, setOpen] = useState(false);
   const menu = useMessageMenu({ id: message.id, text: message.text, actions });
   const cls = [
     "lutin-chat__msg",
@@ -172,9 +176,17 @@ export function AgentBubble({ message, actions }: AgentMessageProps) {
   ]
     .filter(Boolean)
     .join(" ");
+  // First non-empty line, used as the collapsed-state preview so the
+  // user can scan agent replies without expanding each one.
+  const preview = message.text.split("\n").find((l) => l.trim().length > 0) ?? "";
   return (
-    <article className={cls} onContextMenu={menu.onContextMenu}>
-      <div className="lutin-chat__msg-meta">
+    <details
+      className={cls}
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      onContextMenu={menu.onContextMenu}
+    >
+      <summary className="lutin-chat__msg-meta lutin-chat__agent-head">
         <span className="lutin-chat__who">
           <span className="lutin-chat__role">{message.agentId}</span>
           {!message.ok && (
@@ -183,13 +195,19 @@ export function AgentBubble({ message, actions }: AgentMessageProps) {
             </span>
           )}
         </span>
+        {!open && preview && (
+          <span className="lutin-chat__agent-preview">{preview}</span>
+        )}
         <MetricsHeader meta={message.meta} />
-      </div>
+        <span className="lutin-chat__thinking-toggle" aria-hidden>
+          {open ? "−" : "+"}
+        </span>
+      </summary>
       <div className="lutin-chat__msg-body">
         {menu.editing ? menu.editor : <Markdown text={message.text} />}
       </div>
       {menu.menu}
-    </article>
+    </details>
   );
 }
 

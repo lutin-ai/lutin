@@ -76,6 +76,11 @@ pub enum Message {
     /// attribution is carried in-band.
     SubAgentReply { agent_id: String, text: String },
     SubAgentFailure { agent_id: String, reason: String },
+    /// Synthetic message produced by compaction — replaces a contiguous
+    /// prefix of older messages with a single condensed summary so the
+    /// model still sees what was dropped. Providers serialize this as a
+    /// user-role turn with bracketed attribution.
+    Summary { text: String },
 }
 
 /// A request to the LLM.

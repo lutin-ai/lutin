@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lutin_control_protocol::ProviderConfig;
+use lutin_control_protocol::{ProviderConfig, WebSearchSettings};
 
 const SETTINGS_FILE: &str = "settings.toml";
 
@@ -94,6 +94,73 @@ pub fn write_providers(
     // than the typed `Settings` so unknown keys (forward-compat fields,
     // user comments lost — toml::Value drops comments either way) don't
     // get dropped on save.
+    let serialized = toml::to_string_pretty(&root)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+pub fn read_web_search(global_config_dir: &Path) -> Result<WebSearchSettings, String> {
+    let path = settings_path(global_config_dir);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(WebSearchSettings::default());
+        }
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let root: toml::Value = toml::from_str(&text)
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let Some(section) = root.get("web_search") else {
+        return Ok(WebSearchSettings::default());
+    };
+    section
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("[web_search]: {e}"))
+}
+
+pub fn write_web_search(
+    global_config_dir: &Path,
+    settings: &WebSearchSettings,
+) -> Result<(), String> {
+    let path = settings_path(global_config_dir);
+
+    // Round-trip through `toml::Value` so sibling sections (providers,
+    // chat, tts, …) survive the rewrite, mirroring `write_providers`.
+    let mut root: toml::Value = match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str(&s)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| format!("{} is not a table", path.display()))?;
+
+    // Build by hand so `None` fields are omitted from disk rather than
+    // serialized as empty strings, matching the providers writer.
+    let mut section = toml::map::Map::new();
+    if let Some(k) = &settings.brave_api_key {
+        section.insert("brave_api_key".into(), toml::Value::String(k.clone()));
+    }
+    if section.is_empty() {
+        // Drop the section entirely when every field is unset, so the
+        // file stays clean instead of accumulating empty `[web_search]`
+        // headers.
+        table.remove("web_search");
+    } else {
+        table.insert("web_search".into(), toml::Value::Table(section));
+    }
+
     let serialized = toml::to_string_pretty(&root)
         .map_err(|e| format!("serialize {}: {e}", path.display()))?;
 

@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lutin — Chat-first mobile mockup</title>
+<style>
+  :root {
+    --bg:#0b0b0d; --surface:#16161a; --surface-2:#1c1c21;
+    --border:#1b1b20; --border-strong:#23232a;
+    --text:#f2f2f4; --text-muted:#e2e2e6; --text-faint:#b4b4bc; --text-dim:#8a8a93;
+    --accent:#e8743b; --accent-hover:#f08246; --accent-soft:rgba(232,116,59,0.14);
+    --accent-line:rgba(232,116,59,0.32); --accent-on:#1a0e07;
+    --err:#b86a6a; --err-soft:rgba(184,106,106,0.14); --err-border:rgba(184,106,106,0.30);
+    --ok:#6db97a;
+    --r-sm:4px; --r-md:6px; --r-lg:10px;
+    --font:-apple-system,"Inter","Segoe UI",sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  }
+  *,*::before,*::after { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:#050507; color:var(--text); font-family:var(--font); -webkit-font-smoothing:antialiased; }
+  .page { padding:48px 16px 96px; display:flex; flex-direction:column; align-items:center; gap:48px; }
+  .page > h1 { font-size:14px; font-weight:600; color:var(--text-faint); letter-spacing:0.08em; text-transform:uppercase; margin:0; }
+  .page > p { color:var(--text-dim); font-size:13px; margin:-32px 0 0; max-width:520px; text-align:center; line-height:1.55; }
+  .frame-wrap { display:flex; flex-direction:column; gap:10px; align-items:center; }
+  .caption { font-size:11.5px; font-weight:600; letter-spacing:0.10em; text-transform:uppercase; color:var(--text-faint); }
+  .caption span { color:var(--text-dim); font-weight:500; letter-spacing:0.04em; text-transform:none; margin-left:8px; }
+  .phone {
+    width:390px; height:844px; background:var(--bg); border-radius:42px;
+    border:1px solid #2a2a31; box-shadow:0 30px 60px rgba(0,0,0,0.55), inset 0 0 0 6px #0a0a0c;
+    overflow:hidden; position:relative; display:flex; flex-direction:column;
+    color:var(--text); font-size:14px; line-height:1.5;
+  }
+  .status-bar {
+    height:44px; flex:none; display:flex; align-items:center; justify-content:space-between;
+    padding:14px 28px 0; font-size:14px; font-weight:600; color:var(--text);
+    font-feature-settings:"tnum"; letter-spacing:0.01em;
+  }
+  .status-bar .right { display:flex; gap:6px; align-items:center; color:var(--text-muted); }
+  .status-bar svg { display:block; }
+  .home-indicator {
+    position:absolute; left:50%; bottom:8px; transform:translateX(-50%);
+    width:134px; height:5px; border-radius:3px; background:rgba(255,255,255,0.55);
+  }
+
+  /* Top bar */
+  .topbar {
+    flex:none; height:52px; padding:0 14px; display:flex; align-items:center; gap:12px;
+    border-bottom:1px solid var(--border); background:var(--bg);
+  }
+  .icon-btn {
+    width:36px; height:36px; border-radius:var(--r-md); display:inline-flex; align-items:center; justify-content:center;
+    background:transparent; border:0; color:var(--text-muted); cursor:pointer;
+  }
+  .icon-btn:hover { background:var(--surface); color:var(--text); }
+  .topbar .who { display:flex; flex-direction:column; gap:1px; flex:1; min-width:0; }
+  .topbar .persona { font-size:14.5px; font-weight:600; color:var(--text); letter-spacing:-0.005em; }
+  .topbar .sub { font-size:11.5px; color:var(--text-dim); display:flex; align-items:center; gap:6px; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pulse 1.4s ease-in-out infinite; flex:none; }
+  .dot.ok { background:var(--ok); animation:none; }
+  .dot.dim { background:var(--text-dim); animation:none; }
+  @keyframes pulse { 0%,100% { opacity:0.3; } 50% { opacity:1; } }
+
+  /* Scrollback */
+  .scroll { flex:1; overflow:hidden; padding:18px 16px 12px; display:flex; flex-direction:column; gap:18px; }
+  .role { font-size:11px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px; }
+  .role.user { color:var(--accent); }
+  .role.assistant { color:var(--accent); }
+
+  .msg-user { align-self:flex-end; max-width:84%; }
+  .bubble-user {
+    background:var(--accent-soft); border:1px solid var(--accent-line); color:var(--text);
+    padding:9px 12px; border-radius:var(--r-md); font-size:14.5px; line-height:1.5;
+  }
+
+  .msg-assistant { align-self:stretch; }
+  .meta { display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:11px; }
+  .meta .who-name { color:var(--text); font-size:13px; font-weight:600; display:inline-flex; gap:6px; align-items:center; }
+  .meta .metrics { margin-left:auto; font-family:var(--mono); font-size:10.5px; color:var(--text-dim); }
+
+  .md h2 { font-size:16px; font-weight:700; margin:2px 0 8px; line-height:1.3; letter-spacing:-0.01em; color:var(--text); }
+  .md p { margin:0 0 10px; font-size:14px; line-height:1.6; color:var(--text); }
+  .md strong { color:var(--text); font-weight:600; }
+  .md em { color:var(--text-muted); font-style:italic; }
+  .md ul { list-style:none; padding:0; margin:10px 0 4px; display:flex; flex-direction:column; gap:8px; }
+  .md ul li {
+    background:#101013; border:1px solid var(--border); border-radius:var(--r-md);
+    padding:10px 14px 10px 38px; position:relative; font-size:13.5px; line-height:1.5; color:var(--text);
+  }
+  .md ul li::before {
+    content:""; position:absolute; left:16px; top:17px;
+    width:6px; height:6px; border-radius:50%; background:var(--accent);
+  }
+  .md ul li strong { font-weight:600; }
+  .md ul li small { display:block; color:var(--text-dim); font-size:12px; margin-top:2px; }
+
+  /* Tool card */
+  .tool {
+    background:#101013; border:1px solid var(--border-strong); border-radius:var(--r-md); overflow:hidden;
+    box-shadow:0 1px 0 rgba(0,0,0,0.25);
+  }
+  .tool[data-state="completed"] { }
+  .tool[data-state="running"] { border-color:var(--accent-soft); box-shadow:0 1px 0 rgba(0,0,0,0.25), 0 0 0 1px var(--accent-soft); }
+  .tool[data-state="pending"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent-soft); }
+  .tool-head {
+    display:flex; align-items:center; gap:10px; padding:10px 12px;
+    background:var(--surface); font-family:var(--mono); font-size:12.5px;
+  }
+  .tool-dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); flex:none; box-shadow:0 0 0 2px #101013; }
+  .tool-dot[data-state="completed"] { background:var(--ok); }
+  .tool-dot[data-state="running"], .tool-dot[data-state="pending"] { background:var(--accent); animation:pulse 1.4s ease-in-out infinite; }
+  .tool-dot[data-state="failed"] { background:var(--err); }
+  .tool-name { color:var(--text); font-weight:600; font-size:13px; flex:none; }
+  .tool-summary { color:var(--text-faint); font-size:12px; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tool-state { font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-faint); }
+  .tool-state[data-state="running"] { color:var(--accent); }
+
+  .tool-args {
+    display:grid; grid-template-columns:minmax(70px,max-content) 1fr; column-gap:12px; row-gap:5px;
+    padding:10px 12px 4px; font-family:var(--mono); font-size:12px; line-height:1.5;
+    border-top:1px solid var(--border);
+  }
+  .tool-args dt { color:var(--text-faint); font-weight:600; margin:0; }
+  .tool-args dd { color:var(--text-muted); margin:0; word-break:break-word; }
+  .tool-args dd .s { color:var(--text); }
+  .tool-args dd .n { color:#d4b787; }
+  .tool-args dd .b { color:var(--accent); }
+  .tool-body {
+    padding:8px 12px 12px; font-family:var(--mono); font-size:12px; line-height:1.55;
+    color:var(--text-muted); white-space:pre-wrap;
+  }
+  .tool-body .label {
+    font-family:var(--font); font-size:10.5px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--text-faint); font-weight:600; margin:6px 0 4px; display:block;
+  }
+
+  /* Thinking */
+  .thinking {
+    border:1px dashed var(--border); border-radius:var(--r-md); padding:0; color:var(--text-dim); opacity:0.78;
+    background:transparent;
+  }
+  .thinking-head {
+    display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:11px;
+    text-transform:uppercase; letter-spacing:0.08em; color:var(--text-faint); font-weight:600;
+  }
+  .thinking-head .caret { margin-left:auto; color:var(--text-faint); font-family:var(--mono); }
+
+  /* Composer */
+  .composer { flex:none; padding:10px 14px 16px; background:var(--bg); border-top:1px solid var(--border); }
+  .composer-row { display:flex; gap:8px; align-items:flex-end; }
+  .composer-input {
+    flex:1; min-height:40px; max-height:120px; resize:none;
+    background:var(--surface); border:1px solid var(--border-strong); color:var(--text);
+    border-radius:var(--r-md); padding:10px 12px; font:inherit; font-size:14.5px; line-height:1.4;
+    font-family:var(--font); outline:none;
+  }
+  .composer-input::placeholder { color:var(--text-dim); }
+  .composer-input:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(232,116,59,0.30); }
+  .btn-mic, .btn-send {
+    width:40px; height:40px; border-radius:var(--r-md); border:0; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center; flex:none;
+  }
+  .btn-mic { background:var(--surface); color:var(--text-muted); border:1px solid var(--border-strong); }
+  .btn-send { background:var(--accent); color:var(--accent-on); }
+  .btn-send:hover { background:var(--accent-hover); }
+
+  /* Drawer */
+  .drawer {
+    position:absolute; inset:0; display:flex;
+    background:rgba(0,0,0,0.5);
+  }
+  .drawer-panel {
+    width:320px; background:var(--bg); border-right:1px solid var(--border-strong);
+    display:flex; flex-direction:column; height:100%;
+  }
+  .drawer-head { padding:14px 16px 8px; display:flex; align-items:center; gap:12px; }
+  .brand { display:flex; align-items:center; gap:8px; flex:1; }
+  .brand-mark {
+    width:28px; height:28px; border-radius:8px;
+    background:linear-gradient(135deg,var(--accent) 0%, #c2562a 100%);
+    display:flex; align-items:center; justify-content:center; color:var(--accent-on); font-weight:800; font-size:13px;
+  }
+  .brand-name { font-weight:700; font-size:15px; letter-spacing:-0.01em; }
+
+  .search {
+    margin:6px 12px 8px; padding:8px 10px; background:var(--surface); border:1px solid var(--border-strong);
+    border-radius:var(--r-md); display:flex; align-items:center; gap:8px; color:var(--text-dim); font-size:13px;
+  }
+  .new-session {
+    margin:8px 12px 12px; padding:11px 14px; border-radius:var(--r-md);
+    background:var(--accent); color:var(--accent-on); font-weight:600; font-size:13.5px;
+    display:flex; align-items:center; gap:10px; cursor:pointer; border:0;
+  }
+  .new-session .pill { margin-left:auto; font-family:var(--mono); font-size:11px; opacity:0.75; background:rgba(0,0,0,0.18); padding:2px 6px; border-radius:4px; }
+
+  .group-label {
+    padding:8px 16px 4px; font-size:10.5px; font-weight:700; text-transform:uppercase;
+    letter-spacing:0.10em; color:var(--text-dim);
+  }
+  .session {
+    display:flex; align-items:center; gap:10px; padding:9px 14px 9px 16px; cursor:pointer;
+    color:var(--text-muted); font-size:13.5px; border-left:2px solid transparent;
+  }
+  .session:hover { background:var(--surface); color:var(--text); }
+  .session.active { background:var(--accent-soft); color:var(--text); border-left-color:var(--accent); }
+  .session .title { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .session .wf { font-family:var(--mono); font-size:10.5px; color:var(--text-dim); padding:1px 6px; border:1px solid var(--border-strong); border-radius:4px; }
+  .session.active .wf { color:var(--accent); border-color:var(--accent-line); }
+  .session .time { font-size:11px; color:var(--text-dim); font-family:var(--mono); }
+  .scroll-list { flex:1; overflow:auto; padding-bottom:8px; }
+
+  .drawer-foot { border-top:1px solid var(--border); padding:10px 12px 14px; display:flex; flex-direction:column; gap:6px; }
+  .persona-row {
+    display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:var(--r-md);
+    background:var(--surface); border:1px solid var(--border-strong); cursor:pointer;
+  }
+  .avatar {
+    width:32px; height:32px; border-radius:50%; flex:none;
+    background:linear-gradient(135deg,#3a4f6b,#1f2a3a); display:flex; align-items:center; justify-content:center;
+    font-size:12px; font-weight:700; color:#dbe7f5;
+  }
+  .persona-row .name { font-size:13.5px; font-weight:600; color:var(--text); flex:1; }
+  .persona-row .switch { color:var(--text-dim); font-size:11px; font-family:var(--mono); }
+  .foot-link { display:flex; align-items:center; gap:10px; padding:8px 10px; color:var(--text-muted); font-size:13.5px; cursor:pointer; border-radius:var(--r-md); }
+  .foot-link:hover { background:var(--surface); color:var(--text); }
+  .drawer-scrim { flex:1; }
+
+  /* Workflow picker (modal sheet) */
+  .sheet-wrap { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; background:rgba(0,0,0,0.55); }
+  .sheet {
+    background:var(--bg); border-top:1px solid var(--border-strong);
+    border-top-left-radius:18px; border-top-right-radius:18px;
+    padding:8px 0 18px; box-shadow:0 -10px 40px rgba(0,0,0,0.55);
+  }
+  .grabber { width:36px; height:4px; border-radius:2px; background:var(--border-strong); margin:6px auto 6px; }
+  .sheet-title { padding:6px 18px 8px; font-size:15px; font-weight:700; }
+  .sheet-sub { padding:0 18px 10px; font-size:12.5px; color:var(--text-dim); }
+  .wf-row {
+    display:flex; align-items:center; gap:12px; padding:11px 18px;
+    border-top:1px solid var(--border); cursor:pointer;
+  }
+  .wf-row:hover { background:var(--surface); }
+  .wf-icon {
+    width:36px; height:36px; border-radius:var(--r-md); flex:none;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--surface); border:1px solid var(--border-strong); color:var(--accent);
+  }
+  .wf-row.active .wf-icon { background:var(--accent-soft); border-color:var(--accent-line); }
+  .wf-text { flex:1; min-width:0; }
+  .wf-text .n { font-size:14px; font-weight:600; color:var(--text); }
+  .wf-text .d { font-size:12px; color:var(--text-dim); margin-top:1px; }
+  .wf-row .chev { color:var(--text-dim); }
+
+  /* Tool detail bottom sheet */
+  .detail-head {
+    padding:12px 18px 6px; display:flex; align-items:center; gap:10px;
+  }
+  .detail-head .name { font-family:var(--mono); font-size:14px; font-weight:600; color:var(--text); }
+  .detail-head .state { margin-left:auto; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--accent); }
+  .detail-section { padding:6px 18px 0; }
+  .detail-section .label {
+    font-size:10.5px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-faint);
+    font-weight:600; margin:10px 0 6px; display:block;
+  }
+  .detail-result {
+    background:#101013; border:1px solid var(--border); border-radius:var(--r-md);
+    padding:10px 12px; font-family:var(--mono); font-size:12px; line-height:1.55; color:var(--text-muted);
+    white-space:pre-wrap; max-height:200px; overflow:auto;
+  }
+  .approve-row { display:flex; gap:10px; padding:14px 18px 4px; }
+  .btn { padding:10px 14px; border-radius:var(--r-md); font-size:14px; font-weight:600; border:1px solid transparent; cursor:pointer; flex:1; font-family:inherit; }
+  .btn-approve { background:var(--accent); color:var(--accent-on); }
+  .btn-approve:hover { background:var(--accent-hover); }
+  .btn-deny { background:var(--surface); color:var(--text); border-color:var(--border-strong); }
+  .btn-deny:hover { color:var(--err); border-color:var(--err-border); }
+
+  /* Settings */
+  .settings-head {
+    height:52px; flex:none; padding:0 8px 0 4px; display:flex; align-items:center; gap:8px;
+    border-bottom:1px solid var(--border); background:var(--bg);
+  }
+  .settings-head .title { font-size:16px; font-weight:700; flex:1; }
+  .settings-scroll { flex:1; overflow:auto; padding:10px 0 24px; }
+  .settings-section { padding:14px 16px 4px; font-size:11px; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.10em; }
+  .settings-card {
+    margin:0 12px 8px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--r-md); overflow:hidden;
+  }
+  .settings-row {
+    display:flex; align-items:center; gap:12px; padding:13px 14px; border-top:1px solid var(--border);
+    font-size:14px;
+  }
+  .settings-row:first-child { border-top:0; }
+  .settings-row .key { flex:1; }
+  .settings-row .key .k { color:var(--text); font-weight:500; }
+  .settings-row .key .v { font-size:12px; color:var(--text-dim); margin-top:2px; }
+  .settings-row .val { color:var(--text-faint); font-size:13px; font-family:var(--mono); }
+  .settings-row .chev { color:var(--text-dim); }
+
+  .toggle { width:42px; height:24px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border-strong); position:relative; flex:none; }
+  .toggle::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#3a3a42; transition:.15s; }
+  .toggle.on { background:var(--accent-soft); border-color:var(--accent-line); }
+  .toggle.on::after { left:20px; background:var(--accent); }
+
+  .persona-card {
+    margin:0 12px 8px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--r-md); padding:12px 14px; display:flex; align-items:center; gap:12px;
+  }
+  .persona-card .name { font-size:14px; font-weight:600; color:var(--text); }
+  .persona-card .desc { font-size:12px; color:var(--text-dim); margin-top:1px; }
+  .persona-card .check { color:var(--accent); }
+
+  /* Inline SVG sizing */
+  svg.i { width:18px; height:18px; }
+  svg.i-sm { width:14px; height:14px; }
+  svg.i-lg { width:20px; height:20px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Lutin · 03 · Chat-First Mobile</h1>
+  <p>Single chat surface with an opt-in left drawer. The composer is always one tap away — no bottom nav, no tabs. Inspector views surface as bottom sheets so context never leaves the conversation.</p>
+
+  <!-- ===================== 1. CHAT ===================== -->
+  <div class="frame-wrap">
+    <div class="caption">01 · Chat <span>persona "Lutin" · streaming reply</span></div>
+    <div class="phone">
+      <div class="status-bar">
+        <span>9:41</span>
+        <div class="right">
+          <svg viewBox="0 0 18 12" width="17" height="11" fill="currentColor"><path d="M1 8h2v3H1zM5 6h2v5H5zM9 4h2v7H9zM13 1h2v10h-2z"/></svg>
+          <svg viewBox="0 0 16 12" width="15" height="11" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1 4a10 10 0 0 1 14 0M3.5 6.5a6.5 6.5 0 0 1 9 0M6 9a3 3 0 0 1 4 0"/><circle cx="8" cy="11" r="0.7" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 12" width="24" height="11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="20" height="11" rx="2.5"/><rect x="2" y="2" width="17" height="8" rx="1.2" fill="currentColor"/><path d="M22 4v4" stroke-linecap="round" stroke-width="1.2"/></svg>
+        </div>
+      </div>
+
+      <div class="topbar">
+        <button class="icon-btn" aria-label="Open menu">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        </button>
+        <div class="who">
+          <div class="persona">Lutin</div>
+          <div class="sub"><span class="dot"></span>thinking · gpt-5 · 432ms</div>
+        </div>
+        <button class="icon-btn" aria-label="Voice">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2"/></svg>
+        </button>
+      </div>
+
+      <div class="scroll">
+        <div class="msg-user">
+          <div class="role user">You · 9:38</div>
+          <div class="bubble-user">Plan the rest of my day. I have a 1:1 at 14:00 and need to ship the audio PR before EOD.</div>
+        </div>
+
+        <div class="msg-assistant">
+          <div class="meta">
+            <span class="who-name"><span style="width:14px;height:14px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a8431f);display:inline-block"></span>Lutin</span>
+            <span class="metrics">1.4s · 312t · 218 tok/s</span>
+          </div>
+          <div class="md">
+            <h2>Day plan</h2>
+            <p>Two anchors today: the <strong>14:00 sync</strong> and shipping the <strong>audio PR</strong>. Working backwards from those:</p>
+            <ul>
+              <li><strong>Now → 11:30</strong> — finish review fixes on <code style="font-family:var(--mono);font-size:12.5px;background:var(--surface);padding:1px 5px;border-radius:4px;border:1px solid var(--border)">tts_dispatch.rs</code><small>Two threads still open · keep flow time uninterrupted</small></li>
+              <li><strong>11:30 → 12:30</strong> — lunch + walk<small>Calendar already blocked</small></li>
+              <li><strong>12:30 → 13:45</strong> — write PR description, run smoke tests<small>Buffer before the 1:1</small></li>
+              <li><strong>14:00</strong> — sync with Astrid<small>Agenda doc was updated 2h ago</small></li>
+              <li><strong>15:00 → 17:30</strong> — address review feedback, merge<small>I'll watch CI and ping you on green</small></li>
+            </ul>
+          </div>
+        </div>
+
+        <details class="thinking">
+          <summary class="thinking-head">
+            <span>Thought for 2.1s</span>
+            <span class="caret">▸</span>
+          </summary>
+        </details>
+
+        <div class="tool" data-state="completed">
+          <div class="tool-head">
+            <span class="tool-dot" data-state="completed"></span>
+            <span class="tool-name">calendar.list</span>
+            <span class="tool-summary">2 events · today</span>
+            <span class="tool-state">done · 240ms</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-row">
+          <button class="btn-mic" aria-label="Voice input">
+            <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          </button>
+          <textarea class="composer-input" placeholder="Message Lutin…">Add a 30-min buffer befo</textarea>
+          <button class="btn-send" aria-label="Send">
+            <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="home-indicator"></div>
+    </div>
+  </div>
+
+  <!-- ===================== 2. DRAWER ===================== -->
+  <div class="frame-wrap">
+    <div class="caption">02 · Drawer <span>left swipe / hamburger</span></div>
+    <div class="phone">
+      <div class="status-bar">
+        <span>9:41</span>
+        <div class="right">
+          <svg viewBox="0 0 18 12" width="17" height="11" fill="currentColor"><path d="M1 8h2v3H1zM5 6h2v5H5zM9 4h2v7H9zM13 1h2v10h-2z"/></svg>
+          <svg viewBox="0 0 16 12" width="15" height="11" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1 4a10 10 0 0 1 14 0M3.5 6.5a6.5 6.5 0 0 1 9 0M6 9a3 3 0 0 1 4 0"/><circle cx="8" cy="11" r="0.7" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 12" width="24" height="11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="20" height="11" rx="2.5"/><rect x="2" y="2" width="17" height="8" rx="1.2" fill="currentColor"/><path d="M22 4v4" stroke-linecap="round" stroke-width="1.2"/></svg>
+        </div>
+      </div>
+
+      <div class="drawer">
+        <div class="drawer-panel">
+          <div class="drawer-head">
+            <div class="brand">
+              <div class="brand-mark">L</div>
+              <div class="brand-name">Lutin</div>
+            </div>
+            <button class="icon-btn" aria-label="Close">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+
+          <div class="search">
+            <svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <span>Search sessions…</span>
+          </div>
+
+          <button class="new-session">
+            <svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            <span>New session</span>
+            <span class="pill">⌘N</span>
+          </button>
+
+          <div class="scroll-list">
+            <div class="group-label">Today</div>
+            <div class="session active">
+              <span class="title">Day plan + audio PR</span>
+              <span class="wf">chat</span>
+              <span class="time">9:38</span>
+            </div>
+            <div class="session">
+              <span class="title">Refactor tts_dispatch errors</span>
+              <span class="wf">code</span>
+              <span class="time">8:02</span>
+            </div>
+
+            <div class="group-label">Yesterday</div>
+            <div class="session">
+              <span class="title">Inbox triage — May 7</span>
+              <span class="wf">chat</span>
+              <span class="time">17:14</span>
+            </div>
+            <div class="session">
+              <span class="title">Memory crate port plan</span>
+              <span class="wf">chat</span>
+              <span class="time">11:40</span>
+            </div>
+            <div class="session">
+              <span class="title">Voice clone tests</span>
+              <span class="wf">voice</span>
+              <span class="time">9:55</span>
+            </div>
+
+            <div class="group-label">Last 7 days</div>
+            <div class="session">
+              <span class="title">Snac decoder bringup</span>
+              <span class="wf">code</span>
+              <span class="time">May 5</span>
+            </div>
+            <div class="session">
+              <span class="title">Notes on persona prompts</span>
+              <span class="wf">chat</span>
+              <span class="time">May 4</span>
+            </div>
+            <div class="session">
+              <span class="title">Travel to Lisbon</span>
+              <span class="wf">chat</span>
+              <span class="time">May 3</span>
+            </div>
+            <div class="session">
+              <span class="title">Workflow SDK redesign</span>
+              <span class="wf">code</span>
+              <span class="time">May 2</span>
+            </div>
+          </div>
+
+          <div class="drawer-foot">
+            <div class="persona-row">
+              <div class="avatar">LU</div>
+              <div class="name">Lutin <div style="font-size:11px;color:var(--text-dim);font-weight:400;margin-top:1px">gpt-5 · default</div></div>
+              <div class="switch">SWITCH</div>
+            </div>
+            <div class="foot-link">
+              <svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>
+              <span>Settings</span>
+            </div>
+          </div>
+        </div>
+        <div class="drawer-scrim"></div>
+      </div>
+      <div class="home-indicator"></div>
+    </div>
+  </div>
+
+  <!-- ===================== 3. WORKFLOW PICKER ===================== -->
+  <div class="frame-wrap">
+    <div class="caption">03 · Workflow picker <span>after tapping "+ New session"</span></div>
+    <div class="phone">
+      <div class="status-bar">
+        <span>9:41</span>
+        <div class="right">
+          <svg viewBox="0 0 18 12" width="17" height="11" fill="currentColor"><path d="M1 8h2v3H1zM5 6h2v5H5zM9 4h2v7H9zM13 1h2v10h-2z"/></svg>
+          <svg viewBox="0 0 16 12" width="15" height="11" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1 4a10 10 0 0 1 14 0M3.5 6.5a6.5 6.5 0 0 1 9 0M6 9a3 3 0 0 1 4 0"/><circle cx="8" cy="11" r="0.7" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 12" width="24" height="11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="20" height="11" rx="2.5"/><rect x="2" y="2" width="17" height="8" rx="1.2" fill="currentColor"/><path d="M22 4v4" stroke-linecap="round" stroke-width="1.2"/></svg>
+        </div>
+      </div>
+
+      <div class="topbar">
+        <button class="icon-btn"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></button>
+        <div class="who"><div class="persona">Lutin</div><div class="sub"><span class="dot ok"></span>idle</div></div>
+        <button class="icon-btn"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2"/></svg></button>
+      </div>
+      <div class="scroll" style="opacity:0.35; pointer-events:none;">
+        <div class="msg-user"><div class="role user">You · 9:38</div><div class="bubble-user">Plan the rest of my day…</div></div>
+        <div class="msg-assistant"><div class="meta"><span class="who-name">Lutin</span></div><div class="md"><p>Two anchors today…</p></div></div>
+      </div>
+
+      <div class="sheet-wrap">
+        <div class="sheet">
+          <div class="grabber"></div>
+          <div class="sheet-title">Start a new session</div>
+          <div class="sheet-sub">Pick a workflow. Each one runs its own agent loop.</div>
+          <div class="wf-row active">
+            <div class="wf-icon"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V6a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg></div>
+            <div class="wf-text"><div class="n">Chat</div><div class="d">Open-ended assistant with tools and personas</div></div>
+            <div class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+          <div class="wf-row">
+            <div class="wf-icon"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></div>
+            <div class="wf-text"><div class="n">Code</div><div class="d">Repo-aware coding agent with shell + edit tools</div></div>
+            <div class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+          <div class="wf-row">
+            <div class="wf-icon"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2"/></svg></div>
+            <div class="wf-text"><div class="n">Voice</div><div class="d">Hands-free conversation with TTS playback</div></div>
+            <div class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+          <div class="wf-row">
+            <div class="wf-icon"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M8 4v4M16 4v4"/></svg></div>
+            <div class="wf-text"><div class="n">Plan</div><div class="d">Multi-step planner with checklists and reviews</div></div>
+            <div class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="home-indicator"></div>
+    </div>
+  </div>
+
+  <!-- ===================== 4. TOOL DETAIL ===================== -->
+  <div class="frame-wrap">
+    <div class="caption">04 · Tool detail sheet <span>tap on a pending tool card</span></div>
+    <div class="phone">
+      <div class="status-bar">
+        <span>9:41</span>
+        <div class="right">
+          <svg viewBox="0 0 18 12" width="17" height="11" fill="currentColor"><path d="M1 8h2v3H1zM5 6h2v5H5zM9 4h2v7H9zM13 1h2v10h-2z"/></svg>
+          <svg viewBox="0 0 16 12" width="15" height="11" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1 4a10 10 0 0 1 14 0M3.5 6.5a6.5 6.5 0 0 1 9 0M6 9a3 3 0 0 1 4 0"/><circle cx="8" cy="11" r="0.7" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 12" width="24" height="11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="20" height="11" rx="2.5"/><rect x="2" y="2" width="17" height="8" rx="1.2" fill="currentColor"/><path d="M22 4v4" stroke-linecap="round" stroke-width="1.2"/></svg>
+        </div>
+      </div>
+
+      <div class="topbar">
+        <button class="icon-btn"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></button>
+        <div class="who"><div class="persona">Lutin</div><div class="sub"><span class="dot"></span>awaiting approval</div></div>
+        <button class="icon-btn"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2"/></svg></button>
+      </div>
+
+      <div class="scroll" style="opacity:0.4; pointer-events:none;">
+        <div class="msg-assistant"><div class="meta"><span class="who-name">Lutin</span></div><div class="md"><p>I'll send the agenda doc to Astrid before the 1:1 if that's OK.</p></div></div>
+        <div class="tool" data-state="pending">
+          <div class="tool-head"><span class="tool-dot" data-state="pending"></span><span class="tool-name">gmail.send</span><span class="tool-summary">to: astrid@deved.se</span><span class="tool-state" data-state="running">approve</span></div>
+        </div>
+      </div>
+
+      <div class="sheet-wrap">
+        <div class="sheet">
+          <div class="grabber"></div>
+          <div class="detail-head">
+            <span class="tool-dot" data-state="pending" style="box-shadow:0 0 0 2px var(--bg)"></span>
+            <span class="name">gmail.send</span>
+            <span class="state">pending approval</span>
+          </div>
+          <div class="detail-section">
+            <span class="label">Arguments</span>
+            <div style="background:#101013;border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;">
+              <dl class="tool-args" style="border:0;padding:0;">
+                <dt>to</dt><dd><span class="s">"astrid@deved.se"</span></dd>
+                <dt>subject</dt><dd><span class="s">"1:1 agenda — May 8"</span></dd>
+                <dt>body</dt><dd><span class="s">"Hey Astrid — pulled together the agenda doc, link below. Anything you want to add before 14:00?"</span></dd>
+                <dt>attach</dt><dd><span class="b">false</span></dd>
+              </dl>
+            </div>
+            <span class="label">Result preview</span>
+            <div class="detail-result">// Will execute on approve
+draft_id: "r-19a4f"
+recipient: astrid@deved.se
+size: 312 bytes
+</div>
+          </div>
+          <div class="approve-row">
+            <button class="btn btn-deny">Deny</button>
+            <button class="btn btn-approve">Approve & run</button>
+          </div>
+        </div>
+      </div>
+      <div class="home-indicator"></div>
+    </div>
+  </div>
+
+  <!-- ===================== 5. SETTINGS ===================== -->
+  <div class="frame-wrap">
+    <div class="caption">05 · Settings <span>full-screen pushed view</span></div>
+    <div class="phone">
+      <div class="status-bar">
+        <span>9:41</span>
+        <div class="right">
+          <svg viewBox="0 0 18 12" width="17" height="11" fill="currentColor"><path d="M1 8h2v3H1zM5 6h2v5H5zM9 4h2v7H9zM13 1h2v10h-2z"/></svg>
+          <svg viewBox="0 0 16 12" width="15" height="11" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1 4a10 10 0 0 1 14 0M3.5 6.5a6.5 6.5 0 0 1 9 0M6 9a3 3 0 0 1 4 0"/><circle cx="8" cy="11" r="0.7" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 12" width="24" height="11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="20" height="11" rx="2.5"/><rect x="2" y="2" width="17" height="8" rx="1.2" fill="currentColor"/><path d="M22 4v4" stroke-linecap="round" stroke-width="1.2"/></svg>
+        </div>
+      </div>
+
+      <div class="settings-head">
+        <button class="icon-btn" aria-label="Back">
+          <svg class="i-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <div class="title">Settings</div>
+      </div>
+
+      <div class="settings-scroll">
+        <div class="settings-section">Connection</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="key"><div class="k">Backend host</div><div class="v">Local relay</div></div>
+            <div class="val">127.0.0.1:8420</div>
+            <span class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Auto-reconnect</div><div class="v">Reconnect when the relay drops</div></div>
+            <div class="toggle on"></div>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Status</div></div>
+            <div class="val" style="color:var(--ok); display:inline-flex; align-items:center; gap:6px"><span class="dot ok"></span>connected</div>
+          </div>
+        </div>
+
+        <div class="settings-section">Audio</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="key"><div class="k">Voice</div><div class="v">Orpheus · clone "lutin-low"</div></div>
+            <span class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Speak replies aloud</div><div class="v">Auto-play TTS for assistant turns</div></div>
+            <div class="toggle on"></div>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Mic gain</div><div class="v">Automatic</div></div>
+            <div class="val">+0 dB</div>
+          </div>
+        </div>
+
+        <div class="settings-section">Notifications</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="key"><div class="k">Tool approvals</div><div class="v">Buzz when a tool needs approval</div></div>
+            <div class="toggle on"></div>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Background replies</div><div class="v">Notify when a long task finishes</div></div>
+            <div class="toggle on"></div>
+          </div>
+          <div class="settings-row">
+            <div class="key"><div class="k">Quiet hours</div><div class="v">22:00 → 07:30</div></div>
+            <span class="chev"><svg class="i-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+          </div>
+        </div>
+
+        <div class="settings-section">Personas</div>
+        <div class="persona-card">
+          <div class="avatar" style="background:linear-gradient(135deg,var(--accent),#a8431f); color:var(--accent-on)">LU</div>
+          <div style="flex:1;"><div class="name">Lutin</div><div class="desc">gpt-5 · default assistant</div></div>
+          <span class="check"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-11"/></svg></span>
+        </div>
+        <div class="persona-card">
+          <div class="avatar">AS</div>
+          <div style="flex:1;"><div class="name">Astrid</div><div class="desc">claude-opus · writing partner</div></div>
+        </div>
+        <div class="persona-card">
+          <div class="avatar" style="background:linear-gradient(135deg,#5a3a6b,#2a1f3a)">RV</div>
+          <div style="flex:1;"><div class="name">Rover</div><div class="desc">gpt-5-mini · quick lookups</div></div>
+        </div>
+        <div class="persona-card" style="justify-content:center; color:var(--accent); font-weight:600; font-size:13.5px;">
+          + New persona
+        </div>
+      </div>
+      <div class="home-indicator"></div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -115,6 +115,13 @@ enum Command {
         providers: Vec<lutin_control_protocol::ProviderConfig>,
         reply: oneshot::Sender<Response>,
     },
+    GetWebSearch {
+        reply: oneshot::Sender<Response>,
+    },
+    SetWebSearch {
+        settings: lutin_control_protocol::WebSearchSettings,
+        reply: oneshot::Sender<Response>,
+    },
 }
 
 #[derive(Clone)]
@@ -272,6 +279,8 @@ impl AppState {
             Request::GetWorkflowBundle { id } => Command::GetWorkflowBundle { id, reply },
             Request::ListProviders => Command::ListProviders { reply },
             Request::SetProviders { providers } => Command::SetProviders { providers, reply },
+            Request::GetWebSearch => Command::GetWebSearch { reply },
+            Request::SetWebSearch { settings } => Command::SetWebSearch { settings, reply },
             Request::OpenTranscription { .. }
             | Request::TranscribeChunk { .. }
             | Request::FinishTranscription { .. }
@@ -712,6 +721,26 @@ async fn handle_command(
             match settings_io::write_providers(&config.global_config_dir, &providers) {
                 Ok(()) => {
                     let _ = reply.send(Response::Ok(ResponseOk::ProvidersSaved));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Settings(e)));
+                }
+            }
+        }
+        Command::GetWebSearch { reply } => {
+            match settings_io::read_web_search(&config.global_config_dir) {
+                Ok(settings) => {
+                    let _ = reply.send(Response::Ok(ResponseOk::WebSearch(settings)));
+                }
+                Err(e) => {
+                    let _ = reply.send(Response::Err(ApiError::Settings(e)));
+                }
+            }
+        }
+        Command::SetWebSearch { settings, reply } => {
+            match settings_io::write_web_search(&config.global_config_dir, &settings) {
+                Ok(()) => {
+                    let _ = reply.send(Response::Ok(ResponseOk::WebSearchSaved));
                 }
                 Err(e) => {
                     let _ = reply.send(Response::Err(ApiError::Settings(e)));

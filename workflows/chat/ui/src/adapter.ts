@@ -46,25 +46,56 @@ export function toViewModel(snap: SessionSnapshot): ChatViewModel {
 
 function wireToWidgetMeta(m: MessageMeta | undefined): WidgetMeta | undefined {
   if (!m) return undefined;
-  // Treat the empty timestamp as "no metrics yet" so the footer doesn't
-  // render a half-blank row for transcripts loaded before metrics
-  // existed.
-  if (
-    m.timestamp.length === 0 &&
-    m.ttftMs === null &&
-    m.durationMs === null &&
-    m.promptTokens === null &&
-    m.completionTokens === null
-  ) {
-    return undefined;
+  // Parse RFC3339 once at the wire boundary so the widget doesn't
+  // re-parse on every render. `null` means "no timestamp recorded"
+  // (legacy transcript pre-metrics).
+  const time = parseTimestamp(m.timestamp);
+  switch (m.kind) {
+    case "user":
+    case "subAgentReply":
+    case "subAgentFailure":
+      return time === null ? undefined : { time };
+    case "tool":
+      if (time === null && m.durationMs === null) return undefined;
+      return { time, durationMs: m.durationMs };
+    case "thinking":
+      if (time === null && m.ttftMs === null && m.durationMs === null) {
+        return undefined;
+      }
+      return { time, ttftMs: m.ttftMs, durationMs: m.durationMs };
+    case "assistant":
+      if (
+        time === null &&
+        m.ttftMs === null &&
+        m.durationMs === null &&
+        m.promptTokens === null &&
+        m.completionTokens === null
+      ) {
+        return undefined;
+      }
+      return {
+        time,
+        ttftMs: m.ttftMs,
+        durationMs: m.durationMs,
+        promptTokens: m.promptTokens,
+        completionTokens: m.completionTokens,
+      };
   }
-  return {
-    timestamp: m.timestamp,
-    ttftMs: m.ttftMs === null ? null : Number(m.ttftMs),
-    durationMs: m.durationMs === null ? null : Number(m.durationMs),
-    promptTokens: m.promptTokens,
-    completionTokens: m.completionTokens,
-  };
+}
+
+/// Render-only sibling of [`toViewModel`] for sub-agent transcripts.
+/// They never stream live in this UI (the parent owns the agent
+/// stream), have no metrics sidecar, and are never user-edited — so we
+/// project a flat list with stable `sub-N` ids and no widget meta.
+export function subAgentViewModel(messages: Message[]): ChatViewModel {
+  const out: ChatMessage[] = messages.map((m, i) => project(m, `sub-${i}`, undefined));
+  return { messages: out, turn: { kind: "idle" } };
+}
+
+function parseTimestamp(ts: string | null): Date | null {
+  if (ts === null) return null;
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function project(m: Message, id: string, meta: WidgetMeta | undefined): ChatMessage {

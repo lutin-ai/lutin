@@ -1,7 +1,10 @@
 //! SNAC ONNX decoder. Turns Orpheus audio tokens (custom_token_N)
-//! into 24 kHz mono i16 PCM. Ported verbatim from the legacy engine —
-//! the model contract (3-codebook decoder, frame layout) is fixed by
-//! the upstream SNAC weights, not something we get to redesign.
+//! into 24 kHz mono i16 PCM. The decoder is convolutional with a
+//! receptive field that spans several frames; streaming requires
+//! feeding the previous tail back in as context, otherwise samples
+//! near each chunk boundary are computed without their full input
+//! support and audible discontinuities (clicks, perceived pitch
+//! wobble) appear at every chunk join.
 
 use std::path::Path;
 
@@ -21,8 +24,43 @@ pub struct SnacDecoder {
 
 impl SnacDecoder {
     pub fn from_file(path: &Path) -> Result<Self, SnacError> {
-        let session = Session::builder()
-            .and_then(|mut b| b.commit_from_file(path))
+        let mut builder =
+            Session::builder().map_err(|e| SnacError::Ort(e.to_string()))?;
+
+        // Register GPU execution providers when compiled in. TensorRT
+        // is preferred — it fuses the SNAC graph and JITs kernels for
+        // the local GPU, which matters on Blackwell where the prebuilt
+        // CUDA EP from microsoft/pyke ships no sm_120 SASS. CUDA is
+        // listed second as a fallback for any op TRT doesn't cover; if
+        // both fail to register, ORT falls back to CPU and we still get
+        // audio on a misconfigured host.
+        //
+        // Engine cache: TRT serializes a per-GPU `.engine` blob the first
+        // time it sees the model (build takes seconds), then reuses it.
+        // Cache is keyed by GPU + TRT version internally.
+        #[cfg(feature = "cuda")]
+        {
+            use ort::execution_providers::{CUDAExecutionProvider, TensorRTExecutionProvider};
+            let cache_dir = trt_engine_cache_dir();
+            if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+                tracing::warn!(?cache_dir, error = %e, "could not create TRT engine cache dir");
+            }
+            builder = builder
+                .with_execution_providers([
+                    TensorRTExecutionProvider::default()
+                        .with_device_id(0)
+                        .with_fp16(true)
+                        .with_engine_cache(true)
+                        .with_engine_cache_path(cache_dir.to_string_lossy().into_owned())
+                        .with_timing_cache(true)
+                        .build(),
+                    CUDAExecutionProvider::default().build(),
+                ])
+                .map_err(|e| SnacError::Ort(e.to_string()))?;
+        }
+
+        let session = builder
+            .commit_from_file(path)
             .map_err(|e| SnacError::Ort(e.to_string()))?;
 
         let input_names: Vec<_> = session.inputs().iter().map(|i| i.name()).collect();
@@ -32,13 +70,25 @@ impl SnacDecoder {
         Ok(Self { session })
     }
 
-    /// Decode raw audio tokens (`custom_token_N` numbers from Orpheus,
-    /// already adjusted to the 0..AUDIO_TOKEN_COUNT range) into i16
-    /// PCM. Processes complete groups of 7 tokens; leftover tokens
-    /// are ignored — the caller is expected to flush a multiple of 7.
-    pub fn decode(&mut self, tokens: &[u32]) -> Result<Vec<i16>, SnacError> {
-        let num_frames = tokens.len() / TOKENS_PER_FRAME;
-        if num_frames == 0 {
+    /// Decode `lookback` followed by `new_tokens` and return only the
+    /// PCM samples that correspond to `new_tokens`. The lookback gives
+    /// the convolutional decoder the past context it needs so the
+    /// first samples of the returned slice are computed with the same
+    /// receptive support as samples in the middle — no boundary
+    /// glitch.
+    ///
+    /// `lookback` and `new_tokens` are both flat token streams whose
+    /// length must be a multiple of `TOKENS_PER_FRAME`. Pass an empty
+    /// `lookback` for the first chunk of an utterance.
+    pub fn decode(
+        &mut self,
+        lookback: &[u32],
+        new_tokens: &[u32],
+    ) -> Result<Vec<i16>, SnacError> {
+        let lookback_frames = lookback.len() / TOKENS_PER_FRAME;
+        let new_frames = new_tokens.len() / TOKENS_PER_FRAME;
+        let num_frames = lookback_frames + new_frames;
+        if new_frames == 0 {
             return Ok(Vec::new());
         }
 
@@ -46,19 +96,20 @@ impl SnacDecoder {
         let mut codes_1 = Vec::with_capacity(num_frames * 2);
         let mut codes_2 = Vec::with_capacity(num_frames * 4);
 
-        for frame in 0..num_frames {
-            let base = frame * TOKENS_PER_FRAME;
+        let push_frame = |codes_0: &mut Vec<i64>,
+                          codes_1: &mut Vec<i64>,
+                          codes_2: &mut Vec<i64>,
+                          frame: &[u32]| {
             // Each position in the 7-token frame has its own offset
             // (position * 4096), which we strip before feeding the
             // decoder.
             let t = |idx: usize| -> i64 {
-                let raw = tokens[base + idx] as usize;
+                let raw = frame[idx] as usize;
                 raw.saturating_sub(idx * CODEBOOK_SIZE) as i64
             };
-
-            // codes_0 (coarse): [i]
-            // codes_1 (medium): [i+1, i+4]
-            // codes_2 (fine):   [i+2, i+3, i+5, i+6]
+            // codes_0 (coarse): [0]
+            // codes_1 (medium): [1, 4]
+            // codes_2 (fine):   [2, 3, 5, 6]
             codes_0.push(t(0));
             codes_1.push(t(1));
             codes_1.push(t(4));
@@ -66,6 +117,25 @@ impl SnacDecoder {
             codes_2.push(t(3));
             codes_2.push(t(5));
             codes_2.push(t(6));
+        };
+
+        for f in 0..lookback_frames {
+            let base = f * TOKENS_PER_FRAME;
+            push_frame(
+                &mut codes_0,
+                &mut codes_1,
+                &mut codes_2,
+                &lookback[base..base + TOKENS_PER_FRAME],
+            );
+        }
+        for f in 0..new_frames {
+            let base = f * TOKENS_PER_FRAME;
+            push_frame(
+                &mut codes_0,
+                &mut codes_1,
+                &mut codes_2,
+                &new_tokens[base..base + TOKENS_PER_FRAME],
+            );
         }
 
         let shape_0: [usize; 2] = [1, codes_0.len()];
@@ -96,18 +166,38 @@ impl SnacDecoder {
             .next()
             .ok_or_else(|| SnacError::Ort("no output tensor".into()))?;
 
-        let audio_view = audio_tensor
+        let (_shape, samples) = audio_tensor
             .try_extract_tensor::<f32>()
             .map_err(|e| SnacError::Ort(e.to_string()))?;
 
-        let pcm: Vec<i16> = audio_view
-            .1
+        // Derive samples-per-frame from the actual decoder output
+        // rather than hard-coding it; SNAC variants differ in stride.
+        let total = samples.len();
+        if total % num_frames != 0 {
+            return Err(SnacError::Ort(format!(
+                "SNAC output {} not divisible by {} frames",
+                total, num_frames
+            )));
+        }
+        let samples_per_frame = total / num_frames;
+        let trim = lookback_frames * samples_per_frame;
+
+        let pcm: Vec<i16> = samples[trim..]
             .iter()
             .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
             .collect();
 
         Ok(pcm)
     }
+}
+
+#[cfg(feature = "cuda")]
+fn trt_engine_cache_dir() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    base.join("lutin").join("trt-engines")
 }
 
 #[derive(Debug, thiserror::Error)]

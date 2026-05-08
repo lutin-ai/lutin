@@ -22,7 +22,7 @@
         "url": "overlay.html",
         "title": "Lutin Overlay",
         "width": 240,
-        "height": 56,
+        "height": 40,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

@@ -3,17 +3,23 @@
 
 export type Role = "user" | "assistant" | "system";
 
-/** Per-message metrics rendered as a small footer. All numeric fields
- *  are nullable because not every message has every metric (a user
- *  message has only a timestamp; a tool call has timestamp + duration;
- *  an assistant text has the full set). `timestamp` is RFC3339; an
- *  empty string suppresses the time chip. */
+/** Per-message metrics rendered as a small footer. The adapter parses
+ *  the wire RFC3339 string into a `Date` once at the boundary, so the
+ *  widget never has to re-parse. Missing fields suppress their chip;
+ *  if every field is missing the adapter returns `undefined` and no
+ *  footer is rendered at all. */
 export interface MessageMeta {
-  timestamp: string;
-  ttftMs: number | null;
-  durationMs: number | null;
-  promptTokens: number | null;
-  completionTokens: number | null;
+  /** Wall-clock when the entry was recorded; `null` for legacy
+   *  transcripts loaded before metrics existed. */
+  time: Date | null;
+  /** Time-to-first-token (assistant text/thinking only). */
+  ttftMs?: number | null;
+  /** Full turn duration (assistant) or per-call duration (tool). */
+  durationMs?: number | null;
+  /** Input tokens (assistant text only). */
+  promptTokens?: number | null;
+  /** Output tokens (assistant text only). */
+  completionTokens?: number | null;
 }
 
 export interface UserMessage {

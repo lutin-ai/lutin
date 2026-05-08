@@ -365,6 +365,14 @@ pub fn convert_messages(messages: Vec<Message>) -> Vec<ApiMessage> {
                 tool_calls: None,
                 tool_call_id: None,
             },
+            Message::Summary { text } => ApiMessage {
+                role: "user".into(),
+                content: Some(ApiContent::Text(format!(
+                    "[Summary of earlier conversation]\n{text}"
+                ))),
+                tool_calls: None,
+                tool_call_id: None,
+            },
         })
         .collect()
 }

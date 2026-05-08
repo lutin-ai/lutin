@@ -1,9 +1,9 @@
 pub mod anthropic;
-pub mod context;
 pub mod ids;
 pub mod mock;
 pub mod ollama;
 pub mod openai_compat;
+pub mod openai_compat_provider;
 pub mod openrouter;
 pub mod types;
 

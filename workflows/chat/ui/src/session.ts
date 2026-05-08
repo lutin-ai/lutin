@@ -8,6 +8,7 @@ import {
   type ChatResponse,
   type HistoricalMessage,
   type MessageMeta,
+  type SubAgentInfo,
   type ToolOutcome,
   chatErrorMessage,
 } from "./chat";
@@ -56,6 +57,14 @@ export interface SessionSnapshot {
    *  but not the other, the lengths can diverge for a few ms — render
    *  defensively (treat missing entries as "no metrics yet"). */
   metrics: MessageMeta[];
+  /** Live sub-agent registry rows. Replaced wholesale on each
+   *  `subAgentsChanged` event (and on the response to `listSubAgents`). */
+  subAgents: SubAgentInfo[];
+  /** Per-id transcripts for sub-agents the user has opened. Keyed by
+   *  `agent#N`; populated by `getSubAgentTranscript` responses and
+   *  refreshed by `subAgentTranscriptUpdated` broadcasts. The reducer
+   *  doesn't prune — sub-agent counts stay small per session. */
+  subAgentTranscripts: Record<string, Message[]>;
   turn: Turn;
 }
 
@@ -63,6 +72,8 @@ export const initialSnapshot: SessionSnapshot = {
   persona: null,
   completed: [],
   metrics: [],
+  subAgents: [],
+  subAgentTranscripts: {},
   turn: { kind: "idle" },
 };
 
@@ -124,6 +135,16 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
     }
     case "metricsReplaced":
       return { ...state, metrics: ev.metrics };
+    case "subAgentsChanged":
+      return { ...state, subAgents: ev.subAgents };
+    case "subAgentTranscriptUpdated":
+      return {
+        ...state,
+        subAgentTranscripts: {
+          ...state.subAgentTranscripts,
+          [ev.id]: ev.history.map(fromHistorical),
+        },
+      };
   }
 }
 
@@ -260,6 +281,16 @@ function applyResponse(
       return { ...state, persona: ok.state.persona };
     case "metrics":
       return { ...state, metrics: ok.metrics };
+    case "subAgents":
+      return { ...state, subAgents: ok.subAgents };
+    case "subAgentTranscript":
+      return {
+        ...state,
+        subAgentTranscripts: {
+          ...state.subAgentTranscripts,
+          [ok.id]: ok.history.map(fromHistorical),
+        },
+      };
     case "messageQueued":
     case "cancelled":
     case "personas":

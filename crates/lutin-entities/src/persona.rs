@@ -24,7 +24,7 @@ const DIR: &str = "personas";
 
 /// Persona file body. The name comes from the filename and is attached
 /// post-deserialize when [`Persona::load`] / [`Persona::list`] return.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Persona {
     /// Filename stem; populated by the loader, not the file.
     #[serde(skip)]
@@ -58,9 +58,34 @@ pub struct Persona {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
+    /// OpenAI-style presence penalty in [-2.0, 2.0]. Plumbed to all
+    /// OpenAI-compatible providers; ignored by Anthropic. Useful for models
+    /// that loop in thinking mode (e.g. Qwen3.6 recommends 1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+
     /// Maximum context window tokens. `None` = no compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<u32>,
+
+    /// Keep only the last N user turns (and their interleaved assistant
+    /// rounds + tool exchanges) in the prompt sent to the provider. The
+    /// agent's full transcript is preserved on disk and in the UI; this
+    /// only narrows what the model sees per request. `None` = unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sliding_window_messages: Option<u32>,
+
+    /// Trigger LLM-driven compaction once the agent's owned transcript
+    /// reaches this many messages. `None` = compaction disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_threshold_messages: Option<u32>,
+
+    /// How many recent user turns to keep verbatim when compacting. The
+    /// older prefix is summarised into a single `Message::Summary` and
+    /// the dropped messages are archived in a sidecar file. Defaults to
+    /// keeping half the threshold when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_keep_recent_user_turns: Option<u32>,
 
     /// Enable extended thinking / reasoning mode.
     #[serde(default)]

@@ -11,21 +11,18 @@
 //! See the comment on [`make_subagent_tools`] for why we always inject
 //! all three (the filter does the gating, not the call site).
 //!
-//! Wire choice (v1): [`crate::agents::AgentSpec::transcript_snapshot`]
-//! is set to an empty `Arc<Vec<_>>` — sub-agents start with the
-//! delegator's brief alone, not the parent's transcript. The
-//! orchestrator persona's prompt instructs it to pack purpose +
-//! acceptance criteria into the brief, which is the canonical input.
-//! Plumbing the live transcript through every tool call would mean
-//! either threading the parent `Agent`'s message vec into tool dispatch
-//! or re-loading it from disk on every spawn — both pay a real cost
-//! for context the orchestrator isn't supposed to lean on. Revisit if
-//! a concrete need shows up (a "fork this conversation" tool).
+//! Validation seam: `SpawnAgent::call` resolves the requested persona
+//! against the on-disk listing before sending the `Spawn` command. The
+//! loaded `Persona` then rides the spec into the registry so the
+//! spawner doesn't re-resolve — one disk read per spawn, one place
+//! where "no such persona" can happen.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lutin_entities::Persona;
 use lutin_llm::{ToolCall, ToolDefinition, ToolName, ToolParameter, ToolResultContent};
+use lutin_storage::Resolver;
 use lutin_tools::{Tool, ToolCallContext, ToolResult};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -40,9 +37,18 @@ use crate::agents::{AgentId, AgentRegistryCmd, AgentSpec, AgentStatus};
 /// SDK boundary the same as `default_tools`.
 pub fn make_subagent_tools(
     cmd_tx: mpsc::UnboundedSender<AgentRegistryCmd>,
+    resolver: Arc<Resolver>,
+    // `Some(owner_id)` when this tool set is built for a sub-agent (so
+    // any further spawn it does is tagged as that sub-agent's child);
+    // `None` for the main session's orchestrator (top-level spawns).
+    owner_id: Option<AgentId>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnAgent { cmd_tx: cmd_tx.clone() }),
+        Box::new(SpawnAgent {
+            cmd_tx: cmd_tx.clone(),
+            resolver,
+            owner_id,
+        }),
         Box::new(GetAgent { cmd_tx: cmd_tx.clone() }),
         Box::new(StopAgent { cmd_tx }),
     ]
@@ -54,13 +60,19 @@ const TOOL_STOP: &str = "stop_agent";
 
 pub struct SpawnAgent {
     cmd_tx: mpsc::UnboundedSender<AgentRegistryCmd>,
+    /// Shared resolver so the tool can load the requested persona at
+    /// the boundary. The loaded `Persona` then ships through the spec
+    /// to the spawner — no second disk read on the way to `Agent`
+    /// construction. An `Arc` so every `make_subagent_tools` call
+    /// (one per sub-agent build) reuses the same handle.
+    resolver: Arc<Resolver>,
+    owner_id: Option<AgentId>,
 }
 
 #[derive(Deserialize)]
 struct SpawnInput {
     initial_prompt: String,
-    #[serde(default)]
-    persona: Option<String>,
+    persona: String,
 }
 
 #[async_trait]
@@ -68,7 +80,7 @@ impl Tool for SpawnAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new(TOOL_SPAWN),
-            description: "Spawn a sub-agent to handle a delegated task. Returns the agent id (e.g. \"agent#7\") immediately; the child runs in the background and its final response is auto-injected into this conversation when it completes. Include purpose + acceptance criteria in `initial_prompt` — the child does not see the parent's transcript.".into(),
+            description: "Spawn a sub-agent to handle a delegated task. Returns the agent id (e.g. \"agent#7\") immediately; the child runs in the background and its final response is auto-injected into this conversation when it completes. Do NOT poll get_agent waiting for it — finish your turn after spawning; you will be re-invoked with the child's result.".into(),
             parameters: vec![
                 ToolParameter {
                     name: "initial_prompt".into(),
@@ -79,8 +91,8 @@ impl Tool for SpawnAgent {
                 ToolParameter {
                     name: "persona".into(),
                     r#type: "string".into(),
-                    description: "Optional persona name to instantiate. When omitted, the child inherits this session's current persona.".into(),
-                    required: false,
+                    description: "Persona that sub-agent will use.".into(),
+                    required: true,
                 },
             ],
         }
@@ -88,26 +100,44 @@ impl Tool for SpawnAgent {
 
     async fn call(&self, _ctx: &ToolCallContext, call: ToolCall) -> ToolResult {
         let ToolCall { id: call_id, arguments, .. } = call;
-        let (content, is_error) = match serde_json::from_value::<SpawnInput>(arguments) {
-            Ok(SpawnInput { initial_prompt, persona }) => {
-                let spec = AgentSpec {
-                    initial_prompt,
-                    persona,
-                    transcript_snapshot: Arc::new(Vec::new()),
-                };
-                let (tx, rx) = oneshot::channel();
-                if self.cmd_tx.send(AgentRegistryCmd::Spawn { spec, reply: tx }).is_err() {
-                    err("sub-agent registry is unavailable")
-                } else {
-                    match rx.await {
-                        Ok(id) => ok(format!("spawned {id}")),
-                        Err(_) => err("sub-agent registry dropped the request"),
-                    }
-                }
-            }
-            Err(e) => err(format!("invalid input: {e}")),
+        let (content, is_error) = match self.do_spawn(arguments).await {
+            Ok(msg) => (msg, false),
+            Err(msg) => (msg, true),
         };
         ToolResult::Ok(ToolResultContent { call_id, content, is_error })
+    }
+}
+
+impl SpawnAgent {
+    /// Validate input → load persona → ship spec → await registry id.
+    /// Each step short-circuits with a tool-facing error string; the
+    /// caller maps `Result` to the LLM tool's `(content, is_error)`
+    /// pair. Only `EntityError::NotFound` is converted to a tool error
+    /// — every other persona load failure is an operator bug (corrupt
+    /// TOML, IO failure) that the LLM can't recover from, so it
+    /// surfaces as a hard error too but with the underlying message.
+    async fn do_spawn(&self, arguments: serde_json::Value) -> Result<String, String> {
+        let SpawnInput { initial_prompt, persona } =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid input: {e}"))?;
+        let loaded = Persona::load(&self.resolver, &persona).map_err(|e| match e {
+            lutin_entities::EntityError::NotFound { name, .. } => {
+                format!("persona not found: {name}")
+            }
+            other => format!("load persona {persona:?}: {other}"),
+        })?;
+        let spec = AgentSpec {
+            initial_prompt,
+            persona: loaded,
+            parent_id: self.owner_id,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AgentRegistryCmd::Spawn { spec, reply: tx })
+            .map_err(|_| "sub-agent registry is unavailable".to_owned())?;
+        let id = rx
+            .await
+            .map_err(|_| "sub-agent registry dropped the request".to_owned())?;
+        Ok(format!("spawned {id}"))
     }
 }
 
@@ -120,7 +150,7 @@ impl Tool for GetAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new(TOOL_GET),
-            description: "Read the current status of a previously-spawned sub-agent. Returns running / completed / failed{reason} / stopped. The same status is also visible in the <active_subagents> system-prompt block.".into(),
+            description: "Read the current status of a previously-spawned sub-agent. Returns running / completed / failed{reason} / stopped. Use this only when the user explicitly asks about a child's status — do NOT call it to poll for completion. The same status is auto-injected into the <active_subagents> system-prompt block each turn, and a child's final response is auto-injected into the conversation when it completes; polling is never necessary and wastes rounds.".into(),
             parameters: vec![ToolParameter {
                 name: "id".into(),
                 r#type: "string".into(),
@@ -131,22 +161,26 @@ impl Tool for GetAgent {
     }
 
     async fn call(&self, _ctx: &ToolCallContext, call: ToolCall) -> ToolResult {
-        let (content, is_error) = match parse_id(&call.arguments) {
-            Ok(id) => {
-                let (tx, rx) = oneshot::channel();
-                if self.cmd_tx.send(AgentRegistryCmd::Status { id, reply: tx }).is_err() {
-                    err("sub-agent registry is unavailable")
-                } else {
-                    match rx.await {
-                        Ok(Some(status)) => ok(render_status(id, &status)),
-                        Ok(None) => err(format!("no such agent: {id}")),
-                        Err(_) => err("sub-agent registry dropped the request"),
-                    }
-                }
-            }
-            Err(reason) => err(reason),
+        let (content, is_error) = match self.do_get(&call.arguments).await {
+            Ok(msg) => (msg, false),
+            Err(msg) => (msg, true),
         };
         ToolResult::Ok(ToolResultContent { call_id: call.id, content, is_error })
+    }
+}
+
+impl GetAgent {
+    async fn do_get(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let id = parse_id(arguments)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AgentRegistryCmd::Status { id, reply: tx })
+            .map_err(|_| "sub-agent registry is unavailable".to_owned())?;
+        match rx.await {
+            Ok(Some(status)) => Ok(render_status(id, &status)),
+            Ok(None) => Err(format!("no such agent: {id}")),
+            Err(_) => Err("sub-agent registry dropped the request".to_owned()),
+        }
     }
 }
 
@@ -170,28 +204,31 @@ impl Tool for StopAgent {
     }
 
     async fn call(&self, _ctx: &ToolCallContext, call: ToolCall) -> ToolResult {
-        let (content, is_error) = match parse_id(&call.arguments) {
-            Ok(id) => {
-                let (tx, rx) = oneshot::channel();
-                if self.cmd_tx.send(AgentRegistryCmd::Stop { id, reply: tx }).is_err() {
-                    err("sub-agent registry is unavailable")
-                } else {
-                    match rx.await {
-                        Ok(()) => ok(format!("stopped {id}")),
-                        Err(_) => err("sub-agent registry dropped the request"),
-                    }
-                }
-            }
-            Err(reason) => err(reason),
+        let (content, is_error) = match self.do_stop(&call.arguments).await {
+            Ok(msg) => (msg, false),
+            Err(msg) => (msg, true),
         };
         ToolResult::Ok(ToolResultContent { call_id: call.id, content, is_error })
     }
 }
 
-/// Accept the id either as a bare integer (`{"id": 7}`) or as the
-/// canonical display form (`{"id": "agent#7"}`). Anything else is a
-/// 400-style error back to the LLM so it can correct itself rather
-/// than silently spawning at id 0 or similar.
+impl StopAgent {
+    async fn do_stop(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let id = parse_id(arguments)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AgentRegistryCmd::Stop { id, reply: tx })
+            .map_err(|_| "sub-agent registry is unavailable".to_owned())?;
+        rx.await
+            .map_err(|_| "sub-agent registry dropped the request".to_owned())?;
+        Ok(format!("stopped {id}"))
+    }
+}
+
+/// Accept the id either as a bare integer (`{"id": 7}`) or as a string
+/// (`{"id": "agent#7"}` or `{"id": "7"}`). Delegates to
+/// `AgentId::from_str` for the string case so the wire-format rule
+/// lives on the type itself, not duplicated across handlers.
 fn parse_id(arguments: &serde_json::Value) -> Result<AgentId, String> {
     let raw = arguments
         .get("id")
@@ -200,11 +237,7 @@ fn parse_id(arguments: &serde_json::Value) -> Result<AgentId, String> {
         return Ok(AgentId(n));
     }
     if let Some(s) = raw.as_str() {
-        let stripped = s.strip_prefix("agent#").unwrap_or(s);
-        return stripped
-            .parse::<u64>()
-            .map(AgentId)
-            .map_err(|_| format!("unparseable agent id: {s:?}"));
+        return s.parse::<AgentId>().map_err(|e| e.to_string());
     }
     Err(format!("agent id must be string or integer, got {raw}"))
 }
@@ -216,12 +249,4 @@ fn render_status(id: AgentId, status: &AgentStatus) -> String {
         AgentStatus::Failed { reason } => format!("{id} status=failed reason={reason:?}"),
         AgentStatus::Stopped => format!("{id} status=stopped"),
     }
-}
-
-fn ok(s: impl Into<String>) -> (String, bool) {
-    (s.into(), false)
-}
-
-fn err(s: impl Into<String>) -> (String, bool) {
-    (s.into(), true)
 }

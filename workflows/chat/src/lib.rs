@@ -99,6 +99,16 @@ pub enum ChatRequest {
     /// at variant index 10 — appended to the end so existing indices
     /// stay stable.
     GetMetrics,
+    /// Snapshot of the live sub-agent registry. The same data is also
+    /// pushed via `ChatEvent::SubAgentsChanged` whenever the engine
+    /// notices a transition; this request gives a freshly-mounted
+    /// subscriber a starting state without waiting for the next change.
+    ListSubAgents,
+    /// Read-only snapshot of one sub-agent's transcript. The same data
+    /// is also pushed via `ChatEvent::SubAgentTranscriptUpdated`
+    /// whenever the child appends — request once on first selection
+    /// and let the broadcast keep the view warm.
+    GetSubAgentTranscript { id: String },
 }
 
 pub type ChatResponse = Result<ChatOk, ChatError>;
@@ -128,20 +138,82 @@ pub enum ChatOk {
     /// `Subscribed.history` uses — `metrics[i]` describes the same
     /// `HistoricalMessage` the UI is rendering at index `i`.
     Metrics(Vec<MessageMeta>),
+    /// Reply to `ListSubAgents`. Sorted ascending by numeric id so the
+    /// UI gets a stable order across snapshots.
+    SubAgents(Vec<SubAgentInfo>),
+    /// Reply to `GetSubAgentTranscript`. `history` is the same shape as
+    /// the parent's `Subscribed.history` — one row per projected entry,
+    /// rendered with the same widgets. Empty when the id is unknown
+    /// (rather than an error variant — the panel races with `Stop` on
+    /// terminal entries and a missing id is interpretable as "gone").
+    SubAgentTranscript {
+        id: String,
+        history: Vec<HistoricalMessage>,
+    },
 }
 
-/// Per-projected-entry metrics. One `MessageMeta` per `HistoricalMessage`.
-/// All numeric fields are `Option` so unknown / not-applicable cases
-/// (e.g. tokens for a user message) encode cleanly. `timestamp` is
-/// RFC3339; an empty string means "unknown" (legacy transcripts loaded
-/// before metrics existed).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MessageMeta {
-    pub timestamp: String,
-    pub ttft_ms: Option<u64>,
-    pub duration_ms: Option<u64>,
-    pub prompt_tokens: Option<u32>,
-    pub completion_tokens: Option<u32>,
+/// One row in the sub-agent panel. `id` is the canonical display form
+/// (`agent#7`) so the UI can render it without re-formatting. `status`
+/// is structured rather than stringly so the UI can pick its own
+/// styling for each terminal kind.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubAgentInfo {
+    pub id: String,
+    /// `None` for top-level children of the main session; `Some(id)`
+    /// when one sub-agent spawned this one. Drives tree rendering on
+    /// the UI side.
+    pub parent_id: Option<String>,
+    pub persona: String,
+    pub status: SubAgentStatus,
+    /// Truncated last assistant-text fragment from the child. `None`
+    /// until the first progress event arrives.
+    pub last_progress: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SubAgentStatus {
+    Running,
+    Completed,
+    Failed { reason: String },
+    Stopped,
+}
+
+/// Per-projected-entry metrics. One variant per `HistoricalMessage`
+/// kind, in declared order — variant index 0 = `User`, 1 = `Assistant`,
+/// etc. Each variant carries only the fields its kind can validly
+/// produce, so e.g. a `User` entry can't accidentally encode token
+/// counts. Timestamps are RFC3339 wrapped in `Option` (`None` =
+/// transcript loaded before metrics existed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageMeta {
+    User {
+        timestamp: Option<String>,
+    },
+    Assistant {
+        timestamp: Option<String>,
+        ttft_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+    },
+    Thinking {
+        timestamp: Option<String>,
+        ttft_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    },
+    Tool {
+        timestamp: Option<String>,
+        duration_ms: Option<u64>,
+    },
+    SubAgentReply {
+        timestamp: Option<String>,
+    },
+    SubAgentFailure {
+        timestamp: Option<String>,
+    },
+    Summary {
+        timestamp: Option<String>,
+    },
 }
 
 /// One row in the persona picker. Sourced from
@@ -189,6 +261,11 @@ pub enum HistoricalMessage {
     /// Sub-agent terminated with a failure; `reason` is the engine's
     /// error string (truncated `AgentUpdate::Failed` payload).
     SubAgentFailure { agent_id: String, reason: String },
+    /// Compaction artefact: the model received this single condensed
+    /// summary in place of the older messages it covers. The full
+    /// pre-summary transcript is archived in
+    /// `<state_dir>/compaction_archive.json` for inspection.
+    Summary { text: String },
 }
 
 /// Result of a tool call. Two variants that carry the result/error text
@@ -250,6 +327,19 @@ pub enum ChatEvent {
     /// duration, token counts). Length matches the most-recent
     /// `HistoryReplaced` entry-for-entry.
     MetricsReplaced(Vec<MessageMeta>),
+    /// Live sub-agent registry snapshot. Emitted at turn end and on
+    /// every terminal sub-agent transition; the UI panel rebinds its
+    /// list straight from the payload (no per-id diffing required).
+    SubAgentsChanged(Vec<SubAgentInfo>),
+    /// One sub-agent's transcript was extended (or rewound, in the
+    /// terminal-stamp case). Carries the full projected history — the
+    /// UI replaces what it has rather than diffing, matching the
+    /// `HistoryReplaced` convention. Open child views subscribe to this
+    /// keyed by `id` and ignore deltas for other ids.
+    SubAgentTranscriptUpdated {
+        id: String,
+        history: Vec<HistoricalMessage>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -421,13 +511,9 @@ mod tests {
                 encode::<ChatResponse>(&Ok(ChatOk::Metrics(vec![]))).unwrap(),
             ),
             (
-                "ChatResponse::Ok(Metrics(1ts))",
-                encode::<ChatResponse>(&Ok(ChatOk::Metrics(vec![MessageMeta {
-                    timestamp: "T".into(),
-                    ttft_ms: None,
-                    duration_ms: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
+                "ChatResponse::Ok(Metrics(1user))",
+                encode::<ChatResponse>(&Ok(ChatOk::Metrics(vec![MessageMeta::User {
+                    timestamp: Some("T".into()),
                 }])))
                 .unwrap(),
             ),
@@ -480,12 +566,12 @@ mod tests {
             ("ChatRequest::GetMetrics", &[0x0a]),
             ("ChatResponse::Ok(Metrics(empty))", &[0x00, 0x07, 0x00]),
             (
-                "ChatResponse::Ok(Metrics(1ts))",
+                "ChatResponse::Ok(Metrics(1user))",
                 &[
                     0x00, 0x07, // Ok, Metrics
                     0x01, // vec len 1
-                    0x01, b'T', // timestamp = "T"
-                    0x00, 0x00, 0x00, 0x00, // four None options
+                    0x00, // MessageMeta::User variant
+                    0x01, 0x01, b'T', // timestamp = Some("T")
                 ],
             ),
             ("ChatEvent::MetricsReplaced(empty)", &[0x07, 0x00]),

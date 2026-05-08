@@ -171,6 +171,50 @@
 .toolBtn svg { color: var(--chat-text-faint); }
 .toolBtn:hover:not(:disabled) svg { color: var(--chat-text-muted); }
 
+/* TTS speed slider */
+.speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  color: var(--chat-text-faint);
+  font-size: var(--chat-fs-sm);
+}
+.speed input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 70px;
+  height: 4px;
+  background: var(--chat-surface-2);
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+.speed input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+  border: 0;
+  cursor: pointer;
+}
+.speed input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+  border: 0;
+  cursor: pointer;
+}
+.speedValue {
+  font-family: var(--chat-font-mono);
+  font-size: 10px;
+  min-width: 32px;
+  text-align: right;
+}
+
 /* Send / stop */
 .send,
 .stop {

@@ -41,6 +41,23 @@ export type HistoricalMessage =
   | { kind: "subAgentReply"; agentId: string; text: string }
   | { kind: "subAgentFailure"; agentId: string; reason: string };
 
+/** Live sub-agent registry row. Mirrors `chat::SubAgentInfo`. */
+export interface SubAgentInfo {
+  id: string;
+  /** `null` for top-level children of the main session; the parent
+   *  `agent#N` id when one sub-agent spawned this one. */
+  parentId: string | null;
+  persona: string;
+  status: SubAgentStatus;
+  lastProgress: string | null;
+}
+
+export type SubAgentStatus =
+  | { kind: "running" }
+  | { kind: "completed" }
+  | { kind: "failed"; reason: string }
+  | { kind: "stopped" };
+
 export type ChatRequest =
   | { kind: "subscribe" }
   | { kind: "sendMessage"; text: string }
@@ -52,21 +69,37 @@ export type ChatRequest =
   | { kind: "editMessage"; index: number; text: string }
   | { kind: "deleteMessage"; index: number }
   | { kind: "deleteFromHere"; index: number }
-  | { kind: "getMetrics" };
+  | { kind: "getMetrics" }
+  | { kind: "listSubAgents" }
+  | { kind: "getSubAgentTranscript"; id: string };
 
-/** Per-projected-entry metrics. Aligned 1:1 with HistoricalMessage. */
-export interface MessageMeta {
-  /** RFC3339 timestamp; empty string when unknown. */
-  timestamp: string;
-  /** Time-to-first-token in ms (assistant text/thinking only). */
-  ttftMs: bigint | null;
-  /** Full turn duration in ms (assistant) or per-call duration (tool). */
-  durationMs: bigint | null;
-  /** Input tokens (assistant only). */
-  promptTokens: number | null;
-  /** Output tokens (assistant only). */
-  completionTokens: number | null;
-}
+/** Per-projected-entry metrics. One variant per `HistoricalMessage`
+ *  kind, in declared variant order. Each variant carries only the
+ *  fields its kind can validly produce, so e.g. a `User` row can't
+ *  accidentally encode token counts. Timestamps decode as RFC3339
+ *  strings (or `null` for transcripts loaded before metrics existed);
+ *  millisecond durations decode as `number` after a safe-integer
+ *  bounds check at the wire boundary, so downstream code never
+ *  touches `bigint`. */
+export type MessageMeta =
+  | { kind: "user"; timestamp: string | null }
+  | {
+      kind: "assistant";
+      timestamp: string | null;
+      ttftMs: number | null;
+      durationMs: number | null;
+      promptTokens: number | null;
+      completionTokens: number | null;
+    }
+  | {
+      kind: "thinking";
+      timestamp: string | null;
+      ttftMs: number | null;
+      durationMs: number | null;
+    }
+  | { kind: "tool"; timestamp: string | null; durationMs: number | null }
+  | { kind: "subAgentReply"; timestamp: string | null }
+  | { kind: "subAgentFailure"; timestamp: string | null };
 
 export interface PersonaInfo {
   name: string;
@@ -83,7 +116,9 @@ export type ChatOk =
   | { kind: "state"; state: SessionState }
   | { kind: "personas"; personas: PersonaInfo[] }
   | { kind: "historyAcknowledged" }
-  | { kind: "metrics"; metrics: MessageMeta[] };
+  | { kind: "metrics"; metrics: MessageMeta[] }
+  | { kind: "subAgents"; subAgents: SubAgentInfo[] }
+  | { kind: "subAgentTranscript"; id: string; history: HistoricalMessage[] };
 
 export type ChatError =
   | { kind: "noTurnInFlight" }
@@ -108,7 +143,9 @@ export type ChatEvent =
   | { kind: "messageFinished"; turnId: TurnId; reason: FinishReason }
   | { kind: "stateChanged"; state: SessionState }
   | { kind: "historyReplaced"; history: HistoricalMessage[] }
-  | { kind: "metricsReplaced"; metrics: MessageMeta[] };
+  | { kind: "metricsReplaced"; metrics: MessageMeta[] }
+  | { kind: "subAgentsChanged"; subAgents: SubAgentInfo[] }
+  | { kind: "subAgentTranscriptUpdated"; id: string; history: HistoricalMessage[] };
 
 // ─── SessionState / HistoricalMessage ────────────────────────────────
 
@@ -229,18 +266,89 @@ export function encodeChatRequest(req: ChatRequest): Uint8Array {
     case "getMetrics":
       pc.writeVariant(w, 10);
       break;
+    case "listSubAgents":
+      pc.writeVariant(w, 11);
+      break;
+    case "getSubAgentTranscript":
+      pc.writeVariant(w, 12);
+      pc.writeString(w, req.id);
+      break;
   }
   return w.finish();
 }
 
-function readMessageMeta(r: pc.Reader): MessageMeta {
+function readSubAgentStatus(r: pc.Reader): SubAgentStatus {
+  const v = pc.readVariant(r);
+  switch (v) {
+    case 0:
+      return { kind: "running" };
+    case 1:
+      return { kind: "completed" };
+    case 2:
+      return { kind: "failed", reason: pc.readString(r) };
+    case 3:
+      return { kind: "stopped" };
+    default:
+      throw new Error(`postcard: invalid SubAgentStatus ${v}`);
+  }
+}
+
+function readSubAgentInfo(r: pc.Reader): SubAgentInfo {
   return {
-    timestamp: pc.readString(r),
-    ttftMs: pc.readOption(r, pc.readU64),
-    durationMs: pc.readOption(r, pc.readU64),
-    promptTokens: pc.readOption(r, pc.readU32),
-    completionTokens: pc.readOption(r, pc.readU32),
+    id: pc.readString(r),
+    parentId: pc.readOption(r, pc.readString),
+    persona: pc.readString(r),
+    status: readSubAgentStatus(r),
+    lastProgress: pc.readOption(r, pc.readString),
   };
+}
+
+/** Convert a postcard `Option<u64>` to `number | null`, rejecting values
+ *  past `Number.MAX_SAFE_INTEGER` so the wire layer can't sneak a lossy
+ *  truncation into UI code. ms durations stay safe for millennia. */
+function readU64Ms(r: pc.Reader): number | null {
+  const raw = pc.readOption(r, pc.readU64);
+  if (raw === null) return null;
+  if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`metrics: duration ${raw} exceeds safe integer range`);
+  }
+  return Number(raw);
+}
+
+function readMessageMeta(r: pc.Reader): MessageMeta {
+  const v = pc.readVariant(r);
+  switch (v) {
+    case 0:
+      return { kind: "user", timestamp: pc.readOption(r, pc.readString) };
+    case 1:
+      return {
+        kind: "assistant",
+        timestamp: pc.readOption(r, pc.readString),
+        ttftMs: readU64Ms(r),
+        durationMs: readU64Ms(r),
+        promptTokens: pc.readOption(r, pc.readU32),
+        completionTokens: pc.readOption(r, pc.readU32),
+      };
+    case 2:
+      return {
+        kind: "thinking",
+        timestamp: pc.readOption(r, pc.readString),
+        ttftMs: readU64Ms(r),
+        durationMs: readU64Ms(r),
+      };
+    case 3:
+      return {
+        kind: "tool",
+        timestamp: pc.readOption(r, pc.readString),
+        durationMs: readU64Ms(r),
+      };
+    case 4:
+      return { kind: "subAgentReply", timestamp: pc.readOption(r, pc.readString) };
+    case 5:
+      return { kind: "subAgentFailure", timestamp: pc.readOption(r, pc.readString) };
+    default:
+      throw new Error(`postcard: invalid MessageMeta ${v}`);
+  }
 }
 
 // ─── ChatResponse / ChatOk / ChatError (decode only) ─────────────────
@@ -279,6 +387,14 @@ function readChatOk(r: pc.Reader): ChatOk {
       return { kind: "historyAcknowledged" };
     case 7:
       return { kind: "metrics", metrics: pc.readVec(r, readMessageMeta) };
+    case 8:
+      return { kind: "subAgents", subAgents: pc.readVec(r, readSubAgentInfo) };
+    case 9:
+      return {
+        kind: "subAgentTranscript",
+        id: pc.readString(r),
+        history: pc.readVec(r, readHistoricalMessage),
+      };
     default:
       throw new Error(`postcard: invalid ChatOk ${v}`);
   }
@@ -383,6 +499,17 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       };
     case 7:
       return { kind: "metricsReplaced", metrics: pc.readVec(r, readMessageMeta) };
+    case 8:
+      return {
+        kind: "subAgentsChanged",
+        subAgents: pc.readVec(r, readSubAgentInfo),
+      };
+    case 9:
+      return {
+        kind: "subAgentTranscriptUpdated",
+        id: pc.readString(r),
+        history: pc.readVec(r, readHistoricalMessage),
+      };
     default:
       throw new Error(`postcard: invalid ChatEvent ${v}`);
   }

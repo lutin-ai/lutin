@@ -6,7 +6,6 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
   const showActions = message.state === "pending" && (onApprove || onDeny);
   const summary = argPreview(message.args);
-  const argBody = formatBody(message.args);
   const resultBody =
     message.state === "failed" && message.error
       ? message.error
@@ -17,6 +16,7 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
   // toggle hit-area; their click handlers stop propagation in case a
   // workflow nests buttons differently.
   return (
+    <div className="lutin-chat__msg lutin-chat__msg--tool">
     <div className="lutin-chat__tool" data-state={message.state}>
       <button
         type="button"
@@ -24,24 +24,29 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
       >
-        <span className="lutin-chat__tool-caret" aria-hidden="true">
-          {expanded ? "▾" : "▸"}
-        </span>
+        <span
+          className="lutin-chat__tool-dot"
+          data-state={message.state}
+          aria-hidden="true"
+          title={message.state}
+        />
         <span className="lutin-chat__tool-name">{message.name}</span>
         {summary && !expanded && (
           <span className="lutin-chat__tool-summary">{summary}</span>
         )}
-        <span className="lutin-chat__tool-state" data-state={message.state}>
-          {message.state}
-        </span>
+        {(message.state === "running" || message.state === "pending") && (
+          <span className="lutin-chat__tool-state" data-state={message.state}>
+            {message.state}
+          </span>
+        )}
         <MetricsHeader meta={message.meta} />
       </button>
       {expanded && (
         <div className="lutin-chat__tool-detail">
-          {argBody && (
+          {hasArgs(message.args) && (
             <>
               <div className="lutin-chat__tool-label">Input</div>
-              <div className="lutin-chat__tool-body">{argBody}</div>
+              <ArgsView value={message.args} />
             </>
           )}
           {resultBody && (
@@ -91,6 +96,7 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
           )}
         </div>
       )}
+    </div>
     </div>
   );
 }
@@ -149,4 +155,112 @@ function formatBody(value: unknown): string | null {
   // Adapter-projected values are parsed JSON or strings; cycles aren't
   // reachable from the wire, so JSON.stringify can't throw here.
   return JSON.stringify(value, null, 2);
+}
+
+function hasArgs(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") return value.length > 0;
+  if (typeof value === "object") {
+    if (Array.isArray(value)) return value.length > 0;
+    return Object.keys(value as object).length > 0;
+  }
+  return true;
+}
+
+// Render tool args as a labelled table when it's an object — each top-level
+// key becomes a row with the field name on the left and the value rendered
+// inline (or as a block for multi-line strings / nested structures). For
+// non-object inputs (raw string, number, etc.) we fall back to a single
+// value block so the renderer is total.
+function ArgsView({ value }: { value: unknown }) {
+  if (value != null && typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    return (
+      <dl className="lutin-chat__tool-args">
+        {entries.map(([k, v]) => (
+          <div key={k} className="lutin-chat__tool-arg">
+            <dt className="lutin-chat__tool-arg-key">{k}</dt>
+            <dd className="lutin-chat__tool-arg-val">
+              <ArgValue value={v} />
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  return (
+    <div className="lutin-chat__tool-body">
+      <ArgValue value={value} />
+    </div>
+  );
+}
+
+const INLINE_STR_LIMIT = 120;
+
+function ArgValue({ value }: { value: unknown }) {
+  if (value === null) {
+    return <span className="lutin-chat__tool-arg-null">null</span>;
+  }
+  if (value === undefined) {
+    return <span className="lutin-chat__tool-arg-null">—</span>;
+  }
+  if (typeof value === "boolean") {
+    return <span className="lutin-chat__tool-arg-bool">{String(value)}</span>;
+  }
+  if (typeof value === "number") {
+    return <span className="lutin-chat__tool-arg-num">{value}</span>;
+  }
+  if (typeof value === "string") {
+    if (value.length === 0) {
+      return <span className="lutin-chat__tool-arg-null">""</span>;
+    }
+    const block = value.includes("\n") || value.length > INLINE_STR_LIMIT;
+    return (
+      <span
+        className={
+          block
+            ? "lutin-chat__tool-arg-str lutin-chat__tool-arg-str--block"
+            : "lutin-chat__tool-arg-str"
+        }
+      >
+        {value}
+      </span>
+    );
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return <span className="lutin-chat__tool-arg-null">[]</span>;
+    }
+    const allScalar = value.every(
+      (v) =>
+        v === null ||
+        typeof v === "string" ||
+        typeof v === "number" ||
+        typeof v === "boolean",
+    );
+    if (allScalar) {
+      return (
+        <span className="lutin-chat__tool-arg-list">
+          {value.map((v, i) => (
+            <span key={i} className="lutin-chat__tool-arg-chip">
+              <ArgValue value={v} />
+            </span>
+          ))}
+        </span>
+      );
+    }
+    return (
+      <pre className="lutin-chat__tool-arg-json">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    );
+  }
+  if (typeof value === "object") {
+    return (
+      <pre className="lutin-chat__tool-arg-json">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    );
+  }
+  return <span>{String(value)}</span>;
 }

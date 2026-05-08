@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ChatView } from "@lutin/chat-widgets";
+import { ChatView, type MessageActions } from "@lutin/chat-widgets";
 import "@lutin/chat-widgets/theme.css";
 import type { Lutin } from "./lutin";
 import {
   type ChatEvent,
+  type ChatRequest,
   type ChatResponse,
   type PersonaInfo,
   decodeChatEvent,
@@ -11,7 +12,8 @@ import {
   encodeChatRequest,
 } from "./chat";
 import { initialSnapshot, reduce } from "./session";
-import { toViewModel } from "./adapter";
+import { subAgentViewModel, toViewModel } from "./adapter";
+import type { SubAgentInfo } from "./chat";
 import { makePersonaComposer } from "./PersonaComposer";
 import { useChatTts } from "./tts";
 
@@ -23,8 +25,12 @@ export function App({ lutin }: Props) {
   const [snap, dispatch] = useReducer(reduce, initialSnapshot);
   const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
   const [draft, setDraft] = useState("");
+  // `null` = parent session view; `agent#N` = read-only child transcript.
+  // Drives both the rendered transcript and the composer's visibility.
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [ttsOn, setTtsOn] = useState(false);
-  const tts = useChatTts(lutin, ttsOn);
+  const [ttsSpeed, setTtsSpeed] = useState(1.0);
+  const tts = useChatTts(lutin, ttsOn, ttsSpeed);
 
   // Wire PTT / open-mic transcription deliveries into the composer.
   // We append rather than replace so the user can stack voice input
@@ -72,6 +78,36 @@ export function App({ lutin }: Props) {
       .catch((err) => {
         if (cancelled) return;
         dispatch({ type: "submitFailed", message: `subscribe: ${String(err)}` });
+      });
+
+    // Metrics ride a separate request because Subscribed predates the
+    // sidecar; sending it after Subscribe keeps wire shapes additive.
+    lutin
+      .request(encodeChatRequest({ kind: "getMetrics" }))
+      .then((body) => {
+        if (cancelled) return;
+        try {
+          dispatch({ type: "response", response: decodeChatResponse(body) });
+        } catch (err) {
+          console.warn("malformed GetMetrics response", err);
+        }
+      })
+      .catch(() => {
+        // Metrics are decorative — failure leaves footers blank.
+      });
+
+    lutin
+      .request(encodeChatRequest({ kind: "listSubAgents" }))
+      .then((body) => {
+        if (cancelled) return;
+        try {
+          dispatch({ type: "response", response: decodeChatResponse(body) });
+        } catch (err) {
+          console.warn("malformed ListSubAgents response", err);
+        }
+      })
+      .catch(() => {
+        // Panel is decorative — failure leaves it empty.
       });
 
     lutin
@@ -200,8 +236,64 @@ export function App({ lutin }: Props) {
     [lutin],
   );
 
+  const selectAgent = useCallback(
+    (id: string | null) => {
+      setSelectedAgent(id);
+      if (id === null) return;
+      // Fetch a fresh snapshot every time the user opens (or re-opens)
+      // a child — the live broadcast keeps it warm while open, but a
+      // child that finished while the panel was closed needs a pull
+      // to land its terminal turn.
+      lutin
+        .request(encodeChatRequest({ kind: "getSubAgentTranscript", id }))
+        .then((body) => {
+          try {
+            dispatch({ type: "response", response: decodeChatResponse(body) });
+          } catch (err) {
+            console.warn("malformed GetSubAgentTranscript response", err);
+          }
+        })
+        .catch(() => {
+          // Read-only side panel — a missing transcript renders empty.
+        });
+    },
+    [lutin],
+  );
+
   const ttsAvailable = lutin.tts !== undefined;
   const onToggleTts = useCallback(() => setTtsOn((v) => !v), []);
+
+  // Right-click context-menu actions on completed messages. The bubble
+  // ids are stringified projected indices (see adapter.ts); ignore
+  // non-numeric ids (live/flushed streaming buffers).
+  const messageActions = useMemo<MessageActions>(() => {
+    const send = (req: ChatRequest, label: string) => {
+      lutin
+        .request(encodeChatRequest(req))
+        .then((body) => dispatch({ type: "response", response: decodeChatResponse(body) }))
+        .catch((err) =>
+          dispatch({ type: "submitFailed", message: `${label}: ${String(err)}` }),
+        );
+    };
+    const parseIndex = (id: string): number | null => {
+      const n = Number(id);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    };
+    return {
+      onEdit: (id, text) => {
+        const index = parseIndex(id);
+        if (index !== null) send({ kind: "editMessage", index, text }, "editMessage");
+      },
+      onDelete: (id) => {
+        const index = parseIndex(id);
+        if (index !== null) send({ kind: "deleteMessage", index }, "deleteMessage");
+      },
+      onDeleteFromHere: (id) => {
+        const index = parseIndex(id);
+        if (index !== null) send({ kind: "deleteFromHere", index }, "deleteFromHere");
+      },
+    };
+  }, [lutin]);
 
   const Composer = useMemo(
     () =>
@@ -214,21 +306,318 @@ export function App({ lutin }: Props) {
         ttsOn,
         ttsLoading: tts.loading,
         onToggleTts,
+        ttsSpeed,
+        onChangeTtsSpeed: setTtsSpeed,
       }),
-    [personas, snap.persona, changePersona, rerun, ttsAvailable, ttsOn, tts.loading, onToggleTts],
+    [personas, snap.persona, changePersona, rerun, ttsAvailable, ttsOn, tts.loading, onToggleTts, ttsSpeed],
   );
 
-  const vm = toViewModel(snap);
+  // Hide the composer entirely when viewing a child — sub-agents are
+  // read-only here. We swap to a no-op slot rather than disabling the
+  // composer so the chat-widget's spacing collapses cleanly.
+  const HiddenComposer = useMemo(() => () => null, []);
+
+  const viewing = selectedAgent;
+  const vm =
+    viewing === null
+      ? toViewModel(snap)
+      : subAgentViewModel(snap.subAgentTranscripts[viewing] ?? []);
+  const composerSlot = viewing === null ? Composer : HiddenComposer;
 
   return (
-    <ChatView
-      messages={vm.messages}
-      turn={vm.turn}
-      onSend={send}
-      onCancel={cancel}
-      draft={draft}
-      onDraftChange={setDraft}
-      slots={{ Composer }}
+    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
+      <SubAgentsTree
+        agents={snap.subAgents}
+        selected={selectedAgent}
+        onSelect={selectAgent}
+      />
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        {viewing !== null && (
+          <ChildHeader
+            agent={snap.subAgents.find((a) => a.id === viewing) ?? null}
+            id={viewing}
+            onBack={() => selectAgent(null)}
+          />
+        )}
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          <ChatView
+            messages={vm.messages}
+            turn={vm.turn}
+            onSend={send}
+            onCancel={cancel}
+            draft={draft}
+            onDraftChange={setDraft}
+            messageActions={messageActions}
+            slots={{ Composer: composerSlot }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface TreeNode {
+  agent: SubAgentInfo;
+  children: TreeNode[];
+}
+
+/// Build a forest of sub-agent rows out of the flat `parentId` list.
+/// Top-level entries are children of the parent session (parentId
+/// null); deeper levels nest under their parent's id. Orphaned rows
+/// (parent gone before snapshot landed) get hoisted to top-level so
+/// they don't disappear from the tree.
+function buildTree(agents: SubAgentInfo[]): TreeNode[] {
+  const byId = new Map<string, TreeNode>(
+    agents.map((a) => [a.id, { agent: a, children: [] }]),
+  );
+  const roots: TreeNode[] = [];
+  for (const a of agents) {
+    const node = byId.get(a.id)!;
+    if (a.parentId !== null && byId.has(a.parentId)) {
+      byId.get(a.parentId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  return roots;
+}
+
+interface FlatRow {
+  agent: SubAgentInfo;
+  /// Stable prefix string of the parent column ("│ ", "  ") chars in
+  /// order from root → this row's parent. The row's own connector
+  /// (├─ / └─) is appended at render.
+  prefix: string;
+  isLast: boolean;
+}
+
+function flatten(tree: TreeNode[], prefix = "", out: FlatRow[] = []): FlatRow[] {
+  tree.forEach((node, i) => {
+    const isLast = i === tree.length - 1;
+    out.push({ agent: node.agent, prefix, isLast });
+    flatten(node.children, prefix + (isLast ? "  " : "│ "), out);
+  });
+  return out;
+}
+
+interface TreeProps {
+  agents: SubAgentInfo[];
+  selected: string | null;
+  onSelect: (id: string | null) => void;
+}
+
+function SubAgentsTree({ agents, selected, onSelect }: TreeProps) {
+  const rows = flatten(buildTree(agents));
+  return (
+    <aside
+      style={{
+        width: 260,
+        flexShrink: 0,
+        borderRight: "1px solid rgba(255,255,255,0.08)",
+        background: "rgba(255,255,255,0.02)",
+        color: "#ddd",
+        font: "12px/1.4 -apple-system, system-ui, sans-serif",
+        padding: "12px 0",
+        overflowY: "auto",
+      }}
+    >
+      <div
+        style={{
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+          fontSize: 10,
+          color: "#888",
+          padding: "0 14px 8px",
+        }}
+      >
+        Agents
+      </div>
+      <RootRow selected={selected === null} onSelect={() => onSelect(null)} />
+      {rows.length === 0 ? (
+        <div style={{ color: "#555", padding: "8px 14px", fontSize: 11 }}>
+          (no sub-agents yet)
+        </div>
+      ) : (
+        rows.map((row) => (
+          <TreeRow
+            key={row.agent.id}
+            row={row}
+            selected={selected === row.agent.id}
+            onSelect={() => onSelect(row.agent.id)}
+          />
+        ))
+      )}
+    </aside>
+  );
+}
+
+function RootRow({ selected, onSelect }: { selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        width: "100%",
+        textAlign: "left",
+        background: selected ? "rgba(255,255,255,0.06)" : "transparent",
+        color: "#ddd",
+        border: "none",
+        padding: "5px 14px",
+        cursor: "pointer",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: 12,
+      }}
+    >
+      <FolderIcon />
+      <span>chat</span>
+    </button>
+  );
+}
+
+function TreeRow({
+  row,
+  selected,
+  onSelect,
+}: {
+  row: FlatRow;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const connector = row.isLast ? "└─" : "├─";
+  const { agent } = row;
+  return (
+    <button
+      onClick={onSelect}
+      title={
+        agent.status.kind === "failed"
+          ? agent.status.reason
+          : (agent.lastProgress ?? "")
+      }
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        width: "100%",
+        textAlign: "left",
+        background: selected ? "rgba(255,255,255,0.06)" : "transparent",
+        color: "#ddd",
+        border: "none",
+        padding: "4px 14px",
+        cursor: "pointer",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: 12,
+        whiteSpace: "pre",
+      }}
+    >
+      <span style={{ color: "#555" }}>
+        {row.prefix}
+        {connector}
+      </span>
+      <StatusDot status={agent.status} />
+      <span style={{ color: "#aaa" }}>{agent.id}</span>
+      <span
+        style={{
+          color: "#777",
+          fontFamily: "-apple-system, system-ui, sans-serif",
+          fontSize: 11,
+          marginLeft: 4,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          flex: 1,
+        }}
+      >
+        {agent.persona}
+      </span>
+    </button>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0 }}>
+      <path
+        d="M1.5 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1h6.1a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function StatusDot({ status }: { status: SubAgentInfo["status"] }) {
+  const color = (() => {
+    switch (status.kind) {
+      case "running":
+        return "#5cf";
+      case "completed":
+        return "#7d6";
+      case "failed":
+        return "#f77";
+      case "stopped":
+        return "#999";
+    }
+  })();
+  return (
+    <span
+      style={{
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background: color,
+        flexShrink: 0,
+      }}
     />
+  );
+}
+
+function ChildHeader({
+  agent,
+  id,
+  onBack,
+}: {
+  agent: SubAgentInfo | null;
+  id: string;
+  onBack: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 16px",
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+        font: "12px/1.4 -apple-system, system-ui, sans-serif",
+        color: "#bbb",
+        background: "rgba(255,255,255,0.02)",
+      }}
+    >
+      <button
+        onClick={onBack}
+        style={{
+          background: "rgba(255,255,255,0.05)",
+          border: "1px solid rgba(255,255,255,0.08)",
+          color: "#ddd",
+          borderRadius: 4,
+          padding: "3px 8px",
+          cursor: "pointer",
+          fontSize: 11,
+        }}
+      >
+        ← chat
+      </button>
+      <span style={{ fontFamily: "ui-monospace, monospace" }}>{id}</span>
+      {agent && <span style={{ color: "#888" }}>· {agent.persona}</span>}
+      {agent && <StatusDot status={agent.status} />}
+      {agent && agent.status.kind === "failed" && (
+        <span style={{ color: "#e88" }} title={agent.status.reason}>
+          failed
+        </span>
+      )}
+    </div>
   );
 }

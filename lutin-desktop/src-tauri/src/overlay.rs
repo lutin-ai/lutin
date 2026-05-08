@@ -24,10 +24,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime};
 use tracing::{info, warn};
 
 const OVERLAY_LABEL: &str = "overlay";
+
+/// Distance from the top of the monitor's work area to the pill, in
+/// physical pixels. Tauri's `set_position` operates in physical units
+/// regardless of DPI, so we apply the monitor's scale factor below.
+const TOP_OFFSET_LOGICAL: f64 = 24.0;
+
+/// Logical width of the overlay window, kept in sync with
+/// `tauri.conf.json`. We don't query `outer_size()` because the
+/// reposition runs *before* `win.show()` — on the first call the
+/// window hasn't been mapped yet and `outer_size()` returns zeros on
+/// some backends (notably webkit2gtk), which leaves the pill's
+/// top-left corner sitting at screen center instead of its true
+/// center.
+const WIDTH_LOGICAL: f64 = 240.0;
 
 /// What the pill displays. Mirrors the JS-side `OverlayPhase` 1:1.
 /// Externally tagged on `kind` so each variant can carry its own
@@ -93,8 +107,49 @@ pub fn show<R: Runtime>(app: &AppHandle<R>, phase: OverlayPhase) {
         warn!("overlay: window '{OVERLAY_LABEL}' not registered — config or dev-server issue");
         return;
     };
+    // Re-anchor only when the window was hidden. Repositioning a
+    // visible window on every phase change causes webkit2gtk on
+    // Wayland to leave stale frames behind (the prior pill ghosts at
+    // the old position), and can shift the pill by a pixel or two as
+    // outer_size fluctuates. Tiling WMs like i3 still need the
+    // initial nudge from dead-center, which a hidden→shown transition
+    // covers.
+    let was_visible = win.is_visible().unwrap_or(false);
+    if !was_visible {
+        position_top_center(&win);
+    }
     if let Err(e) = win.show() {
         warn!(error = %e, "overlay: show failed");
+    }
+}
+
+/// Move the overlay window to the horizontal center of its current
+/// monitor, just below the top edge. Best-effort — if monitor info
+/// isn't available we leave the position alone rather than guessing.
+fn position_top_center<R: Runtime>(win: &tauri::WebviewWindow<R>) {
+    let monitor = match win.current_monitor() {
+        Ok(Some(m)) => m,
+        Ok(None) => match win.primary_monitor() {
+            Ok(Some(m)) => m,
+            _ => {
+                warn!("overlay: no monitor info; skipping reposition");
+                return;
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "overlay: current_monitor failed");
+            return;
+        }
+    };
+    let mon_pos = monitor.position();
+    let mon_size = monitor.size();
+    let scale = monitor.scale_factor();
+    let width_px = (WIDTH_LOGICAL * scale).round() as i32;
+    let top_offset_px = (TOP_OFFSET_LOGICAL * scale).round() as i32;
+    let x = mon_pos.x + ((mon_size.width as i32 - width_px) / 2);
+    let y = mon_pos.y + top_offset_px;
+    if let Err(e) = win.set_position(PhysicalPosition::new(x, y)) {
+        warn!(error = %e, "overlay: set_position failed");
     }
 }
 

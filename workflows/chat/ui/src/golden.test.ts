@@ -138,21 +138,13 @@ describe("ChatResponse decode goldens", () => {
       { ok: true, value: { kind: "metrics", metrics: [] } },
     ],
     [
-      "Ok(Metrics(1ts))",
-      hex(0x00, 0x07, 0x01, 0x01, 0x54, 0x00, 0x00, 0x00, 0x00),
+      "Ok(Metrics(1user))",
+      hex(0x00, 0x07, 0x01, 0x00, 0x01, 0x01, 0x54),
       {
         ok: true,
         value: {
           kind: "metrics",
-          metrics: [
-            {
-              timestamp: "T",
-              ttftMs: null,
-              durationMs: null,
-              promptTokens: null,
-              completionTokens: null,
-            },
-          ],
+          metrics: [{ kind: "user", timestamp: "T" }],
         },
       },
     ],

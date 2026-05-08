@@ -13,24 +13,23 @@
 //! events onto `ChatEvent` broadcasts.
 
 mod agents;
-mod metrics;
+mod store;
 mod tools;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use chat::{
     ChatError, ChatEvent, ChatOk, ChatRequest, ChatResponse, FinishReason, HistoricalMessage,
-    MessageMeta, SessionState, ToolOutcome, TurnId, decode as chat_decode, encode as chat_encode,
-    load_state, save_state,
+    MessageMeta, SessionState, SubAgentInfo, SubAgentStatus, ToolOutcome, TurnId,
+    decode as chat_decode, encode as chat_encode, load_state, save_state,
 };
-use crate::metrics::{
-    AssistantStats, MetricsSidecar, StoredMeta, ToolStats, now_rfc3339,
+use crate::store::{
+    Entry, MessageMetrics, TextStats, ThinkingStats, ToolStats, now_rfc3339,
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use lutin_agent_sdk::{
@@ -42,12 +41,18 @@ use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use lutin_settings::Settings;
 use lutin_storage::Resolver;
 use lutin_workflow_sdk::agent::{
-    build_agent as sdk_build_agent, refresh_agent as sdk_refresh_agent, BuildArgs, BuildError,
+    build_agent as sdk_build_agent, build_provider as sdk_build_provider,
+    refresh_agent as sdk_refresh_agent, BuildArgs, BuildError,
 };
-use lutin_workflow_sdk::transcript;
+use lutin_workflow_sdk::compaction::{
+    maybe_compact, CompactionConfig, CompactionOutcome,
+};
+use lutin_workflow_sdk::prompt::{
+    AgentEntry as PromptAgentEntry, PersonaEntry as PromptPersonaEntry, PromptExtras,
+};
 use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
@@ -125,21 +130,25 @@ struct AppState {
     session: SessionId,
     issuer: VerifyingKey,
     state_dir: PathBuf,
-    /// Needed by request handlers that read shared config (personas,
-    /// settings) — not just the agent runner.
-    global_config_dir: PathBuf,
-    project_config_dir: PathBuf,
+    /// Resolver over global + project config dirs. Shared with the
+    /// runner via `RunnerCtx.resolver`; held here so request handlers
+    /// (`ListPersonas`, etc.) read from the same source without
+    /// re-constructing.
+    resolver: Arc<Resolver>,
     events: broadcast::Sender<ChatEvent>,
     next_turn: Arc<AtomicU64>,
     /// Send-only handle to the agent runner. The runner owns the
     /// `Agent` on its task's stack — there is no shared mutable
     /// agent state in the WS layer.
     agent_cmds: mpsc::UnboundedSender<AgentCmd>,
-    /// Set by the runner when it bails (startup failure, panic in
-    /// init, etc). Read by `handle_request` when `agent_cmds.send`
-    /// returns `Err`, so the user sees the actual reason instead of
-    /// a generic "agent runner is gone".
-    runner_failure: Arc<Mutex<Option<String>>>,
+    /// Watch receiver published by the runner on exit. Readers
+    /// `.borrow()` the latest published reason without taking a lock.
+    runner_failure: watch::Receiver<Option<String>>,
+    /// Send-only handle to the sub-agent registry actor. Cloned into
+    /// `RunnerCtx` for spawn/stop, and held here so `ListSubAgents`
+    /// can serve a snapshot from the WS layer without round-tripping
+    /// through the runner.
+    agent_registry: mpsc::UnboundedSender<agents::AgentRegistryCmd>,
 }
 
 impl AppState {
@@ -173,8 +182,12 @@ async fn main() -> Result<()> {
 
     let (events, _) = broadcast::channel(64);
     let (agent_cmds, agent_rx) = mpsc::unbounded_channel();
-    let runner_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (runner_failure_tx, runner_failure_rx) = watch::channel::<Option<String>>(None);
     let next_turn = Arc::new(AtomicU64::new(1));
+    let resolver = Arc::new(Resolver::new(
+        env.global_config_dir.clone(),
+        Some(env.project_config_dir.clone()),
+    ));
 
     // Pre-create the registry's command + completion channels so we
     // can hand `agent_registry` to `RunnerCtx` (which the spawner
@@ -189,12 +202,12 @@ async fn main() -> Result<()> {
 
     let runner_ctx = RunnerCtx {
         state_dir: env.state_dir.clone(),
-        global_config_dir: env.global_config_dir.clone(),
         project_config_dir: env.project_config_dir.clone(),
+        resolver: resolver.clone(),
         events: events.clone(),
-        failure: runner_failure.clone(),
+        failure: runner_failure_tx,
         next_turn: next_turn.clone(),
-        agent_registry: agent_registry_tx,
+        agent_registry: agent_registry_tx.clone(),
     };
     let spawner_ctx = runner_ctx.clone();
     let spawner: agents::Spawner = Box::new(move |id, spec, update_tx| {
@@ -212,12 +225,12 @@ async fn main() -> Result<()> {
         session: env.session,
         issuer: env.project_pubkey,
         state_dir: env.state_dir,
-        global_config_dir: env.global_config_dir,
-        project_config_dir: env.project_config_dir,
+        resolver,
         events,
         next_turn,
         agent_cmds,
-        runner_failure,
+        runner_failure: runner_failure_rx,
+        agent_registry: agent_registry_tx,
     };
 
     loop {
@@ -346,11 +359,11 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
         ChatRequest::Subscribe => {
             let s = load_state(&state.state_dir)
                 .map_err(|e| ChatError::Internal(format!("load state: {e}")))?;
-            let messages = transcript::load(&state.state_dir)
+            let entries = store::load(&state.state_dir)
                 .map_err(|e| ChatError::Internal(format!("load transcript: {e}")))?;
             Ok(ChatOk::Subscribed {
                 state: s,
-                history: project_history(&messages),
+                history: project_history(&entries),
             })
         }
         ChatRequest::GetState => match load_state(&state.state_dir) {
@@ -374,11 +387,7 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
             Ok(ChatOk::Cancelled)
         }
         ChatRequest::ListPersonas => {
-            let resolver = Resolver::new(
-                state.global_config_dir.clone(),
-                Some(state.project_config_dir.clone()),
-            );
-            let personas = Persona::list(&resolver)
+            let personas = Persona::list(&state.resolver)
                 .map_err(|e| ChatError::Internal(format!("list personas: {e}")))?;
             let projected = personas
                 .into_iter()
@@ -399,9 +408,8 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
             {
                 let reason = state
                     .runner_failure
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
+                    .borrow()
+                    .clone()
                     .unwrap_or_else(|| "agent runner exited without recording a reason".into());
                 return Err(ChatError::Internal(format!("agent runner unavailable: {reason}")));
             }
@@ -412,9 +420,8 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
             if state.agent_cmds.send(AgentCmd::Rerun { turn }).is_err() {
                 let reason = state
                     .runner_failure
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
+                    .borrow()
+                    .clone()
                     .unwrap_or_else(|| "agent runner exited without recording a reason".into());
                 return Err(ChatError::Internal(format!("agent runner unavailable: {reason}")));
             }
@@ -437,14 +444,49 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
         }
         ChatRequest::GetMetrics => {
             // Disk-backed read so this works whether or not the runner
-            // has booted an Agent yet. Length parity between transcript
-            // and sidecar is maintained by every write path that
-            // touches one or the other.
-            let messages = transcript::load(&state.state_dir)
+            // has booted an Agent yet. Entries carry both the message
+            // and its metrics in lockstep, so a single load is enough.
+            let entries = store::load(&state.state_dir)
                 .map_err(|e| ChatError::Internal(format!("load transcript: {e}")))?;
-            let sidecar = metrics::load(&state.state_dir)
-                .map_err(|e| ChatError::Internal(format!("load metrics: {e}")))?;
-            Ok(ChatOk::Metrics(project_metrics(&messages, &sidecar)))
+            Ok(ChatOk::Metrics(project_metrics(&entries)))
+        }
+        ChatRequest::ListSubAgents => {
+            let (tx, rx) = oneshot::channel();
+            if state
+                .agent_registry
+                .send(agents::AgentRegistryCmd::Snapshot { reply: tx })
+                .is_err()
+            {
+                return Ok(ChatOk::SubAgents(Vec::new()));
+            }
+            let summaries = rx.await.unwrap_or_default();
+            let projected = summaries.into_iter().map(project_summary).collect();
+            Ok(ChatOk::SubAgents(projected))
+        }
+        ChatRequest::GetSubAgentTranscript { id } => {
+            let parsed_id = id
+                .parse::<agents::AgentId>()
+                .map_err(|e| ChatError::Internal(e.to_string()))?;
+            let (tx, rx) = oneshot::channel();
+            state
+                .agent_registry
+                .send(agents::AgentRegistryCmd::Transcript { id: parsed_id, reply: tx })
+                .map_err(|_| {
+                    ChatError::Internal("sub-agent registry is unavailable".into())
+                })?;
+            // `Ok(None)` is "no such agent" — surface as an empty
+            // transcript (the panel may have raced a `Stop`). A dropped
+            // reply is a contract violation: the actor either replies
+            // or its `cmd_tx` is closed (and `send` above would have
+            // failed). Treat as `Internal`.
+            let history = rx
+                .await
+                .map_err(|_| {
+                    ChatError::Internal("sub-agent registry dropped reply".into())
+                })?
+                .map(|messages| project_messages(messages.iter()))
+                .unwrap_or_default();
+            Ok(ChatOk::SubAgentTranscript { id, history })
         }
     }
 }
@@ -454,9 +496,8 @@ async fn mutate_via_runner(state: &AppState, op: MutateOp) -> Result<(), ChatErr
     if state.agent_cmds.send(AgentCmd::Mutate { op, reply: tx }).is_err() {
         let reason = state
             .runner_failure
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+            .borrow()
+            .clone()
             .unwrap_or_else(|| "agent runner exited without recording a reason".into());
         return Err(ChatError::Internal(format!("agent runner unavailable: {reason}")));
     }
@@ -464,32 +505,42 @@ async fn mutate_via_runner(state: &AppState, op: MutateOp) -> Result<(), ChatErr
         .map_err(|_| ChatError::Internal("runner dropped mutation reply".into()))?
 }
 
-/// In-memory bookkeeping for a single turn's metrics. Reset before each
-/// `run_turn` invocation, harvested into the sidecar after the turn ends.
-#[derive(Default)]
+/// In-memory bookkeeping for a single turn's metrics. Created at the
+/// top of `run_turn`, harvested into the corresponding `Entry` rows
+/// after the turn ends.
 struct TurnTracker {
-    /// Wall-clock start of the turn (after the user push, before
+    /// Wall-clock start of the turn (set at construction time, before
     /// `agent.start()`).
-    started_at: Option<Instant>,
-    /// First `AssistantText` delta in the turn — drives TTFT.
+    started_at: Instant,
+    /// First `AssistantText` delta — drives TTFT.
     first_text_at: Option<Instant>,
-    /// First `AssistantReasoning` delta in the turn (if any).
+    /// First `AssistantReasoning` delta (if any).
     first_thinking_at: Option<Instant>,
     /// Final usage as reported by the provider on the last round.
     last_usage: Option<lutin_llm::Usage>,
-    /// Tool-call start times keyed by `ToolCall.id`.
-    tool_started: HashMap<String, Instant>,
+    /// Tool-call lifecycles for this turn. `Vec` rather than `HashMap`
+    /// because per-turn tool counts are typically <10; linear scan is
+    /// cheaper than hashing on every event.
+    tools: Vec<ToolLifecycle>,
+}
+
+struct ToolLifecycle {
+    call_id: String,
+    started_at: Instant,
+    /// Wall-clock timestamp captured when the call started; copied
+    /// into `ToolStats.timestamp` at finalize time.
+    started_ts: String,
+    finished_at: Option<Instant>,
 }
 
 impl TurnTracker {
-    fn note_text(&mut self) {
-        if self.first_text_at.is_none() {
-            self.first_text_at = Some(Instant::now());
-        }
-    }
-    fn note_reasoning(&mut self) {
-        if self.first_thinking_at.is_none() {
-            self.first_thinking_at = Some(Instant::now());
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            first_text_at: None,
+            first_thinking_at: None,
+            last_usage: None,
+            tools: Vec::new(),
         }
     }
 }
@@ -509,13 +560,17 @@ impl TurnTracker {
 #[derive(Clone)]
 struct RunnerCtx {
     state_dir: PathBuf,
-    global_config_dir: PathBuf,
     project_config_dir: PathBuf,
+    /// Resolver over the global + project config dirs. Built once at
+    /// startup and shared via `Arc` so per-call clones don't fan out
+    /// `PathBuf`s. Anything reading personas / settings goes through
+    /// here rather than re-constructing.
+    resolver: Arc<Resolver>,
     events: broadcast::Sender<ChatEvent>,
     /// Shared with `AppState`. Runner writes the failure reason here
-    /// before exiting so subsequent `Send` requests can return it
-    /// instead of the placeholder "agent runner is gone".
-    failure: Arc<Mutex<Option<String>>>,
+    /// on exit; readers consult the latest published value via the
+    /// watch channel without taking a lock.
+    failure: watch::Sender<Option<String>>,
     /// Shared with `AppState`. Runner allocates fresh `TurnId`s for
     /// auto-turns triggered by sub-agent completions, drawing from the
     /// same monotonic source as user-driven turns so ids stay unique.
@@ -538,13 +593,17 @@ impl RunnerCtx {
     fn record_failure(&self, reason: impl Into<String>) {
         let reason = reason.into();
         warn!(error = %reason, "agent runner bailing");
-        if let Ok(mut slot) = self.failure.lock() {
-            // First-write wins — later transient errors after the
-            // initial failure shouldn't overwrite the root cause.
+        // First-write wins — later transient errors after the initial
+        // failure shouldn't overwrite the root cause. `send_if_modified`
+        // gives us read-then-write atomicity without a lock.
+        self.failure.send_if_modified(|slot| {
             if slot.is_none() {
                 *slot = Some(reason);
+                true
+            } else {
+                false
             }
-        }
+        });
     }
 }
 
@@ -563,64 +622,44 @@ async fn run_agent_loop(
     //
     // Truly fatal startup errors (corrupt transcript) still bail —
     // there's no recovery path for those.
-    let history = match transcript::load(&ctx.state_dir) {
-        Ok(m) => m,
+    let mut entries: Vec<Entry> = match store::load(&ctx.state_dir) {
+        Ok(es) => es,
         Err(e) => {
             ctx.record_failure(format!("load transcript: {e}"));
             return;
         }
     };
     // Refresh summary.json on boot so a resumed session gets its
-    // last_activity bumped (and a freshly-created session gets a
-    // file at all, even before the first turn). Done from the
-    // transcript directly so we don't need an Agent for this.
-    write_summary(&ctx.state_dir, &history);
-
-    // Drop the startup-loaded transcript once the boot summary is
-    // written: from here on the canonical store is the agent (when
-    // built) or disk (until then). Re-loading from disk inside
-    // `build_initial_agent` keeps that single-source-of-truth even
-    // when mutations land before the first turn.
-    drop(history);
-
-    // Sub-agent registry was launched in `main()` (the spawner closure
-    // there captures a clone of this `ctx`, so children build with the
-    // same paths and the same `agent_registry` handle for grandchild
-    // spawns). The runner only owns `completions_rx` here, draining
-    // terminal events into the auto-turn handler.
+    // last_activity bumped (and a freshly-created session gets a file
+    // at all, even before the first turn).
+    write_summary(&ctx, &entries);
 
     let mut agent: Option<Agent> = None;
-    // Metrics sidecar lives in memory for fast updates; persisted to
-    // `<state_dir>/metrics.json` alongside the transcript.
-    let mut sidecar = metrics::load(&ctx.state_dir).unwrap_or_else(|e| {
-        warn!(error = %e, "load metrics sidecar; starting fresh");
-        MetricsSidecar::default()
-    });
     loop {
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     AgentCmd::Send { text, turn } => {
-                        if let Some(a) = ensure_agent(&mut agent, &ctx, turn) {
-                            run_turn(&ctx, &mut rx, a, &mut sidecar, Some(text), turn).await;
+                        if let Some(a) = ensure_agent(&mut agent, &ctx, &entries, turn) {
+                            run_turn(&ctx, &mut rx, a, &mut entries, Some(text), turn).await;
                         }
                     }
                     AgentCmd::Rerun { turn } => {
-                        if let Some(a) = ensure_agent(&mut agent, &ctx, turn) {
-                            run_turn(&ctx, &mut rx, a, &mut sidecar, None, turn).await;
+                        if let Some(a) = ensure_agent(&mut agent, &ctx, &entries, turn) {
+                            run_turn(&ctx, &mut rx, a, &mut entries, None, turn).await;
                         }
                     }
                     AgentCmd::Cancel => {} // idle — nothing to cancel
                     AgentCmd::Mutate { op, reply } => {
-                        let result = apply_mutation(&ctx, agent.as_mut(), &mut sidecar, op);
+                        let result = apply_mutation(&ctx, agent.as_mut(), &mut entries, op);
                         let _ = reply.send(result);
                     }
                 }
             }
             evt = completions_rx.recv() => match evt {
                 Some(evt) => {
-                    handle_subagent_completion(&ctx, &mut rx, &mut agent, &mut sidecar, evt).await;
+                    handle_subagent_completion(&ctx, &mut rx, &mut agent, &mut entries, evt).await;
                 }
                 None => {
                     // Registry actor is gone — only happens at shutdown
@@ -642,7 +681,16 @@ async fn run_subagent_task(
     spec: agents::AgentSpec,
     update_tx: mpsc::UnboundedSender<agents::AgentUpdate>,
 ) {
-    let mut agent = match build_subagent(&ctx, &spec) {
+    // Mirror the seed user prompt into the slot before the run starts —
+    // the SDK's `start()` consumes it but doesn't replay it through the
+    // event stream, so without this push the read-only UI panel would
+    // open with no first turn visible. Clone here because `spec` moves
+    // into `build_subagent` next.
+    let _ = update_tx.send(agents::AgentUpdate::TranscriptAppend {
+        id,
+        message: lutin_llm::Message::User(spec.initial_prompt.clone()),
+    });
+    let mut agent = match build_subagent(&ctx, spec, id) {
         Ok(a) => a,
         Err(reason) => {
             let _ = update_tx.send(agents::AgentUpdate::Failed { id, error: reason });
@@ -662,7 +710,47 @@ async fn run_subagent_task(
     while let Some(ev) = stream.next().await {
         match ev {
             AgentEvent::AssistantText(s) => {
-                let _ = update_tx.send(agents::AgentUpdate::Progress { id, last_text: s });
+                let _ = update_tx.send(agents::AgentUpdate::Progress {
+                    id,
+                    last_text: s,
+                });
+            }
+            AgentEvent::AssistantMessage(msg) => {
+                // Final assistant turn for this round (text + tool_calls
+                // + thinking, all in one variant). Push as-is so the UI
+                // mirrors the SDK's transcript exactly.
+                let _ = update_tx.send(agents::AgentUpdate::TranscriptAppend {
+                    id,
+                    message: msg,
+                });
+            }
+            AgentEvent::ToolCallCompleted { call, outcome } => {
+                // Synthesize a `ToolResult` message so the read-only
+                // panel shows what the tool returned alongside the
+                // assistant turn that requested it. The SDK appends
+                // the same shape internally on its way back into the
+                // next round.
+                let content = match outcome {
+                    ToolResult::Ok(c) => c,
+                    ToolResult::Err(e) => lutin_llm::ToolResultContent {
+                        call_id: call.id.clone(),
+                        content: format!("{e}"),
+                        is_error: true,
+                    },
+                    // The enum is `#[non_exhaustive]`; treat any future
+                    // variant as an opaque error so the panel still
+                    // shows something instead of silently dropping the
+                    // round.
+                    other => lutin_llm::ToolResultContent {
+                        call_id: call.id.clone(),
+                        content: format!("{other:?}"),
+                        is_error: true,
+                    },
+                };
+                let _ = update_tx.send(agents::AgentUpdate::TranscriptAppend {
+                    id,
+                    message: lutin_llm::Message::ToolResult(content),
+                });
             }
             AgentEvent::Error(e) => {
                 let _ = update_tx.send(agents::AgentUpdate::Failed {
@@ -702,10 +790,14 @@ async fn run_subagent_task(
             // (`LoopDetected`, `Error`, a future SDK variant) lands
             // here and surfaces as Failed — empty arms would let the
             // slot stay `Running` forever once the task exited.
-            let _ = update_tx.send(agents::AgentUpdate::Failed {
-                id,
-                error: format!("{other:?}"),
-            });
+            // Reuse the chat-protocol mapping so the wording stays in
+            // lockstep with `run_turn`'s terminal events.
+            let error = match map_finish_reason(other) {
+                FinishReason::Failed(reason) => reason,
+                FinishReason::Cancelled => "cancelled".into(),
+                FinishReason::Completed => "completed (unreachable)".into(),
+            };
+            let _ = update_tx.send(agents::AgentUpdate::Failed { id, error });
         }
     }
 }
@@ -719,16 +811,141 @@ async fn run_subagent_task(
 /// Format is line-per-agent for easy LLM parsing; terminal entries
 /// (Completed/Failed/Stopped) are kept so the orchestrator has
 /// audit-trail context, not just live status.
-async fn subagent_block(ctx: &RunnerCtx) -> Option<String> {
+/// Derive `PromptExtras` for one chat turn so the SDK can substitute
+/// `%message_count%`, `%user_message%`, `%agents:attached%`, etc. in
+/// the persona's system prompt. Pulls live data from the on-disk
+/// transcript and the sub-agent registry, plus a project-then-global
+/// persona listing for `%personas:all%`. Field-by-field — none are
+/// load-bearing, so a registry that won't snapshot or a resolver
+/// that returns no personas just leaves those placeholders empty.
+async fn build_prompt_extras(
+    ctx: &RunnerCtx,
+    entries: &[Entry],
+    current_persona: &Persona,
+) -> PromptExtras {
+    let user_message = entries.iter().rev().find_map(|e| match &e.message {
+        lutin_llm::Message::User(t) => Some(t.clone()),
+        _ => None,
+    });
+    let latest_response = entries.iter().rev().find_map(|e| match &e.message {
+        lutin_llm::Message::Assistant { text, .. } if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    });
+
+    // Snapshot the registry; ignore any failure — empty list is the
+    // right fallback (a vanished registry == no children, from the
+    // LLM's perspective).
+    let attached_agents: Vec<PromptAgentEntry> = fetch_summaries(ctx)
+        .await
+        .into_iter()
+        .map(|sum| PromptAgentEntry {
+            name: sum.id.to_string(),
+            status: status_label(&sum.status).to_owned(),
+        })
+        .collect();
+
+    // Persona list for `%personas:all%`. Exclude the current persona
+    // so the LLM doesn't see itself as a delegation target.
+    let personas = Persona::list(&ctx.resolver)
+        .map(|all| {
+            all.into_iter()
+                .filter(|p| p.name != current_persona.name)
+                .map(|p| PromptPersonaEntry {
+                    name: p.name,
+                    display_name: p.display_name,
+                    description: p.description,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    PromptExtras {
+        message_count: entries.len(),
+        user_message,
+        latest_response,
+        attached_agents,
+        personas,
+        chat_kind: "main".into(),
+        ..PromptExtras::default()
+    }
+}
+
+/// One round-trip to the registry actor. Returns an empty vec when
+/// the cmd channel is closed or the reply is dropped — both mean "no
+/// children visible" from the caller's POV. Extracted so `subagent_block`,
+/// `build_prompt_extras`, `broadcast_subagents`, and `ListSubAgents`
+/// don't open-code the same dance.
+async fn fetch_summaries(ctx: &RunnerCtx) -> Vec<agents::AgentSummary> {
     let (tx, rx) = oneshot::channel();
     if ctx
         .agent_registry
         .send(agents::AgentRegistryCmd::Snapshot { reply: tx })
         .is_err()
     {
-        return None;
+        return Vec::new();
     }
-    let summaries = rx.await.ok()?;
+    rx.await.unwrap_or_default()
+}
+
+/// Project an `AgentSummary` to the chat protocol's `SubAgentInfo` wire
+/// shape. Pure — caller wraps in `Vec` if it's snapshotting many.
+fn project_summary(s: agents::AgentSummary) -> SubAgentInfo {
+    SubAgentInfo {
+        id: s.id.to_string(),
+        parent_id: s.parent_id.map(|p| p.to_string()),
+        persona: s.persona,
+        status: match s.status {
+            agents::AgentStatus::Running => SubAgentStatus::Running,
+            agents::AgentStatus::Completed => SubAgentStatus::Completed,
+            agents::AgentStatus::Failed { reason } => SubAgentStatus::Failed { reason },
+            agents::AgentStatus::Stopped => SubAgentStatus::Stopped,
+        },
+        last_progress: s.last_progress,
+    }
+}
+
+/// Snapshot one child's transcript and emit
+/// `SubAgentTranscriptUpdated`. Empty when the registry is gone or
+/// the id is unknown — both indistinguishable from the UI's POV. A
+/// dropped oneshot reply is logged as a contract violation rather
+/// than collapsed into the same empty case.
+async fn broadcast_subagent_transcript(ctx: &RunnerCtx, id: agents::AgentId) {
+    let (tx, rx) = oneshot::channel();
+    if ctx
+        .agent_registry
+        .send(agents::AgentRegistryCmd::Transcript { id, reply: tx })
+        .is_err()
+    {
+        return;
+    }
+    let messages = match rx.await {
+        Ok(opt) => opt.unwrap_or_default(),
+        Err(_) => {
+            warn!(%id, "registry dropped Transcript reply");
+            return;
+        }
+    };
+    let history = project_messages(messages.iter());
+    let _ = ctx.events.send(ChatEvent::SubAgentTranscriptUpdated {
+        id: id.to_string(),
+        history,
+    });
+}
+
+/// Snapshot+broadcast helper: emit `SubAgentsChanged` on the engine's
+/// event channel. Empty payloads are informative (a final terminal
+/// transition can leave the list empty), so we always send.
+async fn broadcast_subagents(ctx: &RunnerCtx) {
+    let snap = fetch_summaries(ctx).await.into_iter().map(project_summary).collect();
+    let _ = ctx.events.send(ChatEvent::SubAgentsChanged(snap));
+}
+
+/// Render the `<active_subagents>` block injected into the
+/// orchestrator's system prompt. `None` when the registry is empty or
+/// unreachable; both mean "no block to inject" — the LLM can't tell
+/// the difference and shouldn't.
+async fn subagent_block(ctx: &RunnerCtx) -> Option<String> {
+    let summaries = fetch_summaries(ctx).await;
     if summaries.is_empty() {
         return None;
     }
@@ -737,13 +954,9 @@ async fn subagent_block(ctx: &RunnerCtx) -> Option<String> {
         out.push_str("- ");
         out.push_str(&s.id.to_string());
         out.push_str(" status=");
-        match &s.status {
-            agents::AgentStatus::Running => out.push_str("running"),
-            agents::AgentStatus::Completed => out.push_str("completed"),
-            agents::AgentStatus::Failed { reason } => {
-                out.push_str(&format!("failed reason={reason:?}"));
-            }
-            agents::AgentStatus::Stopped => out.push_str("stopped"),
+        out.push_str(status_label(&s.status));
+        if let agents::AgentStatus::Failed { reason } = &s.status {
+            out.push_str(&format!(" reason={reason:?}"));
         }
         if let Some(p) = &s.last_progress {
             out.push_str(&format!(" progress={p:?}"));
@@ -752,6 +965,19 @@ async fn subagent_block(ctx: &RunnerCtx) -> Option<String> {
     }
     out.push_str("</active_subagents>");
     Some(out)
+}
+
+/// Stable lowercase label for an `AgentStatus` — one place where the
+/// "running / completed / failed / stopped" wording lives, shared by
+/// the system-prompt block and the prompt-extras `attached_agents`
+/// projection.
+fn status_label(status: &agents::AgentStatus) -> &'static str {
+    match status {
+        agents::AgentStatus::Running => "running",
+        agents::AgentStatus::Completed => "completed",
+        agents::AgentStatus::Failed { .. } => "failed",
+        agents::AgentStatus::Stopped => "stopped",
+    }
 }
 
 /// Append a sub-agent's terminal result to the parent transcript and
@@ -765,14 +991,25 @@ async fn handle_subagent_completion(
     ctx: &RunnerCtx,
     rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
     agent: &mut Option<Agent>,
-    sidecar: &mut MetricsSidecar,
+    entries: &mut Vec<Entry>,
     evt: agents::CompletionEvent,
 ) {
+    // Transcript appends are not turn-triggering events — the child is
+    // still mid-run, no parent-side message to inject yet. Just relay
+    // the latest transcript so any open child view streams in real time.
+    if let agents::CompletionEvent::TranscriptAppend { id, .. } = &evt {
+        broadcast_subagent_transcript(ctx, *id).await;
+        return;
+    }
     let turn = ctx.next_turn();
+    // Push a fresh sub-agent snapshot first so the UI panel reflects
+    // the terminal transition even when the parent has no agent (build
+    // failure path bails below without touching the registry).
+    broadcast_subagents(ctx).await;
     // ensure_agent fabricates a `MessageFinished{Failed}` on its own
     // when the build fails, so any UI watching the auto-turn sees a
     // terminal event even if we bail before run_turn.
-    let Some(a) = ensure_agent(agent, ctx, turn) else {
+    let Some(a) = ensure_agent(agent, ctx, entries, turn) else {
         return;
     };
     // Provider serializers wrap each variant as a user-role turn with
@@ -787,136 +1024,135 @@ async fn handle_subagent_completion(
             agent_id: id.to_string(),
             reason: error.clone(),
         },
+        // Already returned above.
+        agents::CompletionEvent::TranscriptAppend { .. } => unreachable!(),
     };
-    if let Err(e) = a.push_message(msg) {
+    if let Err(e) = a.push_message(msg.clone()) {
         warn!(error = %e, "push agent response failed; skipping auto-turn");
         return;
     }
-    // Stamp the just-pushed message with the current time so the UI's
-    // metrics footer reflects when the parent saw the response, not
-    // when it was first generated upstream.
-    while sidecar.messages.len() < a.messages().len() {
-        sidecar.messages.push(StoredMeta {
-            timestamp: now_rfc3339(),
+    // Mirror the agent's append into our entries vec, stamping with the
+    // moment the parent saw the response (not when it was generated
+    // upstream).
+    entries.push(Entry {
+        message: msg,
+        metrics: MessageMetrics {
+            timestamp: Some(now_rfc3339()),
             ..Default::default()
-        });
-    }
+        },
+    });
     // Persist + broadcast before the turn streams so subscribers see
     // the new entry alongside (or before) any assistant deltas. The
     // turn's tail does its own save — this earlier write is the cost
     // of giving the chrome a HistoryReplaced anchor for the injected
     // message.
-    if let Err(e) = transcript::save(&ctx.state_dir, a.messages()) {
+    if let Err(e) = store::save(&ctx.state_dir, entries) {
         warn!(error = %e, "save transcript after agent response failed");
     }
-    save_sidecar(&ctx.state_dir, sidecar);
-    write_summary(&ctx.state_dir, a.messages());
-    broadcast_history_and_metrics(ctx, a.messages(), sidecar);
+    write_summary(ctx, entries);
+    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
+    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
     // text=None: the agent-response message is already on the
     // transcript; we just want the agent loop to take a turn against it.
-    run_turn(ctx, rx, a, sidecar, None, turn).await;
+    run_turn(ctx, rx, a, entries, None, turn).await;
 }
 
-/// Apply one mutation op to the canonical history. When the agent
-/// exists we mutate its in-memory transcript via `edit_messages`;
-/// otherwise we round-trip through disk. Either way we save and
-/// broadcast `HistoryReplaced` so every subscriber rerenders.
+/// Apply one mutation op to the canonical history. Mutates the in-memory
+/// `entries` vec, then mirrors the new message list into the agent (if
+/// one exists) and persists. Each `Entry` carries its own metrics, so
+/// mutations move data and metrics together — there's no parallel-vec
+/// realignment step.
 fn apply_mutation(
     ctx: &RunnerCtx,
     agent: Option<&mut Agent>,
-    sidecar: &mut MetricsSidecar,
+    entries: &mut Vec<Entry>,
     op: MutateOp,
 ) -> Result<(), ChatError> {
-    let outcome = if let Some(a) = agent {
+    if let Some(a) = agent {
+        // Reject the mutation up-front when a turn is streaming. The
+        // SDK's edit_messages will also reject, but its error is opaque
+        // — checking here lets the UI surface `TurnInFlight` cleanly.
         let mut applied: Result<(), ChatError> = Ok(());
-        // The SDK rejects edits while a turn is streaming. That's
-        // exactly `TurnInFlight` — surface it specifically so the UI
-        // can disable the menu rather than show a generic "internal".
-        a.edit_messages(|msgs| {
-            applied = mutate_messages_with_meta(msgs, &mut sidecar.messages, &op);
+        a.edit_messages(|_| {
+            applied = mutate_entries(entries, &op);
         })
         .map_err(|_| ChatError::TurnInFlight)?;
         applied?;
-        a.messages().to_vec()
+        // Now sync the mutated message list back into the agent.
+        let msgs = store::messages(entries);
+        a.edit_messages(|m| *m = msgs)
+            .map_err(|_| ChatError::TurnInFlight)?;
     } else {
-        let mut messages = transcript::load(&ctx.state_dir)
-            .map_err(|e| ChatError::Internal(format!("load transcript: {e}")))?;
-        mutate_messages_with_meta(&mut messages, &mut sidecar.messages, &op)?;
-        messages
-    };
+        mutate_entries(entries, &op)?;
+    }
     // Mutation already mutated in-memory state; if disk persistence
     // fails the user needs to know — silently warning would leave the
     // chat acknowledged-as-applied while the next session-restart
     // would resurrect the pre-mutation transcript.
-    transcript::save(&ctx.state_dir, &outcome)
-        .map_err(|e| {
-            warn!(error = %e, "save transcript after mutation failed");
-            ChatError::PersistFailed { op: "save transcript".into() }
-        })?;
-    metrics::save(&ctx.state_dir, sidecar).map_err(|e| {
-        warn!(error = %e, "save metrics sidecar after mutation failed");
-        ChatError::PersistFailed { op: "save metrics".into() }
+    store::save(&ctx.state_dir, entries).map_err(|e| {
+        warn!(error = %e, "save transcript after mutation failed");
+        ChatError::PersistFailed { op: "save transcript".into() }
     })?;
-    write_summary(&ctx.state_dir, &outcome);
-    broadcast_history_and_metrics(ctx, &outcome, sidecar);
+    write_summary(ctx, entries);
+    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
+    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
     Ok(())
 }
 
-fn mutate_messages_with_meta(
-    messages: &mut Vec<lutin_llm::Message>,
-    meta: &mut Vec<StoredMeta>,
-    op: &MutateOp,
-) -> Result<(), ChatError> {
-    // Snapshot the underlying message-index of the projected entry
-    // *before* mutation, so we can keep the parallel meta vec aligned
-    // when an underlying message is removed/truncated.
-    let target_message_index = match op {
-        MutateOp::Edit { index, .. } => Some(locate(messages, *index)?.0),
-        MutateOp::Delete { index } => Some(locate(messages, *index)?.0),
-        MutateOp::DeleteFrom { index } => Some(locate(messages, *index)?.0),
-    };
-    let prev_len = messages.len();
-    let prev_was_user = target_message_index
-        .and_then(|mi| messages.get(mi))
-        .map(|m| matches!(m, lutin_llm::Message::User(t) if !t.is_empty()))
-        .unwrap_or(false);
-    mutate_messages(messages, op)?;
-    // Re-align meta: if a Message was removed (User delete) or the tail
-    // was truncated (DeleteFrom), drop the same indices from `meta`.
+/// Apply `op` to `entries`. Edit/Delete/DeleteFrom find the target via
+/// the projected-index → entry-index mapping, then operate on the entry
+/// in place. Tool-call slot edits are rejected as out-of-range so the
+/// UI can disable the menu.
+fn mutate_entries(entries: &mut Vec<Entry>, op: &MutateOp) -> Result<(), ChatError> {
+    use lutin_llm::Message;
+    let (entry_idx, slot) = locate_entry(entries, projected_index(op))?;
     match op {
-        MutateOp::Delete { .. } if prev_was_user => {
-            if let Some(mi) = target_message_index
-                && mi < meta.len()
-            {
-                meta.remove(mi);
+        MutateOp::Edit { text, .. } => match (&mut entries[entry_idx].message, slot) {
+            (Message::User(t), ProjectedSlot::User) => *t = text.clone(),
+            (Message::Assistant { thinking, .. }, ProjectedSlot::Thinking) => {
+                *thinking = Some(text.clone());
             }
-        }
+            (Message::Assistant { text: at, .. }, ProjectedSlot::AssistantText) => {
+                *at = text.clone();
+            }
+            (_, ProjectedSlot::Tool | ProjectedSlot::SubAgent) => {
+                return Err(ChatError::HistoryIndexOutOfRange(projected_index(op)));
+            }
+            _ => unreachable!("slot resolved against same entries"),
+        },
+        MutateOp::Delete { .. } => match slot {
+            ProjectedSlot::User => {
+                entries.remove(entry_idx);
+            }
+            ProjectedSlot::Thinking => {
+                if let Message::Assistant { thinking, .. } = &mut entries[entry_idx].message {
+                    *thinking = None;
+                }
+                entries[entry_idx].metrics.thinking = None;
+            }
+            ProjectedSlot::AssistantText => {
+                if let Message::Assistant { text, .. } = &mut entries[entry_idx].message {
+                    text.clear();
+                }
+                entries[entry_idx].metrics.text = None;
+            }
+            ProjectedSlot::Tool | ProjectedSlot::SubAgent => {
+                return Err(ChatError::HistoryIndexOutOfRange(projected_index(op)));
+            }
+        },
         MutateOp::DeleteFrom { .. } => {
-            if let Some(mi) = target_message_index {
-                meta.truncate(mi);
-            }
+            entries.truncate(entry_idx);
         }
-        _ => {}
     }
-    let _ = prev_len; // suppress unused-warning; kept for potential future invariants
     Ok(())
 }
 
-fn save_sidecar(state_dir: &std::path::Path, sidecar: &MetricsSidecar) {
-    if let Err(e) = metrics::save(state_dir, sidecar) {
-        warn!(error = %e, "save metrics sidecar failed");
+fn projected_index(op: &MutateOp) -> u32 {
+    match op {
+        MutateOp::Edit { index, .. }
+        | MutateOp::Delete { index }
+        | MutateOp::DeleteFrom { index } => *index,
     }
-}
-
-fn broadcast_history_and_metrics(
-    ctx: &RunnerCtx,
-    messages: &[lutin_llm::Message],
-    sidecar: &MetricsSidecar,
-) {
-    let history = project_history(messages);
-    let metrics_proj = project_metrics(messages, sidecar);
-    let _ = ctx.events.send(ChatEvent::HistoryReplaced(history));
-    let _ = ctx.events.send(ChatEvent::MetricsReplaced(metrics_proj));
 }
 
 /// Which field of an underlying `Message` a projected history entry
@@ -940,127 +1176,48 @@ enum ProjectedSlot {
     SubAgent,
 }
 
-/// Walk `messages` in projected order, yielding `(message_index, slot)`
-/// for each visible entry. Mirrors `project_history` exactly so
-/// projected indices line up between the wire and the runner.
-fn projected_slots(
-    messages: &[lutin_llm::Message],
-) -> impl Iterator<Item = (usize, ProjectedSlot)> + '_ {
+/// Walk `entries` in projected order, yielding `(entry_index, slot)`
+/// for each visible row. Mirrors `project_history` exactly so projected
+/// indices line up between the wire and the runner.
+fn projected_slots(entries: &[Entry]) -> impl Iterator<Item = (usize, ProjectedSlot)> + '_ {
     use lutin_llm::Message;
-    messages.iter().enumerate().flat_map(|(i, m)| {
-        // Each arm produces a 0..N slot iterator without heap allocation.
-        // The non-Assistant arms are at most 1 slot, so a fixed-size
-        // array works; Assistant chains thinking + text + tool_calls.
-        let user = matches!(m, Message::User(t) if !t.is_empty())
+    entries.iter().enumerate().flat_map(|(i, e)| {
+        let user = matches!(&e.message, Message::User(t) if !t.is_empty())
             .then_some(ProjectedSlot::User);
         let sub_agent = matches!(
-            m,
+            &e.message,
             Message::SubAgentReply { .. } | Message::SubAgentFailure { .. }
         )
         .then_some(ProjectedSlot::SubAgent);
-        let (thinking, text, tools) = match m {
+        let (thinking, text, tools_count) = match &e.message {
             Message::Assistant { text, thinking, tool_calls } => (
                 thinking
                     .as_deref()
                     .is_some_and(|s| !s.is_empty())
                     .then_some(ProjectedSlot::Thinking),
                 (!text.is_empty()).then_some(ProjectedSlot::AssistantText),
-                Some(tool_calls.as_slice()),
+                tool_calls.len(),
             ),
-            _ => (None, None, None),
+            _ => (None, None, 0),
         };
         user.into_iter()
             .chain(sub_agent)
             .chain(thinking)
             .chain(text)
-            .chain(
-                tools
-                    .into_iter()
-                    .flat_map(|tcs| tcs.iter().map(|_| ProjectedSlot::Tool)),
-            )
+            .chain(std::iter::repeat(ProjectedSlot::Tool).take(tools_count))
             .map(move |s| (i, s))
     })
 }
 
-/// Resolve a projected index to the underlying `(message_index, slot)`,
+/// Resolve a projected index to the underlying `(entry_index, slot)`,
 /// or report it out of range.
-fn locate(
-    messages: &[lutin_llm::Message],
+fn locate_entry(
+    entries: &[Entry],
     index: u32,
 ) -> Result<(usize, ProjectedSlot), ChatError> {
-    projected_slots(messages)
+    projected_slots(entries)
         .nth(index as usize)
         .ok_or(ChatError::HistoryIndexOutOfRange(index))
-}
-
-/// In-place mutation of the engine-side `Vec<Message>`. Indices address
-/// the same projected history the UI sees; `locate` does the mapping
-/// once and we dispatch on the resolved slot.
-fn mutate_messages(
-    messages: &mut Vec<lutin_llm::Message>,
-    op: &MutateOp,
-) -> Result<(), ChatError> {
-    use lutin_llm::Message;
-    match op {
-        MutateOp::Edit { index, text } => {
-            let (mi, slot) = locate(messages, *index)?;
-            // Dispatch on slot first (matching `Delete`'s shape).
-            // `locate` already proved the slot lines up with the
-            // underlying message variant, so the inner `if let`s are
-            // statically guaranteed to bind.
-            match slot {
-                ProjectedSlot::User => {
-                    if let Message::User(t) = &mut messages[mi] {
-                        *t = text.clone();
-                    }
-                }
-                ProjectedSlot::Thinking => {
-                    if let Message::Assistant { thinking, .. } = &mut messages[mi] {
-                        *thinking = Some(text.clone());
-                    }
-                }
-                ProjectedSlot::AssistantText => {
-                    if let Message::Assistant { text: at, .. } = &mut messages[mi] {
-                        *at = text.clone();
-                    }
-                }
-                // Tool exchanges and sub-agent replies aren't
-                // user-editable; surface as out-of-range so the UI can
-                // disable the menu item.
-                ProjectedSlot::Tool | ProjectedSlot::SubAgent => {
-                    return Err(ChatError::HistoryIndexOutOfRange(*index));
-                }
-            }
-            Ok(())
-        }
-        MutateOp::Delete { index } => {
-            let (mi, slot) = locate(messages, *index)?;
-            match slot {
-                ProjectedSlot::User => {
-                    messages.remove(mi);
-                }
-                ProjectedSlot::Thinking => {
-                    if let Message::Assistant { thinking, .. } = &mut messages[mi] {
-                        *thinking = None;
-                    }
-                }
-                ProjectedSlot::AssistantText => {
-                    if let Message::Assistant { text, .. } = &mut messages[mi] {
-                        text.clear();
-                    }
-                }
-                ProjectedSlot::Tool | ProjectedSlot::SubAgent => {
-                    return Err(ChatError::HistoryIndexOutOfRange(*index));
-                }
-            }
-            Ok(())
-        }
-        MutateOp::DeleteFrom { index } => {
-            let (mi, _) = locate(messages, *index)?;
-            messages.truncate(mi);
-            Ok(())
-        }
-    }
 }
 
 /// Lazy-build the agent on first use; surface init failures as a
@@ -1069,10 +1226,11 @@ fn mutate_messages(
 fn ensure_agent<'a>(
     slot: &'a mut Option<Agent>,
     ctx: &RunnerCtx,
+    entries: &[Entry],
     turn: TurnId,
 ) -> Option<&'a mut Agent> {
     if slot.is_none() {
-        match build_initial_agent(ctx) {
+        match build_initial_agent(ctx, entries) {
             Ok(a) => *slot = Some(a),
             Err(reason) => {
                 let _ = ctx.events.send(ChatEvent::MessageFinished {
@@ -1086,45 +1244,42 @@ fn ensure_agent<'a>(
     slot.as_mut()
 }
 
-/// Build the agent on first use, seeding it from the latest on-disk
-/// transcript. Reloading here (rather than carrying a pre-loaded copy
-/// from runner startup) keeps disk as the sole pre-build source of
-/// truth so any mutations applied before the first turn are picked up.
-fn build_initial_agent(ctx: &RunnerCtx) -> Result<Agent, String> {
+/// Build the agent on first use, seeding it from the in-memory entries
+/// (which were loaded once at runner start and stay authoritative).
+fn build_initial_agent(ctx: &RunnerCtx, entries: &[Entry]) -> Result<Agent, String> {
     let resolved = resolve_args(ctx, None).map_err(|e| format!("resolve args: {e}"))?;
-    let history = transcript::load(&ctx.state_dir)
-        .map_err(|e| format!("load transcript: {e}"))?;
     let mut agent = sdk_build_agent(resolved.as_build_args(ctx))
         .map_err(|e| format!("build agent: {}", map_build_error(e)))?;
+    let messages = store::messages(entries);
     agent
-        .edit_messages(|m| *m = history)
+        .edit_messages(|m| *m = messages)
         .map_err(|e| format!("seed agent messages: {e}"))?;
     Ok(agent)
 }
 
-/// Build a sub-agent from an [`agents::AgentSpec`]. Uses the parent's
-/// settings + sandbox path (re-resolved fresh from disk) but seeds
-/// messages from the spec's frozen `Arc<Vec<Message>>` snapshot rather
-/// than the live on-disk transcript. The initial user prompt is queued
-/// so the caller's `agent.start()` consumes it on the first round.
-///
-/// `spec.persona` overrides the parent's session persona when set;
-/// `None` inherits whatever the parent has chosen at this moment.
+/// Build a sub-agent from an [`agents::AgentSpec`]. The persona inside
+/// the spec was already resolved at the `SpawnAgent` tool boundary, so
+/// there's no second persona load here — only `Settings` + sandbox
+/// derivation. The initial user prompt is queued so the caller's
+/// `agent.start()` consumes it on the first round.
 ///
 /// Returns owned errors (not `ChatError`) — sub-agent failures surface
 /// to the registry as `AgentUpdate::Failed { error }`, not to the chat
 /// protocol layer.
-fn build_subagent(ctx: &RunnerCtx, spec: &agents::AgentSpec) -> Result<Agent, String> {
-    let resolved = resolve_args(ctx, spec.persona.as_deref())
+fn build_subagent(
+    ctx: &RunnerCtx,
+    spec: agents::AgentSpec,
+    owner_id: agents::AgentId,
+) -> Result<Agent, String> {
+    let agents::AgentSpec { initial_prompt, persona, parent_id: _ } = spec;
+    let resolved = resolve_args(ctx, Some(persona))
         .map_err(|e| format!("resolve args: {e}"))?;
-    let mut agent = sdk_build_agent(resolved.as_build_args(ctx))
+    let build_args =
+        resolved.as_build_args_with(ctx, PromptExtras::default(), Some(owner_id));
+    let mut agent = sdk_build_agent(build_args)
         .map_err(|e| format!("build agent: {}", map_build_error(e)))?;
-    let snapshot = (*spec.transcript_snapshot).clone();
     agent
-        .edit_messages(|m| *m = snapshot)
-        .map_err(|e| format!("seed agent messages: {e}"))?;
-    agent
-        .push_message(lutin_llm::Message::User(spec.initial_prompt.clone()))
+        .push_message(lutin_llm::Message::User(initial_prompt))
         .map_err(|e| format!("push initial prompt: {e}"))?;
     Ok(agent)
 }
@@ -1135,7 +1290,7 @@ async fn run_turn(
     ctx: &RunnerCtx,
     rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
     agent: &mut Agent,
-    sidecar: &mut MetricsSidecar,
+    entries: &mut Vec<Entry>,
     text: Option<String>,
     turn: TurnId,
 ) {
@@ -1152,7 +1307,8 @@ async fn run_turn(
             return;
         }
     };
-    if let Err(e) = sdk_refresh_agent(agent, resolved.as_build_args(ctx)) {
+    let extras = build_prompt_extras(ctx, entries, &resolved.persona).await;
+    if let Err(e) = sdk_refresh_agent(agent, resolved.as_build_args_with(ctx, extras, None)) {
         let _ = ctx.events.send(ChatEvent::MessageFinished {
             turn_id: turn,
             reason: FinishReason::Failed(format!("{}", map_build_error(e))),
@@ -1174,30 +1330,41 @@ async fn run_turn(
             }
         });
     }
+    // Pre-turn compaction: when the persona opts in and the transcript
+    // has crossed the threshold, fold the older prefix into a single
+    // `Message::Summary` and archive the originals to a sidecar so the
+    // user can still inspect what was dropped.
+    run_compaction(ctx, agent, &resolved, entries).await;
     // start() consumes pending messages on this run, so push first
     // (skipped on Rerun, which deliberately runs against the existing
     // transcript without appending a new user message).
     if let Some(text) = text {
-        if let Err(e) = agent.push_message(lutin_llm::Message::User(text)) {
+        let user_msg = lutin_llm::Message::User(text);
+        if let Err(e) = agent.push_message(user_msg.clone()) {
             let _ = ctx.events.send(ChatEvent::MessageFinished {
                 turn_id: turn,
                 reason: FinishReason::Failed(format!("push: {e}")),
             });
             return;
         }
-        // Stamp the just-pushed user message and broadcast immediately
-        // so the chrome can render the user's bubble (with timestamp)
-        // before the assistant starts streaming.
-        sidecar.messages.push(StoredMeta {
-            timestamp: now_rfc3339(),
-            ..Default::default()
+        // Mirror into entries with a timestamp so the chrome can render
+        // the user's bubble (with timestamp) before the assistant
+        // starts streaming.
+        entries.push(Entry {
+            message: user_msg,
+            metrics: MessageMetrics {
+                timestamp: Some(now_rfc3339()),
+                ..Default::default()
+            },
         });
-        save_sidecar(&ctx.state_dir, sidecar);
-        broadcast_history_and_metrics(ctx, agent.messages(), sidecar);
+        if let Err(e) = store::save(&ctx.state_dir, entries) {
+            warn!(error = %e, "save transcript after user push failed");
+        }
+        let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
+        let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
     }
-    let pre_turn_len = agent.messages().len();
-    let mut tracker = TurnTracker::default();
-    tracker.started_at = Some(Instant::now());
+    let pre_turn_len = entries.len();
+    let mut tracker = TurnTracker::new();
     let mut stream = match agent.start() {
         Ok(s) => s,
         Err(e) => {
@@ -1214,7 +1381,7 @@ async fn run_turn(
         tokio::select! {
             ev = stream.next() => match ev {
                 Some(ev) => {
-                    if let Some(reason) = handle_agent_event(ev, &ctx.events, &mut tracker, sidecar) {
+                    if let Some(reason) = handle_agent_event(ev, &ctx.events, &mut tracker) {
                         finish = Some(reason);
                     }
                 }
@@ -1241,89 +1408,274 @@ async fn run_turn(
     }
 
     let outcome = agent.join().await;
-    // Harvest turn-level stats for any new messages the agent appended
-    // during this turn (typically: 0 or more Assistant rounds + their
-    // ToolResults). Attribute Usage and full timing to the FINAL
-    // assistant text; intermediates get just a timestamp.
-    finalize_turn_meta(agent.messages(), pre_turn_len, &tracker, &mut sidecar.messages);
-    // Single write per turn from the agent's own message vec — the
-    // single source of truth. Even on Cancel/Failed, partials are
-    // preserved so the user can see where it stopped.
-    if let Err(e) = transcript::save(&ctx.state_dir, agent.messages()) {
+    // Sync any messages the agent appended into our entries vec, then
+    // attribute the turn's accumulated stats. The last `Message::Assistant`
+    // gets the full set (TTFT, duration, tokens); intermediates get
+    // just a timestamp; tool calls pull from the tracker by call_id.
+    sync_new_entries(agent.messages(), entries);
+    finalize_turn_meta(entries, pre_turn_len, &tracker);
+    if let Err(e) = store::save(&ctx.state_dir, entries) {
         warn!(error = %e, "save transcript failed");
     }
-    save_sidecar(&ctx.state_dir, sidecar);
-    write_summary(&ctx.state_dir, agent.messages());
+    write_summary(ctx, entries);
     let reason = finish.unwrap_or_else(|| map_finish_reason(outcome.finish_reason));
     let _ = ctx.events.send(ChatEvent::MessageFinished {
         turn_id: turn,
         reason,
     });
-    broadcast_history_and_metrics(ctx, agent.messages(), sidecar);
+    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
+    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    // Capture any spawn / stop / terminal transition the orchestrator
+    // produced during this turn. Snapshotting once at the tail rather
+    // than per-tool-call avoids spamming the channel; the only cost is
+    // intra-turn UI lag, which is fine for an audit panel.
+    broadcast_subagents(ctx).await;
 }
 
-/// Walk the messages added during the turn (`pre_turn_len..end`) and
-/// attach metadata. The last `Message::Assistant` in the new range
-/// gets the full turn-level stats (TTFT, duration, tokens); earlier
-/// assistants and `ToolResult` messages only get a timestamp.
-fn finalize_turn_meta(
-    messages: &[lutin_llm::Message],
-    pre_turn_len: usize,
-    tracker: &TurnTracker,
-    meta: &mut Vec<StoredMeta>,
-) {
-    // Backfill any meta entries the turn pushed past — for ToolResult
-    // and intermediate Assistant messages, just stamp the time.
-    while meta.len() < messages.len() {
-        meta.push(StoredMeta {
-            timestamp: now_rfc3339(),
-            ..Default::default()
+/// Append a fresh `Entry` for every message the agent added past
+/// `entries.len()`. Each new entry gets a `now()` timestamp; the
+/// per-stat fields are filled in by `finalize_turn_meta`.
+fn sync_new_entries(agent_messages: &[lutin_llm::Message], entries: &mut Vec<Entry>) {
+    for msg in &agent_messages[entries.len()..] {
+        let tools = match msg {
+            lutin_llm::Message::Assistant { tool_calls, .. } => {
+                vec![ToolStats::default(); tool_calls.len()]
+            }
+            _ => Vec::new(),
+        };
+        entries.push(Entry {
+            message: msg.clone(),
+            metrics: MessageMetrics {
+                timestamp: Some(now_rfc3339()),
+                tools,
+                ..Default::default()
+            },
         });
     }
-    // Find the LAST assistant message added this turn; attach turn
-    // stats there. If there's none (e.g. cancel before first round
-    // produced anything), nothing to do.
-    let last_assistant_idx = (pre_turn_len..messages.len())
-        .rev()
-        .find(|&i| matches!(messages[i], lutin_llm::Message::Assistant { .. }));
-    let Some(idx) = last_assistant_idx else {
+}
+
+/// Run pre-turn compaction when the persona enables it. On a successful
+/// compaction the agent's `messages` are spliced in place by
+/// [`maybe_compact`]; we mirror the splice into `entries` (so metrics
+/// stay aligned), append a snapshot of the dropped messages to a
+/// per-session archive sidecar, persist the new transcript, and broadcast
+/// `HistoryReplaced` + `MetricsReplaced` so the UI can rerender.
+async fn run_compaction(
+    ctx: &RunnerCtx,
+    agent: &mut Agent,
+    resolved: &ResolvedArgs,
+    entries: &mut Vec<Entry>,
+) {
+    let Some(cfg) = CompactionConfig::from_persona(&resolved.persona) else {
         return;
     };
+    let Some(provider_name) = resolved.persona.provider.as_deref() else {
+        return;
+    };
+    let Some(provider_cfg) = resolved
+        .settings
+        .providers
+        .iter()
+        .find(|p| p.name == provider_name)
+    else {
+        warn!(provider = %provider_name, "compaction skipped: provider not configured");
+        return;
+    };
+    let provider = match sdk_build_provider(provider_cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "compaction skipped: provider build failed");
+            return;
+        }
+    };
+    let Some(model) = resolved
+        .model_override
+        .clone()
+        .or_else(|| resolved.persona.model.clone())
+    else {
+        warn!("compaction skipped: persona has no model");
+        return;
+    };
+    let model_id = lutin_llm::ModelId::new(model);
+
+    let outcome = match maybe_compact(agent, &*provider, &model_id, &cfg).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return,
+        Err(e) => {
+            warn!(error = %e, "compaction failed; continuing with full transcript");
+            return;
+        }
+    };
+
+    apply_compaction_to_entries(entries, &outcome);
+    if let Err(e) = append_compaction_archive(&ctx.state_dir, &outcome) {
+        warn!(error = %e, "compaction archive write failed");
+    }
+    if let Err(e) = store::save(&ctx.state_dir, entries) {
+        warn!(error = %e, "save transcript after compaction failed");
+    }
+    write_summary(ctx, entries);
+    let _ = ctx
+        .events
+        .send(ChatEvent::HistoryReplaced(project_history(entries)));
+    let _ = ctx
+        .events
+        .send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    info!(
+        kept = outcome.kept,
+        archived = outcome.archived_prefix.len(),
+        "compaction applied"
+    );
+}
+
+/// Mirror the agent-side splice into `entries` so metrics align. The
+/// summary entry gets a fresh timestamp and otherwise-empty metrics.
+fn apply_compaction_to_entries(entries: &mut Vec<Entry>, outcome: &CompactionOutcome) {
+    let start = outcome.summarize_range_start;
+    let end = start + outcome.archived_prefix.len();
+    if end > entries.len() {
+        warn!(
+            entries_len = entries.len(),
+            end, "compaction range exceeds entries — skipping mirror splice"
+        );
+        return;
+    }
+    let summary_entry = Entry {
+        message: lutin_llm::Message::Summary { text: outcome.summary.clone() },
+        metrics: MessageMetrics {
+            timestamp: Some(now_rfc3339()),
+            ..Default::default()
+        },
+    };
+    entries.splice(start..end, std::iter::once(summary_entry));
+}
+
+/// Append one compaction event to `<state_dir>/compaction_archive.json`.
+/// File is a JSON array; each element preserves the summary text and the
+/// raw archived messages so users can audit what was dropped.
+fn append_compaction_archive(
+    state_dir: &std::path::Path,
+    outcome: &CompactionOutcome,
+) -> std::io::Result<()> {
+    #[derive(Serialize, serde::Deserialize)]
+    struct Archived {
+        at: String,
+        summary: String,
+        messages: Vec<lutin_llm::Message>,
+    }
+    let path = state_dir.join("compaction_archive.json");
+    let mut all: Vec<Archived> = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                // Don't silently overwrite an unreadable archive — that would
+                // destroy the user's audit trail. Move it aside with a
+                // timestamp so the next write starts fresh and the original
+                // bytes stay recoverable on disk.
+                let aside = state_dir.join(format!(
+                    "compaction_archive.corrupt-{}.json",
+                    now_rfc3339().replace(':', "-")
+                ));
+                warn!(error = %e, original = %path.display(), preserved_at = %aside.display(),
+                      "compaction archive unreadable; rotated aside");
+                std::fs::rename(&path, &aside)?;
+                Vec::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    all.push(Archived {
+        at: now_rfc3339(),
+        summary: outcome.summary.clone(),
+        messages: outcome.archived_prefix.clone(),
+    });
+    let body = serde_json::to_vec_pretty(&all)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = state_dir.join("compaction_archive.json.tmp");
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Attach turn stats to entries added during this turn. The last
+/// `Message::Assistant` in `pre_turn_len..` gets the full set (TTFT,
+/// duration, tokens); intermediates keep just their timestamp. Tool
+/// stats are populated by walking the tracker's lifecycles and
+/// resolving each `call_id` back to its slot in an assistant entry's
+/// `tool_calls`.
+fn finalize_turn_meta(entries: &mut Vec<Entry>, pre_turn_len: usize, tracker: &TurnTracker) {
     let now = Instant::now();
-    let duration_ms = tracker
-        .started_at
-        .map(|t0| now.saturating_duration_since(t0).as_millis() as u64);
+    let duration_ms = now.saturating_duration_since(tracker.started_at).as_millis() as u64;
     let ttft_ms = tracker
-        .started_at
-        .zip(tracker.first_text_at)
-        .map(|(t0, t1)| t1.saturating_duration_since(t0).as_millis() as u64);
+        .first_text_at
+        .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
     let thinking_ttft_ms = tracker
-        .started_at
-        .zip(tracker.first_thinking_at)
-        .map(|(t0, t1)| t1.saturating_duration_since(t0).as_millis() as u64);
+        .first_thinking_at
+        .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
     let (prompt_tokens, completion_tokens) = match &tracker.last_usage {
         Some(u) => (Some(u.prompt_tokens), Some(u.completion_tokens)),
         None => (None, None),
     };
-    let entry = &mut meta[idx];
-    if let lutin_llm::Message::Assistant { text, thinking, .. } = &messages[idx] {
-        if !text.is_empty() {
-            entry.assistant = Some(AssistantStats {
-                ttft_ms,
-                duration_ms,
-                prompt_tokens,
-                completion_tokens,
-            });
-        }
-        if thinking.as_deref().is_some_and(|s| !s.is_empty()) {
-            entry.thinking = Some(AssistantStats {
-                ttft_ms: thinking_ttft_ms,
-                duration_ms,
-                prompt_tokens,
-                completion_tokens,
-            });
+
+    // Tool lifecycles: write each into the assistant entry that owns
+    // the matching tool_call. Searching from `pre_turn_len` is
+    // sufficient — calls only attach to assistants from this turn.
+    for life in &tracker.tools {
+        let dur = life
+            .finished_at
+            .map(|t| t.saturating_duration_since(life.started_at).as_millis() as u64);
+        let stats = ToolStats {
+            timestamp: Some(life.started_ts.clone()),
+            duration_ms: dur,
+        };
+        if let Some((entry_idx, slot)) = locate_tool_slot(entries, &life.call_id, pre_turn_len) {
+            if let Some(out) = entries[entry_idx].metrics.tools.get_mut(slot) {
+                *out = stats;
+            }
         }
     }
+
+    // Last-assistant gets text/thinking stats.
+    let last_assistant_idx = (pre_turn_len..entries.len())
+        .rev()
+        .find(|&i| matches!(entries[i].message, lutin_llm::Message::Assistant { .. }));
+    let Some(idx) = last_assistant_idx else { return };
+    let lutin_llm::Message::Assistant { text, thinking, .. } = &entries[idx].message else {
+        return;
+    };
+    let has_text = !text.is_empty();
+    let has_thinking = thinking.as_deref().is_some_and(|s| !s.is_empty());
+    let metrics = &mut entries[idx].metrics;
+    if has_text {
+        metrics.text = Some(TextStats {
+            ttft_ms,
+            duration_ms: Some(duration_ms),
+            prompt_tokens,
+            completion_tokens,
+        });
+    }
+    if has_thinking {
+        metrics.thinking = Some(ThinkingStats {
+            ttft_ms: thinking_ttft_ms,
+            duration_ms: Some(duration_ms),
+        });
+    }
+}
+
+/// Find the assistant entry that owns a tool call with `call_id`,
+/// returning its `(entry_index, slot_within_tool_calls)`. Searches
+/// only from `start` so we don't pick up an old call with a recycled
+/// id (rare but possible).
+fn locate_tool_slot(entries: &[Entry], call_id: &str, start: usize) -> Option<(usize, usize)> {
+    for (i, e) in entries.iter().enumerate().skip(start) {
+        if let lutin_llm::Message::Assistant { tool_calls, .. } = &e.message
+            && let Some(pos) = tool_calls.iter().position(|c| c.id.as_str() == call_id)
+        {
+            return Some((i, pos));
+        }
+    }
+    None
 }
 
 /// Workflow-supplied summary file CP reads at `ListSessions` time
@@ -1338,6 +1690,12 @@ struct ChatSummary {
     subtitle: Option<String>,
     last_activity: Option<String>,
     preview: Option<String>,
+    persona: Option<String>,
+    model: Option<String>,
+    total_prompt_tokens: Option<u64>,
+    total_completion_tokens: Option<u64>,
+    context_tokens: Option<u32>,
+    message_count: Option<u32>,
 }
 
 const SUMMARY_TITLE_CHARS: usize = 80;
@@ -1349,8 +1707,19 @@ const SUMMARY_PREVIEW_CHARS: usize = 160;
 /// turns happen. Failures log a warning but never bubble — a missing
 /// summary just means the chrome shows a generic fallback label, not
 /// that the session is broken.
-fn write_summary(state_dir: &std::path::Path, messages: &[lutin_llm::Message]) {
-    let summary = build_summary(messages);
+fn write_summary(ctx: &RunnerCtx, entries: &[Entry]) {
+    let state_dir = ctx.state_dir.as_path();
+    // Best-effort enrichment: persona name from session state, model
+    // resolved through the persona TOML. Both are optional; failures
+    // here just leave the fields blank in the summary file.
+    let session_state = load_state(state_dir).ok();
+    let persona_name = session_state.as_ref().and_then(|s| s.persona.clone());
+    let model_override = session_state.as_ref().and_then(|s| s.model_override.clone());
+    let resolved_model = model_override.or_else(|| {
+        let name = persona_name.as_deref()?;
+        Persona::load(&ctx.resolver, name).ok().and_then(|p| p.model)
+    });
+    let summary = build_summary(entries, persona_name, resolved_model);
     let payload = match serde_json::to_vec_pretty(&summary) {
         Ok(b) => b,
         Err(e) => {
@@ -1369,27 +1738,31 @@ fn write_summary(state_dir: &std::path::Path, messages: &[lutin_llm::Message]) {
     }
 }
 
-fn build_summary(messages: &[lutin_llm::Message]) -> ChatSummary {
-    let title = messages.iter().find_map(|m| match m {
+fn build_summary(
+    entries: &[Entry],
+    persona: Option<String>,
+    model: Option<String>,
+) -> ChatSummary {
+    let title = entries.iter().find_map(|e| match &e.message {
         lutin_llm::Message::User(text) if !text.trim().is_empty() => {
             Some(truncate_chars(text.trim(), SUMMARY_TITLE_CHARS))
         }
         _ => None,
     });
-    let preview = messages.iter().rev().find_map(|m| match m {
+    let preview = entries.iter().rev().find_map(|e| match &e.message {
         lutin_llm::Message::Assistant { text, .. } if !text.trim().is_empty() => {
             Some(truncate_chars(text.trim(), SUMMARY_PREVIEW_CHARS))
         }
         _ => None,
     });
-    let visible = messages
+    let visible = entries
         .iter()
-        .filter(|m| {
+        .filter(|e| {
             matches!(
-                m,
+                &e.message,
                 lutin_llm::Message::User(t) if !t.is_empty(),
             ) || matches!(
-                m,
+                &e.message,
                 lutin_llm::Message::Assistant { text, .. } if !text.is_empty(),
             )
         })
@@ -1401,11 +1774,38 @@ fn build_summary(messages: &[lutin_llm::Message]) -> ChatSummary {
     } else {
         Some(format!("{visible} messages"))
     };
+    // Token totals: sum across every assistant entry's text stats. The
+    // last assistant's prompt_tokens stands in for "current context
+    // window fill" — it's the count the provider just charged for, so
+    // it tracks the live transcript size after compaction too.
+    let mut total_prompt: u64 = 0;
+    let mut total_completion: u64 = 0;
+    let mut last_prompt: Option<u32> = None;
+    for e in entries {
+        if let Some(t) = e.metrics.text {
+            if let Some(p) = t.prompt_tokens {
+                total_prompt = total_prompt.saturating_add(p as u64);
+                last_prompt = Some(p);
+            }
+            if let Some(c) = t.completion_tokens {
+                total_completion = total_completion.saturating_add(c as u64);
+            }
+        }
+    }
+    let total_prompt_tokens = (total_prompt > 0).then_some(total_prompt);
+    let total_completion_tokens = (total_completion > 0).then_some(total_completion);
+
     ChatSummary {
         title,
         subtitle,
         last_activity: Some(chrono::Utc::now().to_rfc3339()),
         preview,
+        persona,
+        model,
+        total_prompt_tokens,
+        total_completion_tokens,
+        context_tokens: last_prompt,
+        message_count: Some(visible as u32),
     }
 }
 
@@ -1433,17 +1833,25 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// Project the engine's `Vec<Message>` to the wire shape, preserving
 /// order. Tool calls are paired with their later `Message::ToolResult`
 /// by `call_id`; `projected_slots` mirrors this iteration order.
-fn project_history(messages: &[lutin_llm::Message]) -> Vec<HistoricalMessage> {
-    // Linear scan to pair tool_calls with their later ToolResult by
-    // call_id. Tool counts per turn are typically <10, so a Vec
-    // beats a HashMap on both setup cost and lookup time at this scale.
+fn project_history(entries: &[Entry]) -> Vec<HistoricalMessage> {
+    project_messages(entries.iter().map(|e| &e.message))
+}
+
+/// Same projection rules as [`project_history`], but driven from raw
+/// messages (not `Entry`s) so sub-agent transcripts — which never sit
+/// in the engine's `Vec<Entry>` — can reuse the exact same widget
+/// shape. Pairing of `tool_calls` to their `ToolResult` happens via a
+/// linear scan keyed on `call_id`.
+fn project_messages<'a>(
+    messages: impl IntoIterator<Item = &'a lutin_llm::Message> + Clone,
+) -> Vec<HistoricalMessage> {
     let mut results_by_id: Vec<(&str, &lutin_llm::ToolResultContent)> = Vec::new();
-    for m in messages {
+    for m in messages.clone() {
         if let lutin_llm::Message::ToolResult(tr) = m {
             results_by_id.push((tr.call_id.as_str(), tr));
         }
     }
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out: Vec<HistoricalMessage> = Vec::new();
     for m in messages {
         match m {
             lutin_llm::Message::User(text) if !text.is_empty() => {
@@ -1460,6 +1868,9 @@ fn project_history(messages: &[lutin_llm::Message]) -> Vec<HistoricalMessage> {
                     agent_id: agent_id.clone(),
                     reason: reason.clone(),
                 });
+            }
+            lutin_llm::Message::Summary { text } => {
+                out.push(HistoricalMessage::Summary { text: text.clone() });
             }
             lutin_llm::Message::Assistant { text, thinking, tool_calls } => {
                 if let Some(t) = thinking
@@ -1505,30 +1916,29 @@ fn handle_agent_event(
     ev: AgentEvent,
     events: &broadcast::Sender<ChatEvent>,
     tracker: &mut TurnTracker,
-    sidecar: &mut MetricsSidecar,
 ) -> Option<FinishReason> {
     match ev {
         AgentEvent::AssistantText(s) => {
-            tracker.note_text();
+            if tracker.first_text_at.is_none() {
+                tracker.first_text_at = Some(Instant::now());
+            }
             let _ = events.send(ChatEvent::Delta(s));
             None
         }
         AgentEvent::AssistantReasoning(s) => {
-            tracker.note_reasoning();
+            if tracker.first_thinking_at.is_none() {
+                tracker.first_thinking_at = Some(Instant::now());
+            }
             let _ = events.send(ChatEvent::Reasoning(s));
             None
         }
         AgentEvent::ToolCallStarted(call) => {
-            tracker
-                .tool_started
-                .insert(call.id.as_str().to_string(), Instant::now());
-            sidecar.tools.insert(
-                call.id.as_str().to_string(),
-                ToolStats {
-                    timestamp: now_rfc3339(),
-                    duration_ms: None,
-                },
-            );
+            tracker.tools.push(ToolLifecycle {
+                call_id: call.id.as_str().to_string(),
+                started_at: Instant::now(),
+                started_ts: now_rfc3339(),
+                finished_at: None,
+            });
             // `Value` serialization is infallible — every variant has
             // a deterministic textual form. The TS decoder parses the
             // resulting JSON once at the wire boundary so downstream
@@ -1543,11 +1953,13 @@ fn handle_agent_event(
             None
         }
         AgentEvent::ToolCallCompleted { call, outcome } => {
-            if let Some(started) = tracker.tool_started.remove(call.id.as_str()) {
-                let dur = Instant::now().saturating_duration_since(started).as_millis() as u64;
-                if let Some(stats) = sidecar.tools.get_mut(call.id.as_str()) {
-                    stats.duration_ms = Some(dur);
-                }
+            if let Some(life) = tracker
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|l| l.call_id == call.id.as_str())
+            {
+                life.finished_at = Some(Instant::now());
             }
             let chat_outcome = match outcome {
                 ToolResult::Ok(c) if c.is_error => ToolOutcome::Failed(c.content),
@@ -1580,57 +1992,48 @@ fn handle_agent_event(
     }
 }
 
-/// Project the in-memory `MetricsSidecar` to the wire-shape `Vec<MessageMeta>`,
-/// aligned to the same iteration order as `project_history`.
-fn project_metrics(
-    messages: &[lutin_llm::Message],
-    sidecar: &MetricsSidecar,
-) -> Vec<MessageMeta> {
-    let mut out: Vec<MessageMeta> = Vec::with_capacity(messages.len());
-    for (i, m) in messages.iter().enumerate() {
-        let stored = sidecar.messages.get(i).cloned().unwrap_or_default();
-        match m {
+/// Project entries to wire `MessageMeta` aligned 1:1 with `project_history`.
+fn project_metrics(entries: &[Entry]) -> Vec<MessageMeta> {
+    let mut out: Vec<MessageMeta> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let ts = entry.metrics.timestamp.clone();
+        match &entry.message {
             lutin_llm::Message::User(text) if !text.is_empty() => {
-                out.push(MessageMeta {
-                    timestamp: stored.timestamp,
-                    ..Default::default()
-                });
+                out.push(MessageMeta::User { timestamp: ts });
             }
-            lutin_llm::Message::SubAgentReply { .. } | lutin_llm::Message::SubAgentFailure { .. } => {
-                out.push(MessageMeta {
-                    timestamp: stored.timestamp,
-                    ..Default::default()
-                });
+            lutin_llm::Message::SubAgentReply { .. } => {
+                out.push(MessageMeta::SubAgentReply { timestamp: ts });
+            }
+            lutin_llm::Message::SubAgentFailure { .. } => {
+                out.push(MessageMeta::SubAgentFailure { timestamp: ts });
+            }
+            lutin_llm::Message::Summary { .. } => {
+                out.push(MessageMeta::Summary { timestamp: ts });
             }
             lutin_llm::Message::Assistant { text, thinking, tool_calls } => {
                 if thinking.as_deref().is_some_and(|s| !s.is_empty()) {
-                    let s = stored.thinking.unwrap_or_default();
-                    out.push(MessageMeta {
-                        timestamp: stored.timestamp.clone(),
+                    let s = entry.metrics.thinking.unwrap_or_default();
+                    out.push(MessageMeta::Thinking {
+                        timestamp: ts.clone(),
                         ttft_ms: s.ttft_ms,
                         duration_ms: s.duration_ms,
-                        prompt_tokens: s.prompt_tokens,
-                        completion_tokens: s.completion_tokens,
                     });
                 }
                 if !text.is_empty() {
-                    let s = stored.assistant.unwrap_or_default();
-                    out.push(MessageMeta {
-                        timestamp: stored.timestamp.clone(),
+                    let s = entry.metrics.text.unwrap_or_default();
+                    out.push(MessageMeta::Assistant {
+                        timestamp: ts.clone(),
                         ttft_ms: s.ttft_ms,
                         duration_ms: s.duration_ms,
                         prompt_tokens: s.prompt_tokens,
                         completion_tokens: s.completion_tokens,
                     });
                 }
-                for call in tool_calls {
-                    let tool_meta = sidecar.tools.get(call.id.as_str());
-                    out.push(MessageMeta {
-                        timestamp: tool_meta
-                            .map(|t| t.timestamp.clone())
-                            .unwrap_or_default(),
-                        duration_ms: tool_meta.and_then(|t| t.duration_ms),
-                        ..Default::default()
+                for (i, _call) in tool_calls.iter().enumerate() {
+                    let stats = entry.metrics.tools.get(i).cloned().unwrap_or_default();
+                    out.push(MessageMeta::Tool {
+                        timestamp: stats.timestamp,
+                        duration_ms: stats.duration_ms,
                     });
                 }
             }
@@ -1673,12 +2076,26 @@ impl ResolvedArgs {
     /// then drops them for non-orchestrator personas — see
     /// `tools::agent` for the gating story.
     fn as_build_args(&self, ctx: &RunnerCtx) -> BuildArgs<'_> {
+        self.as_build_args_with(ctx, PromptExtras::default(), None)
+    }
+
+    fn as_build_args_with(
+        &self,
+        ctx: &RunnerCtx,
+        prompt_extras: PromptExtras,
+        owner_id: Option<agents::AgentId>,
+    ) -> BuildArgs<'_> {
         BuildArgs {
             persona: &self.persona,
             settings: &self.settings,
             sandbox_root: self.sandbox_root.clone(),
             model_override: self.model_override.clone(),
-            extra_tools: tools::make_subagent_tools(ctx.agent_registry.clone()),
+            extra_tools: tools::make_subagent_tools(
+                ctx.agent_registry.clone(),
+                ctx.resolver.clone(),
+                owner_id,
+            ),
+            prompt_extras,
         }
     }
 }
@@ -1687,30 +2104,32 @@ impl ResolvedArgs {
 /// Translates SDK-agnostic errors (file IO, persona-not-found) back to
 /// the chat protocol's typed variants.
 ///
-/// `persona_override` lets sub-agents pick a persona other than the
-/// parent session's — when `None`, falls back to `session_state.persona`
-/// then to [`DEFAULT_PERSONA`].
+/// `persona_override` lets a caller skip the disk read by handing in
+/// an already-loaded `Persona` (sub-agent spawn path — the tool
+/// boundary validated and loaded it once). `None` reads the session's
+/// configured persona from disk; this is the main-session path that
+/// honours out-of-band edits.
 fn resolve_args(
     ctx: &RunnerCtx,
-    persona_override: Option<&str>,
+    persona_override: Option<Persona>,
 ) -> Result<ResolvedArgs, ChatError> {
     let session_state = load_state(&ctx.state_dir)
         .map_err(|e| ChatError::Internal(format!("load state: {e}")))?;
 
-    let resolver = Resolver::new(
-        ctx.global_config_dir.clone(),
-        Some(ctx.project_config_dir.clone()),
-    );
-
-    let persona_name = persona_override
-        .or(session_state.persona.as_deref())
-        .unwrap_or(DEFAULT_PERSONA);
-    let persona = Persona::load(&resolver, persona_name).map_err(|e| match e {
-        lutin_entities::EntityError::NotFound { name, .. } => ChatError::PersonaNotFound(name),
-        other => ChatError::Internal(format!("load persona: {other}")),
-    })?;
-    let settings =
-        Settings::load(&resolver).map_err(|e| ChatError::Internal(format!("load settings: {e}")))?;
+    let persona = match persona_override {
+        Some(p) => p,
+        None => {
+            let name = session_state.persona.as_deref().unwrap_or(DEFAULT_PERSONA);
+            Persona::load(&ctx.resolver, name).map_err(|e| match e {
+                lutin_entities::EntityError::NotFound { name, .. } => {
+                    ChatError::PersonaNotFound(name)
+                }
+                other => ChatError::Internal(format!("load persona: {other}")),
+            })?
+        }
+    };
+    let settings = Settings::load(&ctx.resolver)
+        .map_err(|e| ChatError::Internal(format!("load settings: {e}")))?;
 
     // Sandbox root: the project workspace itself, not `.lutin/`. Tools
     // jail filesystem access here so the agent can read/edit user code.
@@ -1750,3 +2169,192 @@ fn map_build_error(e: BuildError) -> ChatError {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    //! Behavior tests for the metrics/transcript machinery. These
+    //! exercise `finalize_turn_meta`, `mutate_entries`, and the two
+    //! projection functions directly — wire-byte goldens live in
+    //! `lib.rs::tests::golden_postcard_bytes` and cover the encode
+    //! shape, not the semantic invariants checked here.
+    use super::*;
+    use lutin_llm::{Message, ToolCall};
+
+    fn assistant(text: &str) -> Message {
+        Message::Assistant {
+            text: text.into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    fn assistant_with_calls(text: &str, calls: Vec<ToolCall>) -> Message {
+        Message::Assistant {
+            text: text.into(),
+            thinking: None,
+            tool_calls: calls,
+        }
+    }
+
+    fn entry(message: Message) -> Entry {
+        Entry { message, metrics: MessageMetrics::default() }
+    }
+
+    #[test]
+    fn finalize_turn_meta_attributes_to_last_assistant() {
+        // Two assistants in a turn (a tool round followed by a final
+        // text round). Token totals + duration land on the LAST
+        // assistant; the intermediate keeps just its timestamp.
+        let mut entries = vec![
+            entry(Message::User("hi".into())),
+            entry(assistant("first")),
+            entry(assistant("second")),
+        ];
+        let mut tracker = TurnTracker::new();
+        // Manually rewind started_at so duration reads as something
+        // > 0 even on fast machines.
+        tracker.started_at = std::time::Instant::now() - std::time::Duration::from_millis(123);
+        tracker.first_text_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(80));
+        tracker.last_usage = Some(lutin_llm::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        });
+        finalize_turn_meta(&mut entries, 1, &tracker);
+        assert!(entries[1].metrics.text.is_none(), "intermediate has no stats");
+        let last = entries[2].metrics.text.expect("last assistant has stats");
+        assert_eq!(last.prompt_tokens, Some(100));
+        assert_eq!(last.completion_tokens, Some(50));
+        assert!(last.duration_ms.unwrap() >= 100);
+        // first_text_at − started_at = 123 − 80 = 43 ms; allow slop.
+        assert!(last.ttft_ms.unwrap() >= 30);
+        assert!(last.ttft_ms.unwrap() <= 80);
+    }
+
+    #[test]
+    fn finalize_turn_meta_records_tool_durations_by_call_id() {
+        let call = ToolCall {
+            id: lutin_llm::CallId::new("c1"),
+            name: lutin_llm::ToolName::new("read"),
+            arguments: serde_json::json!({}),
+        };
+        let mut entries = vec![
+            entry(Message::User("hi".into())),
+            entry(assistant_with_calls("doing", vec![call])),
+        ];
+        // Pre-seed the assistant's `tools` slot so `finalize_turn_meta`
+        // has a place to write into — the runtime path does this in
+        // `sync_new_entries`. Length must match `tool_calls`.
+        entries[1].metrics.tools = vec![ToolStats::default()];
+        let mut tracker = TurnTracker::new();
+        let now = std::time::Instant::now();
+        tracker.tools.push(ToolLifecycle {
+            call_id: "c1".into(),
+            started_at: now - std::time::Duration::from_millis(200),
+            started_ts: "2026-05-08T12:00:00Z".into(),
+            finished_at: Some(now - std::time::Duration::from_millis(50)),
+        });
+        finalize_turn_meta(&mut entries, 1, &tracker);
+        let stats = &entries[1].metrics.tools[0];
+        assert_eq!(stats.timestamp.as_deref(), Some("2026-05-08T12:00:00Z"));
+        assert!(stats.duration_ms.unwrap() >= 100);
+    }
+
+    #[test]
+    fn mutate_entries_delete_user_drops_entry_and_metrics_together() {
+        let mut entries = vec![
+            entry(Message::User("first".into())),
+            entry(Message::User("second".into())),
+        ];
+        entries[0].metrics.timestamp = Some("t0".into());
+        entries[1].metrics.timestamp = Some("t1".into());
+        mutate_entries(&mut entries, &MutateOp::Delete { index: 0 }).unwrap();
+        assert_eq!(entries.len(), 1);
+        // The remaining entry is the originally-second user; its
+        // metrics moved with it.
+        assert_eq!(entries[0].metrics.timestamp.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn mutate_entries_delete_from_truncates_both_halves() {
+        let mut entries = vec![
+            entry(Message::User("a".into())),
+            entry(Message::User("b".into())),
+            entry(Message::User("c".into())),
+        ];
+        entries[2].metrics.timestamp = Some("t2".into());
+        mutate_entries(&mut entries, &MutateOp::DeleteFrom { index: 1 }).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn mutate_entries_edit_user_text() {
+        let mut entries = vec![entry(Message::User("old".into()))];
+        mutate_entries(
+            &mut entries,
+            &MutateOp::Edit { index: 0, text: "new".into() },
+        )
+        .unwrap();
+        match &entries[0].message {
+            Message::User(t) => assert_eq!(t, "new"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn mutate_entries_rejects_tool_edit() {
+        let call = ToolCall {
+            id: lutin_llm::CallId::new("c1"),
+            name: lutin_llm::ToolName::new("read"),
+            arguments: serde_json::json!({}),
+        };
+        let mut entries = vec![entry(assistant_with_calls("calling", vec![call]))];
+        // Projected slots: AssistantText (idx 0) + Tool (idx 1).
+        let result = mutate_entries(
+            &mut entries,
+            &MutateOp::Edit { index: 1, text: "no".into() },
+        );
+        assert!(matches!(result, Err(ChatError::HistoryIndexOutOfRange(1))));
+    }
+
+    #[test]
+    fn project_metrics_aligns_with_project_history() {
+        let call = ToolCall {
+            id: lutin_llm::CallId::new("c1"),
+            name: lutin_llm::ToolName::new("read"),
+            arguments: serde_json::json!({}),
+        };
+        let entries = vec![
+            Entry {
+                message: Message::User("hi".into()),
+                metrics: MessageMetrics {
+                    timestamp: Some("t0".into()),
+                    ..Default::default()
+                },
+            },
+            Entry {
+                message: assistant_with_calls("hello", vec![call]),
+                metrics: MessageMetrics {
+                    timestamp: Some("t1".into()),
+                    text: Some(TextStats {
+                        ttft_ms: Some(10),
+                        duration_ms: Some(50),
+                        prompt_tokens: Some(5),
+                        completion_tokens: Some(3),
+                    }),
+                    tools: vec![ToolStats {
+                        timestamp: Some("t1.5".into()),
+                        duration_ms: Some(30),
+                    }],
+                    ..Default::default()
+                },
+            },
+        ];
+        let history = project_history(&entries);
+        let metrics = project_metrics(&entries);
+        assert_eq!(history.len(), metrics.len(), "1:1 alignment");
+        assert!(matches!(metrics[0], MessageMeta::User { .. }));
+        assert!(matches!(metrics[1], MessageMeta::Assistant { .. }));
+        assert!(matches!(metrics[2], MessageMeta::Tool { .. }));
+    }
+}

@@ -29,6 +29,12 @@ export interface SessionSummary {
   subtitle?: string | null;
   last_activity?: string | null;
   preview?: string | null;
+  persona?: string | null;
+  model?: string | null;
+  total_prompt_tokens?: number | null;
+  total_completion_tokens?: number | null;
+  context_tokens?: number | null;
+  message_count?: number | null;
 }
 
 export interface SessionInfo {
@@ -53,6 +59,10 @@ export type ProviderKind =
   | "anthropic"
   | "open_ai_compat";
 
+export interface WebSearchSettings {
+  brave_api_key?: string | null;
+}
+
 export interface ProviderConfig {
   name: string;
   kind: ProviderKind;
@@ -75,7 +85,9 @@ export type Request =
   | { OpenSession: { slug: Slug; session: SessionId } }
   | { GetWorkflowBundle: { id: WorkflowId } }
   | "ListProviders"
-  | { SetProviders: { providers: ProviderConfig[] } };
+  | { SetProviders: { providers: ProviderConfig[] } }
+  | "GetWebSearch"
+  | { SetWebSearch: { settings: WebSearchSettings } };
 
 export type ResponseOk =
   | { Projects: ProjectInfo[] }
@@ -90,7 +102,9 @@ export type ResponseOk =
   | { SessionOpened: SessionEndpoint }
   | { WorkflowBundle: { id: WorkflowId; digest: string; bytes: number[] } }
   | { Providers: ProviderConfig[] }
-  | "ProvidersSaved";
+  | "ProvidersSaved"
+  | { WebSearch: WebSearchSettings }
+  | "WebSearchSaved";
 
 export type ApiError =
   | { NotFound: Slug }

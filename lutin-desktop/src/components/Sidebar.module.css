@@ -1,4 +1,5 @@
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: var(--sidebar-w);
@@ -9,6 +10,22 @@
   padding: var(--s-3);
   gap: var(--s-2);
   overflow: hidden;
+}
+
+.resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  user-select: none;
+}
+.resizer:hover,
+.resizer.dragging {
+  background: var(--accent);
+  opacity: 0.4;
 }
 
 .sectionHead {
@@ -48,7 +65,8 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  flex: 1;
+  flex: 0 1 auto;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -141,3 +159,90 @@
   color: var(--err);
   word-break: break-word;
 }
+
+/* Chats are rendered as a 5-column table:
+ *   state-dot | title (flex) | persona | ctx (right) | delete-x
+ * Header row uses the same grid so the columns stay aligned. */
+.chatTable {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 1px;
+}
+
+.chatHeader,
+.chatRow {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) 70px 44px 16px;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px var(--s-2);
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+}
+
+.chatHeader {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-4);
+  border-bottom: 1px solid var(--border-1);
+  border-radius: 0;
+  padding: 4px var(--s-2) 5px;
+  cursor: default;
+}
+
+.colRight { text-align: right; }
+
+.chatRow {
+  cursor: pointer;
+  color: var(--text-2);
+  transition: background 0.1s, color 0.1s;
+}
+.chatRow:hover { background: var(--bg-2); color: var(--text-1); }
+.chatRow.active {
+  background: var(--bg-3);
+  color: var(--text-1-strong);
+}
+
+.emptyRow {
+  font-size: var(--fs-sm);
+  color: var(--text-4);
+  padding: 6px var(--s-2);
+}
+
+.chatState {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  justify-self: center;
+}
+.chatState[data-state="running"] {
+  background: var(--ok);
+  box-shadow: 0 0 5px var(--ok-soft);
+}
+.chatState[data-state="dormant"] { background: var(--text-4); }
+
+.chatTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatPersona,
+.chatCtx {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chatCtx { color: var(--text-4); }
+
+.chatRow .deleteBtn { visibility: hidden; }
+.chatRow:hover .deleteBtn { visibility: visible; }
+

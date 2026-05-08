@@ -20,6 +20,8 @@ export interface PersonaComposerExtra {
   ttsOn: boolean;
   ttsLoading: boolean;
   onToggleTts: () => void;
+  ttsSpeed: number;
+  onChangeTtsSpeed: (speed: number) => void;
 }
 
 export function makePersonaComposer(extra: PersonaComposerExtra) {
@@ -49,6 +51,8 @@ function Inner({
   ttsOn,
   ttsLoading,
   onToggleTts,
+  ttsSpeed,
+  onChangeTtsSpeed,
 }: InnerProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -123,25 +127,42 @@ function Inner({
             <span>Compact</span>
           </button>
           {ttsAvailable && (
-            <button
-              type="button"
-              className={styles.toolBtn}
-              onClick={onToggleTts}
-              disabled={ttsLoading}
-              title={
-                ttsLoading
-                  ? "Loading TTS model…"
-                  : ttsOn
-                    ? "Disable spoken responses"
-                    : "Speak assistant replies"
-              }
-              aria-label="Toggle TTS"
-              aria-pressed={ttsOn}
-              data-active={ttsOn ? "true" : undefined}
-            >
-              <SpeakerIcon muted={!ttsOn} />
-              <span>{ttsLoading ? "TTS…" : ttsOn ? "TTS on" : "TTS"}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                className={styles.toolBtn}
+                onClick={onToggleTts}
+                disabled={ttsLoading}
+                title={
+                  ttsLoading
+                    ? "Loading TTS model…"
+                    : ttsOn
+                      ? "Disable spoken responses"
+                      : "Speak assistant replies"
+                }
+                aria-label="Toggle TTS"
+                aria-pressed={ttsOn}
+                data-active={ttsOn ? "true" : undefined}
+              >
+                <SpeakerIcon muted={!ttsOn} />
+                <span>{ttsLoading ? "TTS…" : ttsOn ? "TTS on" : "TTS"}</span>
+              </button>
+              <label
+                className={styles.speed}
+                title={`Playback speed: ${ttsSpeed.toFixed(2)}×`}
+              >
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2.0}
+                  step={0.05}
+                  value={ttsSpeed}
+                  onChange={(e) => onChangeTtsSpeed(parseFloat(e.target.value))}
+                  aria-label="TTS speed"
+                />
+                <span className={styles.speedValue}>{ttsSpeed.toFixed(2)}×</span>
+              </label>
+            </>
           )}
           <button
             type="button"

@@ -79,6 +79,10 @@ struct StreamSlot {
     /// chunk independently would alias at chunk seams.
     resample_pos: f64,
     last_sample: f32,
+    /// Playback speed multiplier; folded into the resample ratio so
+    /// the existing 24 kHz → device-rate stage handles speed for
+    /// free. Pitch shifts with speed (no time-stretch).
+    speed: f32,
 }
 
 impl StreamSlot {
@@ -88,6 +92,7 @@ impl StreamSlot {
             queue: VecDeque::new(),
             resample_pos: 0.0,
             last_sample: 0.0,
+            speed: 1.0,
         }
     }
 
@@ -193,7 +198,19 @@ impl TtsPlayback {
             }
             return;
         }
-        resample_into(chunk, slot, TTS_AUDIO_SAMPLE_RATE_HZ, device_rate);
+        let ratio = TTS_AUDIO_SAMPLE_RATE_HZ as f64 * slot.speed as f64
+            / device_rate as f64;
+        resample_into(chunk, slot, ratio);
+    }
+
+    /// Set the playback speed for a stream. Already-resampled samples
+    /// in the queue keep playing at whatever speed they were enqueued
+    /// with; only chunks arriving after this call use the new rate.
+    pub fn set_speed(&self, stream_id: TtsStreamId, speed: f32) {
+        let mut s = self.state.lock().expect("tts_playback state poisoned");
+        if let Some((_, slot)) = s.streams.iter_mut().find(|(id, _)| *id == stream_id) {
+            slot.speed = speed;
+        }
     }
 
     /// Drop `stream_id`'s queued samples synchronously. Called from
@@ -401,21 +418,22 @@ fn fill_output(state: &Arc<Mutex<PlaybackState>>, data: &mut [f32], channels: us
     }
 }
 
-/// Decode `chunk` (i16 LE @ `src_rate`) and append device-rate samples
-/// to `slot.queue`, carrying linear-resampler state across the chunk
-/// boundary so seams don't alias.
+/// Decode `chunk` (i16 LE) and append samples to `slot.queue`,
+/// resampled by `ratio` (= effective source rate / device rate).
+/// Carries linear-resampler state across the chunk boundary so seams
+/// don't alias.
 ///
 /// Decoding is fused into the loop — no intermediate `Vec<f32>` —
 /// because the audio path runs every chunk and one allocation per
 /// chunk adds up.
-fn resample_into(chunk: &[u8], slot: &mut StreamSlot, src_rate: u32, dst_rate: u32) {
+fn resample_into(chunk: &[u8], slot: &mut StreamSlot, ratio: f64) {
     let n = chunk.len() / 2;
     if n == 0 {
         return;
     }
 
-    // Same-rate fast path: decode straight into the queue.
-    if src_rate == dst_rate {
+    // Identity fast path: decode straight into the queue.
+    if (ratio - 1.0).abs() < 1e-9 {
         let mut last = 0.0_f32;
         for i in 0..n {
             let s = decode_sample(chunk, i);
@@ -426,7 +444,6 @@ fn resample_into(chunk: &[u8], slot: &mut StreamSlot, src_rate: u32, dst_rate: u
         return;
     }
 
-    let ratio = src_rate as f64 / dst_rate as f64;
     let mut pos = slot.resample_pos;
     // Stop strictly *before* the last source sample: the s1 of the
     // final interpolation needs an index < n, which only holds while
@@ -486,6 +503,7 @@ mod tests {
             queue: VecDeque::new(),
             resample_pos: 0.0,
             last_sample: 0.0,
+            speed: 1.0,
         }
     }
 
@@ -493,7 +511,7 @@ mod tests {
     fn resample_identity_on_equal_rates() {
         let mut slot = fresh_slot();
         let chunk = pcm_bytes(&[0, 16384, -16384, 32767]);
-        resample_into(&chunk, &mut slot, 24_000, 24_000);
+        resample_into(&chunk, &mut slot, 1.0);
         assert_eq!(slot.queue.len(), 4);
         // Last sample carry should equal the last decoded value.
         let last = slot.queue.back().copied().unwrap();
@@ -507,7 +525,7 @@ mod tests {
         let n_in = 240usize;
         let samples: Vec<i16> = (0..n_in).map(|i| (i as i16) * 100).collect();
         let chunk = pcm_bytes(&samples);
-        resample_into(&chunk, &mut slot, 24_000, 48_000);
+        resample_into(&chunk, &mut slot, 0.5);
         let expected = (n_in as f64 / 0.5) as i64;
         let got = slot.queue.len() as i64;
         assert!(
@@ -523,8 +541,8 @@ mod tests {
         // constant after the first sample.
         let mut slot = fresh_slot();
         let chunk = pcm_bytes(&vec![16_000_i16; 512]);
-        resample_into(&chunk, &mut slot, 24_000, 48_000);
-        resample_into(&chunk, &mut slot, 24_000, 48_000);
+        resample_into(&chunk, &mut slot, 0.5);
+        resample_into(&chunk, &mut slot, 0.5);
         // First output sample interpolates from `last_sample = 0` up
         // to the DC value, so skip it. After that the signal must be
         // ~constant.
@@ -540,9 +558,36 @@ mod tests {
     #[test]
     fn resample_empty_chunk_is_noop() {
         let mut slot = fresh_slot();
-        resample_into(&[], &mut slot, 24_000, 48_000);
-        resample_into(&[0u8], &mut slot, 24_000, 48_000); // odd byte
+        resample_into(&[], &mut slot, 0.5);
+        resample_into(&[0u8], &mut slot, 0.5); // odd byte
         assert!(slot.queue.is_empty());
+    }
+
+    #[test]
+    fn resample_speed_compresses_output_length() {
+        // Speed 2.0 at matched rates → ratio 2.0 → ~half as many out
+        // samples. Mirrors what `enqueue` computes when src == device
+        // rate (the common 24 kHz device case).
+        let mut slot = fresh_slot();
+        let n_in = 240usize;
+        let samples: Vec<i16> = (0..n_in).map(|i| (i as i16) * 100).collect();
+        let chunk = pcm_bytes(&samples);
+        resample_into(&chunk, &mut slot, 2.0);
+        let expected = (n_in as f64 / 2.0) as i64;
+        let got = slot.queue.len() as i64;
+        assert!(
+            (got - expected).abs() <= 2,
+            "expected ~{expected} samples, got {got}",
+        );
+    }
+
+    fn test_pb(state: Arc<Mutex<PlaybackState>>, rate: u32) -> TtsPlayback {
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        TtsPlayback {
+            state,
+            device_rate: Arc::new(AtomicU32::new(rate)),
+            cmd_tx,
+        }
     }
 
     #[test]
@@ -556,10 +601,7 @@ mod tests {
             active_session: None,
             last_drop_warn: None,
         }));
-        let pb = TtsPlayback {
-            state: state.clone(),
-            device_rate: 24_000,
-        };
+        let pb = test_pb(state.clone(), 24_000);
         let s_a = SessionId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let s_b = SessionId::parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         pb.register(TtsStreamId(1), s_a.clone());
@@ -589,11 +631,55 @@ mod tests {
             active_session: None,
             last_drop_warn: None,
         }));
-        let pb = TtsPlayback {
-            state: state.clone(),
-            device_rate: 24_000,
-        };
+        let pb = test_pb(state.clone(), 24_000);
         pb.enqueue(TtsStreamId(99), &pcm_bytes(&[1, 2, 3, 4]));
         assert!(state.lock().unwrap().streams.is_empty());
+    }
+
+    #[test]
+    fn set_speed_affects_output_length() {
+        // 24 kHz device, 1.0× → identity (n samples in / n out).
+        // Switch to 2.0× → next chunk yields ~n/2 out.
+        let state = Arc::new(Mutex::new(PlaybackState {
+            streams: Vec::new(),
+            active_session: None,
+            last_drop_warn: None,
+        }));
+        let pb = test_pb(state.clone(), 24_000);
+        let s = SessionId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        pb.register(TtsStreamId(1), s.clone());
+        pb.set_active_session(Some(&s));
+        let chunk = pcm_bytes(&vec![1234_i16; 240]);
+
+        pb.enqueue(TtsStreamId(1), &chunk);
+        let len_1x = state
+            .lock()
+            .unwrap()
+            .streams
+            .iter()
+            .find(|(i, _)| *i == TtsStreamId(1))
+            .unwrap()
+            .1
+            .queue
+            .len();
+        assert_eq!(len_1x, 240);
+
+        pb.cancel(TtsStreamId(1));
+        pb.set_speed(TtsStreamId(1), 2.0);
+        pb.enqueue(TtsStreamId(1), &chunk);
+        let len_2x = state
+            .lock()
+            .unwrap()
+            .streams
+            .iter()
+            .find(|(i, _)| *i == TtsStreamId(1))
+            .unwrap()
+            .1
+            .queue
+            .len();
+        assert!(
+            (len_2x as i64 - 120).abs() <= 2,
+            "expected ~120 samples at 2.0×, got {len_2x}",
+        );
     }
 }

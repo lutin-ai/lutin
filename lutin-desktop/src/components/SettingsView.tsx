@@ -17,6 +17,7 @@ import type {
   ProviderConfig,
   ProviderKind,
   Target,
+  WebSearchSettings,
   WorkflowId,
   WorkflowInfo,
 } from "../types";
@@ -29,7 +30,7 @@ const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
   { value: "open_ai_compat", label: "OpenAI-compatible" },
 ];
 
-type Tab = "connections" | "keybinds" | "audio" | "providers";
+type Tab = "connections" | "keybinds" | "audio" | "providers" | "web_search";
 
 const ACTION_LABELS: Record<Action["kind"], string> = {
   ptt: "Push-to-talk (PTT)",
@@ -96,6 +97,13 @@ export function SettingsView() {
           >
             LLM providers
           </button>
+          <button
+            className={styles.tab}
+            data-active={tab === "web_search"}
+            onClick={() => setTab("web_search")}
+          >
+            Web search
+          </button>
         </nav>
       </header>
 
@@ -109,6 +117,7 @@ export function SettingsView() {
         {tab === "audio" && settings && <AudioPanel initial={settings} />}
         {tab === "audio" && !settings && <Loading />}
         {tab === "providers" && <ProvidersPanel connected={conn.kind === "connected"} />}
+        {tab === "web_search" && <WebSearchPanel connected={conn.kind === "connected"} />}
       </div>
     </main>
   );
@@ -533,6 +542,98 @@ function ProviderCard({ provider, onChange, onRemove }: ProviderCardProps) {
         )}
       </div>
     </div>
+  );
+}
+
+/* ───────── Web search ───────── */
+
+function WebSearchPanel({ connected }: { connected: boolean }) {
+  const [draft, setDraft] = useState<WebSearchSettings | null>(null);
+  const [initial, setInitial] = useState<WebSearchSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!connected) return;
+    cpSendOk("GetWebSearch")
+      .then((r) => {
+        if (typeof r === "object" && "WebSearch" in r) {
+          setDraft(r.WebSearch);
+          setInitial(r.WebSearch);
+        }
+      })
+      .catch((e) => setError(String(e)));
+  }, [connected]);
+
+  if (!connected) {
+    return (
+      <Card
+        title="Web search"
+        description="Web-search credentials live on the control panel."
+      >
+        <Empty>Connect to a control panel to view and edit web-search settings.</Empty>
+      </Card>
+    );
+  }
+  if (draft == null) {
+    return (
+      <Card title="Web search">
+        <Empty>Loading…</Empty>
+      </Card>
+    );
+  }
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const cleaned: WebSearchSettings = {
+        brave_api_key:
+          draft.brave_api_key && draft.brave_api_key.length > 0
+            ? draft.brave_api_key
+            : null,
+      };
+      await cpSendOk({ SetWebSearch: { settings: cleaned } });
+      setInitial(cleaned);
+      setDraft(cleaned);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Card
+        title="Brave Search"
+        description="API key used by the agent's web_search tool. Free tier allows 2K queries/month. Get one at api.search.brave.com."
+      >
+        <Field label="API key">
+          <input
+            className={styles.input}
+            type="password"
+            placeholder="BSA…"
+            value={draft.brave_api_key ?? ""}
+            onChange={(e) =>
+              setDraft({ ...draft, brave_api_key: e.target.value || null })
+            }
+          />
+        </Field>
+      </Card>
+
+      {error && <div className={styles.error}>{error}</div>}
+
+      <SaveBar
+        dirty={dirty}
+        saving={saving}
+        onSave={save}
+        onRevert={() => initial && setDraft(initial)}
+        label="Save web search"
+      />
+    </>
   );
 }
 

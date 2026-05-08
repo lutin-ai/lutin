@@ -494,6 +494,14 @@ fn build_wire(
                     },
                 );
             }
+            Message::Summary { text } => {
+                push_user(
+                    &mut wire_messages,
+                    ContentBlock::Text {
+                        text: format!("[Summary of earlier conversation]\n{text}"),
+                    },
+                );
+            }
         }
     }
 

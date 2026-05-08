@@ -79,7 +79,7 @@ export function OverlayApp() {
   const dot = PHASE_DOT[effective.kind];
 
   return (
-    <div className={styles.pill} data-dot={dot} key={effective.kind}>
+    <div className={styles.pill} data-dot={dot}>
       {effective.kind === "done" ? (
         <svg
           className={styles.check}

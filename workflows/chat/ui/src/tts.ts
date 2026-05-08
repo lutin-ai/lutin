@@ -54,11 +54,15 @@ export interface ChatTts {
   cancel: () => void;
 }
 
-export function useChatTts(lutin: Lutin, enabled: boolean): ChatTts {
+export function useChatTts(lutin: Lutin, enabled: boolean, speed: number = 1.0): ChatTts {
   const tts = lutin.tts;
   const streamRef = useRef<TtsStreamId | null>(null);
   const bufRef = useRef("");
   const [loading, setLoading] = useState(false);
+  // Read latest speed inside the speak callback without retriggering
+  // the broadcast subscription on every slider tick.
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
 
   // Open the stream when enabled; close it on disable / unmount. We
   // don't try to keep the stream across an `enabled` toggle — the
@@ -109,7 +113,7 @@ export function useChatTts(lutin: Lutin, enabled: boolean): ChatTts {
       if (id === null || !tts) return;
       if (chunk.length === 0) return;
       bufRef.current = rest.replace(/^\s+/, "");
-      tts.speak(id, chunk).catch((e) => console.warn("tts speak:", e));
+      tts.speak(id, chunk, { speed: speedRef.current }).catch((e) => console.warn("tts speak:", e));
     },
     [tts],
   );

@@ -26,19 +26,11 @@
 //! `mpsc::UnboundedSender<AgentUpdate>` clone (mpsc is the channel; the
 //! registry is the single owner of slot state).
 
-// `Registry::spawn` + `RegistryHandles` + `Spawner` + `AgentUpdate`
-// variants + `AgentSpec` are now live (step 5: spawner wired into the
-// chat engine). The remainder — `AgentRegistryCmd` variants,
-// `AgentSummary` fields, `CompletionEvent` field reads, and the
-// `Completed.outcome` slot field — wakes up in steps 6–8 (completion
-// handler, system-prompt block, LLM tools). Keep the module-wide allow
-// rather than sprinkling 5 targeted attrs only to delete them shortly.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::str::FromStr;
 
+use lutin_entities::Persona;
 use lutin_llm::Message;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -55,6 +47,31 @@ impl fmt::Display for AgentId {
     }
 }
 
+/// Parse `agent#7` or the bare `7`. The protocol layer accepts both
+/// (LLM tool args sometimes drop the prefix; the UI always emits it),
+/// so the rule lives on the type once and every call site shares it.
+impl FromStr for AgentId {
+    type Err = AgentIdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let body = s.strip_prefix("agent#").unwrap_or(s);
+        body.parse::<u64>()
+            .map(AgentId)
+            .map_err(|_| AgentIdParseError(s.to_owned()))
+    }
+}
+
+#[derive(Debug)]
+pub struct AgentIdParseError(pub String);
+
+impl fmt::Display for AgentIdParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unparseable agent id: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for AgentIdParseError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentStatus {
     Running,
@@ -63,14 +80,18 @@ pub enum AgentStatus {
     Stopped,
 }
 
-/// Inputs to spawn one sub-agent. `transcript_snapshot` is the
-/// parent's transcript at spawn-time, frozen in an `Arc<Vec<_>>` —
-/// the child reads it but cannot mutate it (no interior mutability).
+/// Inputs to spawn one sub-agent. `persona` is the already-loaded
+/// `Persona` — validation happens at the SpawnAgent tool boundary, so
+/// by the time a spec lands in the registry the persona is guaranteed
+/// to exist. The spawner consumes the spec; the registry only retains
+/// the persona's display name in the slot for the UI panel.
 pub struct AgentSpec {
     pub initial_prompt: String,
-    /// `None` → inherit parent's persona at the call site.
-    pub persona: Option<String>,
-    pub transcript_snapshot: Arc<Vec<Message>>,
+    pub persona: Persona,
+    /// `None` when the spawn comes from the main session's orchestrator;
+    /// `Some(id)` when one sub-agent spawned another. Threaded into
+    /// `AgentSlot.parent_id` so the UI can render the family tree.
+    pub parent_id: Option<AgentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +102,8 @@ pub struct AgentOutcome {
 #[derive(Debug, Clone)]
 pub struct AgentSummary {
     pub id: AgentId,
+    pub parent_id: Option<AgentId>,
+    pub persona: String,
     pub status: AgentStatus,
     pub last_progress: Option<String>,
 }
@@ -101,22 +124,44 @@ pub enum AgentRegistryCmd {
     Snapshot {
         reply: oneshot::Sender<Vec<AgentSummary>>,
     },
+    /// Read-only transcript fetch for one slot. Replies with `None`
+    /// when the id is unknown so callers can distinguish "registry
+    /// gone" (`send` fails on the cmd channel) from "no such agent"
+    /// (oneshot replies with `None`).
+    Transcript {
+        id: AgentId,
+        reply: oneshot::Sender<Option<Vec<Message>>>,
+    },
 }
 
 pub enum AgentUpdate {
     Progress { id: AgentId, last_text: String },
     Completed { id: AgentId, outcome: AgentOutcome },
     Failed { id: AgentId, error: String },
+    /// One new message landed in the child's transcript. Pushed by the
+    /// child task whenever the SDK appends to its message vec —
+    /// assistant turns, tool exchanges, sub-agent replies. The
+    /// registry mirrors `message` into the slot's transcript and the
+    /// engine re-fetches via `Transcript` cmd to broadcast.
+    TranscriptAppend { id: AgentId, message: Message },
 }
 
 /// Forwarded to the chat engine by the registry on terminal child
-/// transitions (Completed / Failed). The engine appends an
-/// agent-response message to its transcript and triggers an auto-turn.
-/// Stop never produces a `CompletionEvent` — see top-of-file rules.
+/// transitions (Completed / Failed) **and** on transcript appends. The
+/// engine appends an agent-response message to its own transcript on
+/// terminals and broadcasts `SubAgentTranscriptUpdated` on appends so
+/// open child-transcript views stream live. Stop never produces a
+/// `CompletionEvent` — see top-of-file rules.
 #[derive(Debug, Clone)]
 pub enum CompletionEvent {
     Completed { id: AgentId, outcome: AgentOutcome },
     Failed { id: AgentId, error: String },
+    /// Non-terminal signal: "this child's transcript grew". The
+    /// payload isn't carried here — the engine re-fetches via the
+    /// `Transcript` cmd so the broadcast always reflects the
+    /// registry's authoritative slot, not a possibly-stale message
+    /// snapshot.
+    TranscriptAppend { id: AgentId },
 }
 
 const PROGRESS_MAX_CHARS: usize = 200;
@@ -126,13 +171,22 @@ const PROGRESS_MAX_CHARS: usize = 200;
 /// `Running` is the only variant that owns an `AbortHandle`. This makes
 /// "Completed without an outcome" or "post-terminal abort" unrepresentable
 /// rather than an invariant policed by comments.
-enum AgentSlot {
+struct AgentSlot {
+    persona: String,
+    parent_id: Option<AgentId>,
+    /// Append-only mirror of the child agent's `messages`. Pushed into
+    /// by `AgentUpdate::TranscriptAppend` events; never trimmed because
+    /// the read-only UI panel may scroll back to first turn.
+    transcript: Vec<Message>,
+    state: AgentSlotState,
+}
+
+enum AgentSlotState {
     Running {
         progress: Option<String>,
         abort: AbortHandle,
     },
     Completed {
-        outcome: AgentOutcome,
         progress: Option<String>,
     },
     Failed {
@@ -146,22 +200,22 @@ enum AgentSlot {
 
 impl AgentSlot {
     fn status(&self) -> AgentStatus {
-        match self {
-            AgentSlot::Running { .. } => AgentStatus::Running,
-            AgentSlot::Completed { .. } => AgentStatus::Completed,
-            AgentSlot::Failed { reason, .. } => {
+        match &self.state {
+            AgentSlotState::Running { .. } => AgentStatus::Running,
+            AgentSlotState::Completed { .. } => AgentStatus::Completed,
+            AgentSlotState::Failed { reason, .. } => {
                 AgentStatus::Failed { reason: reason.clone() }
             }
-            AgentSlot::Stopped { .. } => AgentStatus::Stopped,
+            AgentSlotState::Stopped { .. } => AgentStatus::Stopped,
         }
     }
 
     fn progress(&self) -> Option<&str> {
-        match self {
-            AgentSlot::Running { progress, .. }
-            | AgentSlot::Completed { progress, .. }
-            | AgentSlot::Failed { progress, .. }
-            | AgentSlot::Stopped { progress } => progress.as_deref(),
+        match &self.state {
+            AgentSlotState::Running { progress, .. }
+            | AgentSlotState::Completed { progress, .. }
+            | AgentSlotState::Failed { progress, .. }
+            | AgentSlotState::Stopped { progress } => progress.as_deref(),
         }
     }
 }
@@ -177,6 +231,7 @@ pub type Spawner = Box<
     dyn FnMut(AgentId, AgentSpec, mpsc::UnboundedSender<AgentUpdate>) -> AbortHandle + Send,
 >;
 
+#[allow(dead_code)] // engine uses `spawn_with_channels` directly; this is a test convenience.
 pub struct RegistryHandles {
     pub cmd_tx: mpsc::UnboundedSender<AgentRegistryCmd>,
     pub completions_rx: mpsc::UnboundedReceiver<CompletionEvent>,
@@ -202,6 +257,7 @@ impl Registry {
     /// command sender before the spawner closure is built (the spawner
     /// captures a `RunnerCtx` that itself carries the sender — a cycle
     /// the closure-on-construction API can't express).
+    #[allow(dead_code)] // test-only convenience; production uses `spawn_with_channels`.
     pub fn spawn(spawner: Spawner) -> RegistryHandles {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (completions_tx, completions_rx) = mpsc::unbounded_channel();
@@ -249,7 +305,7 @@ impl Registry {
         }
         // Engine shutdown: actively reap any still-running children.
         for (_, slot) in self.slots.drain() {
-            if let AgentSlot::Running { abort, .. } = slot {
+            if let AgentSlotState::Running { abort, .. } = slot.state {
                 abort.abort();
             }
         }
@@ -260,9 +316,18 @@ impl Registry {
             AgentRegistryCmd::Spawn { spec, reply } => {
                 let id = AgentId(self.next_id);
                 self.next_id += 1;
+                let persona = spec.persona.name.clone();
+                let parent_id = spec.parent_id;
                 let abort = (self.spawner)(id, spec, self.update_tx.clone());
-                self.slots
-                    .insert(id, AgentSlot::Running { progress: None, abort });
+                self.slots.insert(
+                    id,
+                    AgentSlot {
+                        persona,
+                        parent_id,
+                        transcript: Vec::new(),
+                        state: AgentSlotState::Running { progress: None, abort },
+                    },
+                );
                 let _ = reply.send(id);
             }
             AgentRegistryCmd::Status { id, reply } => {
@@ -274,14 +339,18 @@ impl Registry {
                 // its progress preserved. A non-Running slot is left
                 // exactly as it was — Stop is a no-op past terminal.
                 if let Some(slot) = self.slots.remove(&id) {
-                    let next = match slot {
-                        AgentSlot::Running { abort, progress } => {
+                    let AgentSlot { persona, parent_id, transcript, state } = slot;
+                    let next_state = match state {
+                        AgentSlotState::Running { abort, progress } => {
                             abort.abort();
-                            AgentSlot::Stopped { progress }
+                            AgentSlotState::Stopped { progress }
                         }
                         terminal => terminal,
                     };
-                    self.slots.insert(id, next);
+                    self.slots.insert(
+                        id,
+                        AgentSlot { persona, parent_id, transcript, state: next_state },
+                    );
                 }
                 let _ = reply.send(());
             }
@@ -291,6 +360,8 @@ impl Registry {
                     .iter()
                     .map(|(id, s)| AgentSummary {
                         id: *id,
+                        parent_id: s.parent_id,
+                        persona: s.persona.clone(),
                         status: s.status(),
                         last_progress: s.progress().map(str::to_owned),
                     })
@@ -300,6 +371,9 @@ impl Registry {
                 summaries.sort_by_key(|s| s.id.0);
                 let _ = reply.send(summaries);
             }
+            AgentRegistryCmd::Transcript { id, reply } => {
+                let _ = reply.send(self.slots.get(&id).map(|s| s.transcript.clone()));
+            }
         }
     }
 
@@ -307,8 +381,21 @@ impl Registry {
         let id = match &update {
             AgentUpdate::Progress { id, .. }
             | AgentUpdate::Completed { id, .. }
-            | AgentUpdate::Failed { id, .. } => *id,
+            | AgentUpdate::Failed { id, .. }
+            | AgentUpdate::TranscriptAppend { id, .. } => *id,
         };
+        // Transcript appends are non-terminal and arrive frequently;
+        // handle them up front so we don't pay the take/match/reinsert
+        // round-trip on every assistant token batch. Forward to the
+        // engine even if the slot has already gone terminal — a late
+        // append from a still-flushing child is informative for the UI.
+        if let AgentUpdate::TranscriptAppend { message, .. } = update {
+            if let Some(slot) = self.slots.get_mut(&id) {
+                slot.transcript.push(message);
+            }
+            let _ = self.completions.send(CompletionEvent::TranscriptAppend { id });
+            return;
+        }
         // Terminal-state guard: a `Stop` (or earlier Completed/Failed)
         // may have raced ahead of an already-queued update; only a
         // `Running` slot accepts further transitions. Take ownership
@@ -317,23 +404,24 @@ impl Registry {
         let Some(slot) = self.slots.remove(&id) else {
             return;
         };
-        let AgentSlot::Running { progress, abort } = slot else {
-            self.slots.insert(id, slot);
+        let AgentSlot { persona, parent_id, transcript, state } = slot;
+        let AgentSlotState::Running { progress, abort } = state else {
+            self.slots.insert(
+                id,
+                AgentSlot { persona, parent_id, transcript, state },
+            );
             return;
         };
-        let next = match update {
-            AgentUpdate::Progress { last_text, .. } => AgentSlot::Running {
+        let next_state = match update {
+            AgentUpdate::Progress { last_text, .. } => AgentSlotState::Running {
                 progress: Some(truncate_chars(&last_text, PROGRESS_MAX_CHARS)),
                 abort,
             },
             AgentUpdate::Completed { outcome, .. } => {
                 // abort drops here — task already terminated, no need to fire.
                 drop(abort);
-                let _ = self.completions.send(CompletionEvent::Completed {
-                    id,
-                    outcome: outcome.clone(),
-                });
-                AgentSlot::Completed { outcome, progress }
+                let _ = self.completions.send(CompletionEvent::Completed { id, outcome });
+                AgentSlotState::Completed { progress }
             }
             AgentUpdate::Failed { error, .. } => {
                 drop(abort);
@@ -341,10 +429,13 @@ impl Registry {
                     id,
                     error: error.clone(),
                 });
-                AgentSlot::Failed { reason: error, progress }
+                AgentSlotState::Failed { reason: error, progress }
             }
+            // Already handled above; unreachable here.
+            AgentUpdate::TranscriptAppend { .. } => unreachable!(),
         };
-        self.slots.insert(id, next);
+        self.slots
+            .insert(id, AgentSlot { persona, parent_id, transcript, state: next_state });
     }
 }
 
@@ -373,19 +464,21 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::time::timeout;
 
-    /// Test spawner that captures each child's `update_tx` into a shared
-    /// vec, letting the test send `AgentUpdate`s on the spawned task's
-    /// behalf. The "child" task itself just sleeps until aborted.
-    fn capture_spawner() -> (Spawner, Arc<Mutex<Vec<mpsc::UnboundedSender<AgentUpdate>>>>) {
-        let captured: Arc<Mutex<Vec<mpsc::UnboundedSender<AgentUpdate>>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
+    /// Test spawner that forwards each child's `update_tx` over a
+    /// channel back to the test, letting the test send `AgentUpdate`s
+    /// on the spawned task's behalf. The "child" task itself just
+    /// sleeps until aborted. Channel-based instead of `Arc<Mutex<Vec>>`
+    /// so the capture path uses the same actor primitives the
+    /// production code does.
+    fn capture_spawner() -> (Spawner, mpsc::UnboundedReceiver<mpsc::UnboundedSender<AgentUpdate>>) {
+        let (capture_tx, capture_rx) = mpsc::unbounded_channel();
         let spawner: Spawner = Box::new(move |_id, _spec, tx| {
-            captured_clone.lock().unwrap().push(tx);
+            // Send returns Err once the test drops `capture_rx`; tests
+            // don't care since capture is best-effort scaffolding.
+            let _ = capture_tx.send(tx);
             // Park the child until aborted; production replaces this
             // with an Agent::start() event-stream pump.
             let h = tokio::spawn(async {
@@ -393,14 +486,17 @@ mod tests {
             });
             h.abort_handle()
         });
-        (spawner, captured)
+        (spawner, capture_rx)
     }
 
     fn make_spec() -> AgentSpec {
         AgentSpec {
             initial_prompt: "do the thing".into(),
-            persona: None,
-            transcript_snapshot: Arc::new(Vec::new()),
+            persona: Persona {
+                name: "test".into(),
+                ..Persona::default()
+            },
+            parent_id: None,
         }
     }
 
@@ -451,10 +547,10 @@ mod tests {
 
     #[tokio::test]
     async fn completion_emits_event_and_marks_slot() {
-        let (spawner, captured) = capture_spawner();
+        let (spawner, mut captured) = capture_spawner();
         let RegistryHandles { cmd_tx, mut completions_rx } = Registry::spawn(spawner);
         let id = spawn_one(&cmd_tx).await;
-        let tx = captured.lock().unwrap()[0].clone();
+        let tx = captured.recv().await.expect("captured update_tx");
         tx.send(AgentUpdate::Completed {
             id,
             outcome: AgentOutcome { final_text: "done".into() },
@@ -476,10 +572,10 @@ mod tests {
 
     #[tokio::test]
     async fn failure_emits_event_and_marks_slot() {
-        let (spawner, captured) = capture_spawner();
+        let (spawner, mut captured) = capture_spawner();
         let RegistryHandles { cmd_tx, mut completions_rx } = Registry::spawn(spawner);
         let id = spawn_one(&cmd_tx).await;
-        let tx = captured.lock().unwrap()[0].clone();
+        let tx = captured.recv().await.expect("captured update_tx");
         tx.send(AgentUpdate::Failed { id, error: "boom".into() })
             .unwrap();
         let evt = timeout(Duration::from_secs(1), completions_rx.recv())
@@ -515,10 +611,10 @@ mod tests {
 
     #[tokio::test]
     async fn late_progress_after_stop_is_ignored() {
-        let (spawner, captured) = capture_spawner();
+        let (spawner, mut captured) = capture_spawner();
         let RegistryHandles { cmd_tx, mut completions_rx } = Registry::spawn(spawner);
         let id = spawn_one(&cmd_tx).await;
-        let tx = captured.lock().unwrap()[0].clone();
+        let tx = captured.recv().await.expect("captured update_tx");
         // Stop first.
         let (rtx, rrx) = oneshot::channel();
         cmd_tx.send(AgentRegistryCmd::Stop { id, reply: rtx }).unwrap();
@@ -540,10 +636,10 @@ mod tests {
 
     #[tokio::test]
     async fn progress_truncates_and_appears_in_snapshot() {
-        let (spawner, captured) = capture_spawner();
+        let (spawner, mut captured) = capture_spawner();
         let RegistryHandles { cmd_tx, .. } = Registry::spawn(spawner);
         let id = spawn_one(&cmd_tx).await;
-        let tx = captured.lock().unwrap()[0].clone();
+        let tx = captured.recv().await.expect("captured update_tx");
         let long: String = "x".repeat(PROGRESS_MAX_CHARS + 50);
         tx.send(AgentUpdate::Progress { id, last_text: long }).unwrap();
         drain(&cmd_tx).await;
@@ -563,9 +659,10 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_handles_reaps_running_children() {
-        let (spawner, captured) = capture_spawner();
+        let (spawner, mut captured) = capture_spawner();
         let RegistryHandles { cmd_tx, .. } = Registry::spawn(spawner);
         let _id = spawn_one(&cmd_tx).await;
+        let tx = captured.recv().await.expect("captured update_tx");
         // Drop the only command sender → actor exits → drains slots and
         // aborts the captured tasks. We can't directly observe the
         // abort, but we can confirm the captured update_tx eventually
@@ -574,7 +671,6 @@ mod tests {
         // Give the actor a tick to drain.
         for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let tx = captured.lock().unwrap()[0].clone();
             if tx.send(AgentUpdate::Progress { id: AgentId(1), last_text: "x".into() }).is_err() {
                 return;
             }

@@ -244,6 +244,12 @@ impl TtsPlaybackHandle {
         }
     }
 
+    pub fn set_speed(&self, stream_id: lutin_control_protocol::TtsStreamId, speed: f32) {
+        if let Some(p) = &self.0 {
+            p.set_speed(stream_id, speed);
+        }
+    }
+
     pub fn unregister(&self, stream_id: lutin_control_protocol::TtsStreamId) {
         if let Some(p) = &self.0 {
             p.unregister(stream_id);
@@ -913,6 +919,14 @@ pub fn run() {
                 None => warn!(
                     "overlay window not registered — restart `tauri dev` after vite.config / tauri.conf.json changes"
                 ),
+            }
+            // Auto-open devtools on the main window in debug builds so
+            // Ctrl+Shift+I isn't needed. WebKitGTK on Linux doesn't
+            // bind that shortcut, and the right-click context menu
+            // only appears with the `devtools` Cargo feature on.
+            #[cfg(debug_assertions)]
+            if let Some(win) = handle.get_webview_window("main") {
+                win.open_devtools();
             }
             let backend = build_keybind_backend(&handle, prefer_portal, &initial_binds);
             handle
