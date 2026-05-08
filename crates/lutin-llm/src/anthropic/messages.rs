@@ -380,6 +380,7 @@ fn build_wire(
         messages,
         tools,
         temperature,
+        presence_penalty: _,
         max_tokens,
         thinking_enabled,
         extensions,
@@ -473,6 +474,25 @@ fn build_wire(
                         },
                     );
                 }
+            }
+            // Anthropic has no role for sub-agent output; serialize as
+            // a user content block with bracketed attribution so the
+            // parent LLM still sees who said what.
+            Message::SubAgentReply { agent_id, text } => {
+                push_user(
+                    &mut wire_messages,
+                    ContentBlock::Text {
+                        text: format!("[{agent_id} response]\n{text}"),
+                    },
+                );
+            }
+            Message::SubAgentFailure { agent_id, reason } => {
+                push_user(
+                    &mut wire_messages,
+                    ContentBlock::Text {
+                        text: format!("[{agent_id} failed: {reason}]"),
+                    },
+                );
             }
         }
     }

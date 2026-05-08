@@ -1,5 +1,7 @@
 import type { ComponentType } from "react";
+import type { MessageActions } from "./components/MessageActions";
 import type {
+  AgentMessage,
   AssistantMessage,
   SystemMessage,
   ThinkingMessage,
@@ -14,20 +16,28 @@ import type {
 
 export interface UserMessageProps {
   message: UserMessage;
+  actions?: MessageActions;
 }
 export interface AssistantMessageProps {
   message: AssistantMessage;
+  actions?: MessageActions;
 }
 export interface SystemMessageProps {
   message: SystemMessage;
+  actions?: MessageActions;
 }
 export interface ThinkingProps {
   message: ThinkingMessage;
+  actions?: MessageActions;
 }
 export interface ToolCallProps {
   message: ToolCallMessage;
   onApprove?: (id: string) => void;
   onDeny?: (id: string) => void;
+}
+export interface AgentMessageProps {
+  message: AgentMessage;
+  actions?: MessageActions;
 }
 export interface ComposerProps {
   value: string;
@@ -53,6 +63,7 @@ export interface Slots {
   SystemMessage?: ComponentType<SystemMessageProps>;
   Thinking?: ComponentType<ThinkingProps>;
   ToolCall?: ComponentType<ToolCallProps>;
+  AgentMessage?: ComponentType<AgentMessageProps>;
   Composer?: ComponentType<ComposerProps>;
   ErrorBanner?: ComponentType<ErrorBannerProps>;
   Header?: ComponentType<HeaderProps>;

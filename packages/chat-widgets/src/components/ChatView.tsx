@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useScrollStick } from "../hooks/useScrollStick";
 import type { Slots } from "../slots";
 import type { ChatMessage, TurnState } from "../types";
+import type { MessageActions } from "./MessageActions";
 import {
+  AgentBubble,
   AssistantBubble,
   SystemBubble,
   UserBubble,
@@ -33,6 +35,10 @@ export interface ChatViewProps {
   draft?: string;
   onDraftChange?: (text: string) => void;
 
+  /** Per-message right-click affordances. Forwarded to every bubble;
+   *  bubbles render the menu only for messages with stable ids. */
+  messageActions?: MessageActions;
+
   /** Per-component overrides; unspecified slots fall through to defaults. */
   slots?: Slots;
 
@@ -52,6 +58,7 @@ export function ChatView({
   hideComposer = false,
   draft: draftProp,
   onDraftChange,
+  messageActions,
   slots,
   className,
 }: ChatViewProps) {
@@ -69,6 +76,7 @@ export function ChatView({
   const System = slots?.SystemMessage ?? SystemBubble;
   const ThinkingC = slots?.Thinking ?? DefaultThinking;
   const ToolCallC = slots?.ToolCall ?? DefaultToolCall;
+  const Agent = slots?.AgentMessage ?? AgentBubble;
 
   const submit = () => {
     const text = draft.trim();
@@ -92,13 +100,13 @@ export function ChatView({
           const key = m.id ?? `${m.kind}-${i}`;
           switch (m.kind) {
             case "user":
-              return <User key={key} message={m} />;
+              return <User key={key} message={m} actions={messageActions} />;
             case "assistant":
-              return <Assistant key={key} message={m} />;
+              return <Assistant key={key} message={m} actions={messageActions} />;
             case "system":
-              return <System key={key} message={m} />;
+              return <System key={key} message={m} actions={messageActions} />;
             case "thinking":
-              return <ThinkingC key={key} message={m} />;
+              return <ThinkingC key={key} message={m} actions={messageActions} />;
             case "toolCall":
               return (
                 <ToolCallC
@@ -108,6 +116,8 @@ export function ChatView({
                   onDeny={onDenyTool}
                 />
               );
+            case "agent":
+              return <Agent key={key} message={m} actions={messageActions} />;
           }
         })}
       </div>

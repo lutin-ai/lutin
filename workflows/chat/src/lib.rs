@@ -78,6 +78,27 @@ pub enum ChatRequest {
     /// in the chat UI when the user wants another assistant pass on
     /// what's already there.
     Rerun,
+    /// In-place edit of a single projected history entry. `index`
+    /// addresses the UI's projected scrollback (the same `Vec` shape
+    /// returned by `Subscribed.history`), not the engine's underlying
+    /// `Vec<Message>`. No truncation: editing a mid-history entry
+    /// rewrites just that text and leaves later turns alone.
+    EditMessage { index: u32, text: String },
+    /// Delete a single projected history entry. For an Assistant entry
+    /// that shares its underlying `Message::Assistant` with a Thinking
+    /// entry, deletion blanks just the assistant text (and the message
+    /// is dropped from projection); deleting Thinking nulls the
+    /// `thinking` field. Deleting a User entry drops the underlying
+    /// `Message::User` outright.
+    DeleteMessage { index: u32 },
+    /// Truncate everything from the projected entry onward, including
+    /// the underlying message that owns it.
+    DeleteFromHere { index: u32 },
+    /// Fetch the metrics sidecar projected to the same shape as
+    /// `Subscribed.history` (one entry per `HistoricalMessage`). New
+    /// at variant index 10 — appended to the end so existing indices
+    /// stay stable.
+    GetMetrics,
 }
 
 pub type ChatResponse = Result<ChatOk, ChatError>;
@@ -98,6 +119,29 @@ pub enum ChatOk {
     State(SessionState),
     /// Reply to `ListPersonas`.
     Personas { personas: Vec<PersonaInfo> },
+    /// Reply to `EditMessage`/`DeleteMessage`/`DeleteFromHere`. The
+    /// post-mutation history travels on the `HistoryReplaced`
+    /// broadcast — every subscriber (including the originator) reads
+    /// state from that single channel rather than racing two copies.
+    HistoryAcknowledged,
+    /// Reply to `GetMetrics`. Aligned to the same projection that
+    /// `Subscribed.history` uses — `metrics[i]` describes the same
+    /// `HistoricalMessage` the UI is rendering at index `i`.
+    Metrics(Vec<MessageMeta>),
+}
+
+/// Per-projected-entry metrics. One `MessageMeta` per `HistoricalMessage`.
+/// All numeric fields are `Option` so unknown / not-applicable cases
+/// (e.g. tokens for a user message) encode cleanly. `timestamp` is
+/// RFC3339; an empty string means "unknown" (legacy transcripts loaded
+/// before metrics existed).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageMeta {
+    pub timestamp: String,
+    pub ttft_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
 }
 
 /// One row in the persona picker. Sourced from
@@ -118,23 +162,42 @@ pub struct PersonaInfo {
 
 /// One entry in the rendered scrollback. The engine projects its full
 /// `Vec<lutin_llm::Message>` to this UI-friendly shape on `Subscribe`,
-/// dropping anything the chat UI doesn't render (tool calls, system
-/// prompt, raw images). Adds bytes proportional to text length, which
-/// is fine for chat sessions (~hundreds of messages max).
+/// preserving original order so tool exchanges interleave with text
+/// turns the way the user saw them happen.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HistoricalMessage {
-    pub role: HistoricalRole,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum HistoricalRole {
-    User,
-    Assistant,
+pub enum HistoricalMessage {
+    User(String),
+    Assistant(String),
     /// Reasoning / extended-thinking text emitted alongside an assistant
     /// turn. Persisted so re-subscribers see the same conversation that
     /// live listeners saw stream by.
-    Thinking,
+    Thinking(String),
+    /// One tool exchange. `arguments_json` is the raw JSON the model
+    /// emitted; the TS decoder parses it once at the wire boundary so
+    /// downstream code sees a parsed value. `outcome` is `None` for the
+    /// mid-turn snapshot case where a call has been emitted but no
+    /// result has come back yet.
+    Tool {
+        call_id: String,
+        name: String,
+        arguments_json: String,
+        outcome: Option<ToolOutcome>,
+    },
+    /// Successful reply produced by a sub-agent. Rendered with
+    /// attribution ("agent#7 said …") rather than as a local user turn.
+    SubAgentReply { agent_id: String, text: String },
+    /// Sub-agent terminated with a failure; `reason` is the engine's
+    /// error string (truncated `AgentUpdate::Failed` payload).
+    SubAgentFailure { agent_id: String, reason: String },
+}
+
+/// Result of a tool call. Two variants that carry the result/error text
+/// directly — replaces the older `(ok: bool, text: String)` pair where
+/// the meaning of `text` flipped on `ok`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolOutcome {
+    Ok(String),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -151,6 +214,16 @@ pub enum ChatError {
     ProviderUnsupported(String),
     #[error("internal: {0}")]
     Internal(String),
+    #[error("a turn is in flight; cancel it before mutating history")]
+    TurnInFlight,
+    #[error("history index out of range: {0}")]
+    HistoryIndexOutOfRange(u32),
+    /// The mutation succeeded in memory but the on-disk transcript /
+    /// metrics sidecar could not be persisted. `op` names the failing
+    /// step ("save transcript" / "save metrics") so the UI can show
+    /// the user something more actionable than a blank "internal".
+    #[error("persist failed during {op}")]
+    PersistFailed { op: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,12 +232,24 @@ pub enum ChatEvent {
     Delta(String),
     /// Streaming reasoning / thinking delta.
     Reasoning(String),
-    ToolCallStarted { id: String, name: String },
-    ToolCallCompleted { id: String, ok: bool, summary: String },
+    /// `arguments_json` is the raw JSON the model emitted as the tool
+    /// call's input — the TS decoder parses it once at the wire
+    /// boundary so the UI sees a parsed value.
+    ToolCallStarted { id: String, name: String, arguments_json: String },
+    ToolCallCompleted { id: String, outcome: ToolOutcome },
     /// Terminal event for one turn.
     MessageFinished { turn_id: TurnId, reason: FinishReason },
     /// Pushed when `SessionState` mutates so subscribers can rerender.
     StateChanged(SessionState),
+    /// Pushed after `EditMessage`/`DeleteMessage`/`DeleteFromHere`
+    /// applies, so every connected subscriber rebuilds its scrollback
+    /// from the canonical projected history.
+    HistoryReplaced(Vec<HistoricalMessage>),
+    /// Pushed alongside `HistoryReplaced` (or after a turn finishes) so
+    /// subscribers can rerender per-message footers (timestamp, TTFT,
+    /// duration, token counts). Length matches the most-recent
+    /// `HistoryReplaced` entry-for-entry.
+    MetricsReplaced(Vec<MessageMeta>),
 }
 
 #[derive(Debug, Error)]
@@ -302,16 +387,53 @@ mod tests {
                         persona: Some("alice".into()),
                         model_override: None,
                     },
-                    history: vec![HistoricalMessage {
-                        role: HistoricalRole::User,
-                        text: "hi".into(),
-                    }],
+                    history: vec![HistoricalMessage::User("hi".into())],
                 }))
                 .unwrap(),
             ),
             (
                 "ChatResponse::Err(NoTurnInFlight)",
                 encode::<ChatResponse>(&Err(ChatError::NoTurnInFlight)).unwrap(),
+            ),
+            (
+                "ChatRequest::EditMessage{3,\"hi\"}",
+                encode(&ChatRequest::EditMessage { index: 3, text: "hi".into() }).unwrap(),
+            ),
+            (
+                "ChatRequest::DeleteMessage{2}",
+                encode(&ChatRequest::DeleteMessage { index: 2 }).unwrap(),
+            ),
+            (
+                "ChatRequest::DeleteFromHere{1}",
+                encode(&ChatRequest::DeleteFromHere { index: 1 }).unwrap(),
+            ),
+            (
+                "ChatEvent::HistoryReplaced(empty)",
+                encode(&ChatEvent::HistoryReplaced(vec![])).unwrap(),
+            ),
+            (
+                "ChatResponse::Ok(HistoryAcknowledged)",
+                encode::<ChatResponse>(&Ok(ChatOk::HistoryAcknowledged)).unwrap(),
+            ),
+            ("ChatRequest::GetMetrics", encode(&ChatRequest::GetMetrics).unwrap()),
+            (
+                "ChatResponse::Ok(Metrics(empty))",
+                encode::<ChatResponse>(&Ok(ChatOk::Metrics(vec![]))).unwrap(),
+            ),
+            (
+                "ChatResponse::Ok(Metrics(1ts))",
+                encode::<ChatResponse>(&Ok(ChatOk::Metrics(vec![MessageMeta {
+                    timestamp: "T".into(),
+                    ttft_ms: None,
+                    duration_ms: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                }])))
+                .unwrap(),
+            ),
+            (
+                "ChatEvent::MetricsReplaced(empty)",
+                encode(&ChatEvent::MetricsReplaced(vec![])).unwrap(),
             ),
         ];
 
@@ -347,6 +469,26 @@ mod tests {
                 ],
             ),
             ("ChatResponse::Err(NoTurnInFlight)", &[0x01, 0x00]),
+            (
+                "ChatRequest::EditMessage{3,\"hi\"}",
+                &[0x07, 0x03, 0x02, b'h', b'i'],
+            ),
+            ("ChatRequest::DeleteMessage{2}", &[0x08, 0x02]),
+            ("ChatRequest::DeleteFromHere{1}", &[0x09, 0x01]),
+            ("ChatEvent::HistoryReplaced(empty)", &[0x06, 0x00]),
+            ("ChatResponse::Ok(HistoryAcknowledged)", &[0x00, 0x06]),
+            ("ChatRequest::GetMetrics", &[0x0a]),
+            ("ChatResponse::Ok(Metrics(empty))", &[0x00, 0x07, 0x00]),
+            (
+                "ChatResponse::Ok(Metrics(1ts))",
+                &[
+                    0x00, 0x07, // Ok, Metrics
+                    0x01, // vec len 1
+                    0x01, b'T', // timestamp = "T"
+                    0x00, 0x00, 0x00, 0x00, // four None options
+                ],
+            ),
+            ("ChatEvent::MetricsReplaced(empty)", &[0x07, 0x00]),
         ];
 
         assert_eq!(cases.len(), expected.len());

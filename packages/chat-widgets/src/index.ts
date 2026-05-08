@@ -1,8 +1,10 @@
 // Public API. Workflows import from "@lutin/chat-widgets".
 
 export type {
+  AgentMessage,
   AssistantMessage,
   ChatMessage,
+  MessageMeta,
   Role,
   SystemMessage,
   ThinkingMessage,
@@ -12,6 +14,7 @@ export type {
 } from "./types";
 
 export type {
+  AgentMessageProps,
   AssistantMessageProps,
   ComposerProps,
   ErrorBannerProps,
@@ -25,10 +28,12 @@ export type {
 
 export { ChatView } from "./components/ChatView";
 export type { ChatViewProps } from "./components/ChatView";
+export type { MessageActions } from "./components/MessageActions";
 
 // Default presentational components, exported so workflows that
 // compose primitives directly (without ChatView) can still use them.
 export {
+  AgentBubble,
   AssistantBubble,
   SystemBubble,
   UserBubble,

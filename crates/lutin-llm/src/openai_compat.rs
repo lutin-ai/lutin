@@ -28,6 +28,8 @@ pub struct ApiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
@@ -349,6 +351,20 @@ pub fn convert_messages(messages: Vec<Message>) -> Vec<ApiMessage> {
                     tool_call_id: None,
                 }
             }
+            // OpenAI has no role for sub-agent output; serialize both
+            // outcomes as user turns with bracketed attribution.
+            Message::SubAgentReply { agent_id, text } => ApiMessage {
+                role: "user".into(),
+                content: Some(ApiContent::Text(format!("[{agent_id} response]\n{text}"))),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message::SubAgentFailure { agent_id, reason } => ApiMessage {
+                role: "user".into(),
+                content: Some(ApiContent::Text(format!("[{agent_id} failed: {reason}]"))),
+                tool_calls: None,
+                tool_call_id: None,
+            },
         })
         .collect()
 }
@@ -504,6 +520,7 @@ pub fn build_request(
         messages: convert_messages(request.messages),
         tools: convert_tools(&request.tools),
         temperature: request.temperature,
+        presence_penalty: request.presence_penalty,
         max_tokens: request.max_tokens,
         stream,
         stream_options: stream.then_some(StreamOptions { include_usage: true }),

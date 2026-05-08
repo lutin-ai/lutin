@@ -1,23 +1,116 @@
 import { useEffect, useRef, useState } from "react";
 import { Markdown } from "../markdown";
 import type {
+  AgentMessageProps,
   AssistantMessageProps,
   SystemMessageProps,
   UserMessageProps,
 } from "../slots";
+import type { MessageMeta } from "../types";
+import { useMessageMenu } from "./MessageActions";
 
-export function UserBubble({ message }: UserMessageProps) {
+/// Right-aligned metrics chip rendered inside a `.lutin-chat__msg-meta`
+/// row. Renders nothing when `meta` is undefined, so callers can drop
+/// it in unconditionally without guarding. Order: TTFT → duration →
+/// tok/s → in/out tokens → clock time. Each piece is suppressed
+/// individually so a partial metric set still produces a tidy line.
+export function MetricsHeader({ meta }: { meta?: MessageMeta }) {
+  if (!meta) return null;
+  const parts: string[] = [];
+  if (meta.ttftMs !== null && meta.ttftMs !== undefined) {
+    parts.push(`TTFT ${formatDuration(meta.ttftMs)}`);
+  }
+  if (meta.durationMs !== null && meta.durationMs !== undefined) {
+    parts.push(formatDuration(meta.durationMs));
+  }
+  if (
+    meta.completionTokens !== null &&
+    meta.completionTokens !== undefined &&
+    meta.durationMs !== null &&
+    meta.durationMs !== undefined &&
+    meta.durationMs > 0
+  ) {
+    const tps = (meta.completionTokens * 1000) / meta.durationMs;
+    parts.push(`${tps >= 10 ? Math.round(tps) : tps.toFixed(1)} tok/s`);
+  }
+  if (meta.promptTokens !== null && meta.promptTokens !== undefined) {
+    parts.push(`${formatTokens(meta.promptTokens)} in`);
+  }
+  if (meta.completionTokens !== null && meta.completionTokens !== undefined) {
+    parts.push(`${formatTokens(meta.completionTokens)} out`);
+  }
+  const ts = formatTimestamp(meta.timestamp);
+  if (ts) parts.push(ts);
+  if (parts.length === 0) return null;
   return (
-    <div className="lutin-chat__msg lutin-chat__msg--user">
-      <span className="lutin-chat__msg-role">you</span>
-      <div className="lutin-chat__bubble lutin-chat__bubble--user">{message.text}</div>
+    <span
+      className="lutin-chat__msg-metrics"
+      title={meta.timestamp || undefined}
+    >
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem}s`;
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}`;
+  return `${(n / 1000).toFixed(n < 10_000 ? 2 : 1)}k`;
+}
+
+function formatTimestamp(ts: string): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  if (sameDay) return `${hh}:${mm}`;
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mo}-${da} ${hh}:${mm}`;
+}
+
+export function UserBubble({ message, actions }: UserMessageProps) {
+  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  return (
+    <div className="lutin-chat__msg lutin-chat__msg--user" onContextMenu={menu.onContextMenu}>
+      <div className="lutin-chat__msg-meta">
+        <span className="lutin-chat__msg-role">you</span>
+        <MetricsHeader meta={message.meta} />
+      </div>
+      {menu.editing ? (
+        menu.editor
+      ) : (
+        <div className="lutin-chat__bubble lutin-chat__bubble--user">{message.text}</div>
+      )}
+      {menu.menu}
     </div>
   );
 }
 
-export function AssistantBubble({ message }: AssistantMessageProps) {
+export function AssistantBubble({ message, actions }: AssistantMessageProps) {
   const streaming = !!message.streaming;
   const visible = useTypewriter(message.text, streaming);
+  // Only attach actions to settled (non-streaming) assistant messages —
+  // editing/deleting an in-flight buffer would race the agent.
+  const menu = useMessageMenu({
+    id: message.id,
+    text: message.text,
+    actions: streaming ? undefined : actions,
+  });
 
   // Split at the last newline: the prefix is committed and parsed as
   // markdown; the suffix is the in-flight line, rendered as plain text
@@ -37,7 +130,10 @@ export function AssistantBubble({ message }: AssistantMessageProps) {
   }
 
   return (
-    <article className="lutin-chat__msg lutin-chat__msg--assistant">
+    <article
+      className="lutin-chat__msg lutin-chat__msg--assistant"
+      onContextMenu={menu.onContextMenu}
+    >
       <div className="lutin-chat__msg-meta">
         <span className="lutin-chat__who">
           <span className="lutin-chat__role">assistant</span>
@@ -45,24 +141,74 @@ export function AssistantBubble({ message }: AssistantMessageProps) {
         {streaming && (
           <span className="lutin-chat__msg-status" aria-live="polite">streaming</span>
         )}
+        {!streaming && <MetricsHeader meta={message.meta} />}
       </div>
       <div className="lutin-chat__msg-body">
-        {parsed && <Markdown text={parsed} />}
-        {streaming && (
-          <p className="lutin-chat__msg-live">
-            {live}
-            <span className="lutin-chat__cursor" aria-hidden />
-          </p>
+        {menu.editing ? (
+          menu.editor
+        ) : (
+          <>
+            {parsed && <Markdown text={parsed} />}
+            {streaming && (
+              <p className="lutin-chat__msg-live">
+                {live}
+                <span className="lutin-chat__cursor" aria-hidden />
+              </p>
+            )}
+          </>
         )}
       </div>
+      {menu.menu}
     </article>
   );
 }
 
-export function SystemBubble({ message }: SystemMessageProps) {
+export function AgentBubble({ message, actions }: AgentMessageProps) {
+  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  const cls = [
+    "lutin-chat__msg",
+    "lutin-chat__msg--agent",
+    !message.ok && "lutin-chat__msg--agent-failed",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className="lutin-chat__msg lutin-chat__msg--system">
-      <div className="lutin-chat__bubble lutin-chat__bubble--system">{message.text}</div>
+    <article className={cls} onContextMenu={menu.onContextMenu}>
+      <div className="lutin-chat__msg-meta">
+        <span className="lutin-chat__who">
+          <span className="lutin-chat__role">{message.agentId}</span>
+          {!message.ok && (
+            <span className="lutin-chat__msg-status" data-state="failed">
+              failed
+            </span>
+          )}
+        </span>
+        <MetricsHeader meta={message.meta} />
+      </div>
+      <div className="lutin-chat__msg-body">
+        {menu.editing ? menu.editor : <Markdown text={message.text} />}
+      </div>
+      {menu.menu}
+    </article>
+  );
+}
+
+export function SystemBubble({ message, actions }: SystemMessageProps) {
+  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  return (
+    <div className="lutin-chat__msg lutin-chat__msg--system" onContextMenu={menu.onContextMenu}>
+      {message.meta && (
+        <div className="lutin-chat__msg-meta">
+          <span className="lutin-chat__msg-role">system</span>
+          <MetricsHeader meta={message.meta} />
+        </div>
+      )}
+      {menu.editing ? (
+        menu.editor
+      ) : (
+        <div className="lutin-chat__bubble lutin-chat__bubble--system">{message.text}</div>
+      )}
+      {menu.menu}
     </div>
   );
 }

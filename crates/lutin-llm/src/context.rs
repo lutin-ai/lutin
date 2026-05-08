@@ -23,6 +23,12 @@ fn message_tokens(msg: &Message) -> u32 {
         // Rough heuristic — vision tokens vary by provider (Anthropic ~1500,
         // OpenAI depends on resolution). 1000/image is a conservative estimate.
         Message::Image { items } => items.len() as u32 * 1000,
+        Message::SubAgentReply { agent_id, text } => {
+            estimate_tokens(agent_id) + estimate_tokens(text)
+        }
+        Message::SubAgentFailure { agent_id, reason } => {
+            estimate_tokens(agent_id) + estimate_tokens(reason)
+        }
     }
 }
 
@@ -160,6 +166,12 @@ fn build_summary_prompt(messages: &[Message]) -> String {
             Message::Image { items } => {
                 buf.push_str(&format!("[{} image(s) attached]", items.len()));
             }
+            Message::SubAgentReply { agent_id, text } => {
+                buf.push_str(&format!("[{agent_id} response]: {text}"));
+            }
+            Message::SubAgentFailure { agent_id, reason } => {
+                buf.push_str(&format!("[{agent_id} failed]: {reason}"));
+            }
         }
         buf.push('\n');
     }
@@ -178,6 +190,7 @@ async fn request_summary(
         messages: vec![Message::User(prompt.to_string())],
         tools: Vec::new(),
         temperature: Some(0.0),
+        presence_penalty: None,
         max_tokens: Some(1024),
         thinking_enabled: false,
         extensions: Default::default(),

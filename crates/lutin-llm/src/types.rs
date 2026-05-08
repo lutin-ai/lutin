@@ -69,6 +69,13 @@ pub enum Message {
     /// images, so the model can see them. Serialised as a multipart user
     /// message at the wire layer.
     Image { items: Vec<ImageItem> },
+    /// Sub-agent reply / failure injected into the parent's transcript.
+    /// Provider serializers emit each as a user-role turn with bracketed
+    /// attribution (`[agent#N response]\n{text}` / `[agent#N failed:
+    /// {reason}]`) — the LLM API has no role for sub-agent output so
+    /// attribution is carried in-band.
+    SubAgentReply { agent_id: String, text: String },
+    SubAgentFailure { agent_id: String, reason: String },
 }
 
 /// A request to the LLM.
@@ -78,6 +85,10 @@ pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub temperature: Option<f32>,
+    /// OpenAI-style presence penalty in [-2.0, 2.0]. Honoured by all
+    /// OpenAI-compatible providers (Ollama, OpenRouter, generic compat).
+    /// Ignored by Anthropic (the API does not accept it).
+    pub presence_penalty: Option<f32>,
     pub max_tokens: Option<u32>,
     /// Enable extended thinking/reasoning. Honoured by Anthropic and
     /// OpenRouter; other providers ignore.

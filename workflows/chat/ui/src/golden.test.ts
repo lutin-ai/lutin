@@ -36,6 +36,14 @@ describe("ChatRequest encode goldens", () => {
     ],
     ["ListPersonas", { kind: "listPersonas" }, hex(0x05)],
     ["Rerun", { kind: "rerun" }, hex(0x06)],
+    [
+      "EditMessage{3,hi}",
+      { kind: "editMessage", index: 3, text: "hi" },
+      hex(0x07, 0x03, 0x02, 0x68, 0x69),
+    ],
+    ["DeleteMessage{2}", { kind: "deleteMessage", index: 2 }, hex(0x08, 0x02)],
+    ["DeleteFromHere{1}", { kind: "deleteFromHere", index: 1 }, hex(0x09, 0x01)],
+    ["GetMetrics", { kind: "getMetrics" }, hex(0x0a)],
   ];
 
   for (const [label, req, want] of cases) {
@@ -66,6 +74,16 @@ describe("ChatEvent decode goldens", () => {
         turnId: 300n,
         reason: { kind: "failed", message: "boom" },
       },
+    ],
+    [
+      "HistoryReplaced(empty)",
+      hex(0x06, 0x00),
+      { kind: "historyReplaced", history: [] },
+    ],
+    [
+      "MetricsReplaced(empty)",
+      hex(0x07, 0x00),
+      { kind: "metricsReplaced", metrics: [] },
     ],
   ];
 
@@ -105,7 +123,7 @@ describe("ChatResponse decode goldens", () => {
         value: {
           kind: "subscribed",
           state: { persona: "alice", modelOverride: null },
-          history: [{ role: "user", text: "hi" }],
+          history: [{ kind: "user", text: "hi" }],
         },
       },
     ],
@@ -113,6 +131,30 @@ describe("ChatResponse decode goldens", () => {
       "Err(NoTurnInFlight)",
       hex(0x01, 0x00),
       { ok: false, error: { kind: "noTurnInFlight" } },
+    ],
+    [
+      "Ok(Metrics(empty))",
+      hex(0x00, 0x07, 0x00),
+      { ok: true, value: { kind: "metrics", metrics: [] } },
+    ],
+    [
+      "Ok(Metrics(1ts))",
+      hex(0x00, 0x07, 0x01, 0x01, 0x54, 0x00, 0x00, 0x00, 0x00),
+      {
+        ok: true,
+        value: {
+          kind: "metrics",
+          metrics: [
+            {
+              timestamp: "T",
+              ttftMs: null,
+              durationMs: null,
+              promptTokens: null,
+              completionTokens: null,
+            },
+          ],
+        },
+      },
     ],
   ];
 
