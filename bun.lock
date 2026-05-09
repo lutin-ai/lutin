@@ -25,10 +25,35 @@
         "vite": "^7.0.4",
       },
     },
+    "lutin-mobile": {
+      "name": "lutin-mobile",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lutin/chat-widgets": "workspace:*",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+        "zustand": "^5.0.13",
+      },
+      "devDependencies": {
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "typescript": "~5.8.3",
+        "vite": "^7.0.4",
+      },
+    },
+    "packages/chat-protocol": {
+      "name": "@lutin/chat-protocol",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "~5.8.3",
+      },
+    },
     "packages/chat-widgets": {
       "name": "@lutin/chat-widgets",
       "version": "0.1.0",
       "dependencies": {
+        "@tanstack/react-virtual": "^3.10.8",
         "dompurify": "^3.2.7",
         "highlight.js": "^11.11.1",
         "marked": "^16.4.0",
@@ -43,8 +68,22 @@
         "react-dom": "^19.0.0",
       },
     },
+    "packages/image-protocol": {
+      "name": "@lutin/image-protocol",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "~5.8.3",
+      },
+    },
     "packages/lutin-shim-types": {
       "name": "@lutin/shim-types",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "~5.8.3",
+      },
+    },
+    "packages/principled-protocol": {
+      "name": "@lutin/principled-protocol",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "~5.8.3",
@@ -54,8 +93,45 @@
       "name": "lutin-chat-ui",
       "version": "0.1.0",
       "dependencies": {
+        "@lutin/chat-protocol": "workspace:*",
         "@lutin/chat-widgets": "workspace:*",
         "@lutin/shim-types": "workspace:*",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "typescript": "~5.8.3",
+        "vite": "^7.0.4",
+      },
+    },
+    "workflows/image/ui": {
+      "name": "lutin-image-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lutin/image-protocol": "workspace:*",
+        "@lutin/shim-types": "workspace:*",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "typescript": "~5.8.3",
+        "vite": "^7.0.4",
+      },
+    },
+    "workflows/principled/ui": {
+      "name": "lutin-principled-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lutin/chat-widgets": "workspace:*",
+        "@lutin/principled-protocol": "workspace:*",
+        "@lutin/shim-types": "workspace:*",
+        "@tanstack/react-virtual": "^3.10.8",
         "react": "^19.1.0",
         "react-dom": "^19.1.0",
       },
@@ -169,7 +245,13 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
+    "@lutin/chat-protocol": ["@lutin/chat-protocol@workspace:packages/chat-protocol"],
+
     "@lutin/chat-widgets": ["@lutin/chat-widgets@workspace:packages/chat-widgets"],
+
+    "@lutin/image-protocol": ["@lutin/image-protocol@workspace:packages/image-protocol"],
+
+    "@lutin/principled-protocol": ["@lutin/principled-protocol@workspace:packages/principled-protocol"],
 
     "@lutin/shim-types": ["@lutin/shim-types@workspace:packages/lutin-shim-types"],
 
@@ -224,6 +306,10 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.60.3", "", { "os": "win32", "cpu": "x64" }, "sha512-E5Eb5H/DpxaoXH++Qkv28RcUJboMopmdDUALBczvHMf7hNIxaDZqwY5lK12UK1BHacSmvupoEWGu+n993Z0y1A=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.60.3", "", { "os": "win32", "cpu": "x64" }, "sha512-hPt/bgL5cE+Qp+/TPHBqptcAgPzgj46mPcg/16zNUmbQk0j+mOEQV/+Lqu8QRtDV3Ek95Q6FeFITpuhl6OTsAA=="],
+
+    "@tanstack/react-virtual": ["@tanstack/react-virtual@3.13.24", "", { "dependencies": { "@tanstack/virtual-core": "3.14.0" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-aIJvz5OSkhNIhZIpYivrxrPTKYsjW9Uzy+sP/mx0S3sev2HyvPb7xmjbYvokzEpfgYHy/HjzJ2zFAETuUfgCpg=="],
+
+    "@tanstack/virtual-core": ["@tanstack/virtual-core@3.14.0", "", {}, "sha512-JLANqGy/D6k4Ujmh8Tr25lGimuOXNiaVyXaCAZS0W+1390sADdGnyUdSWNIfd49gebtIxGMij4IktRVzrdr12Q=="],
 
     "@tauri-apps/api": ["@tauri-apps/api@2.11.0", "", {}, "sha512-7CinYODhky9lmO23xHnUFv0Xt43fbtWMyxZcLcRBlFkcgXKuEirBvHpmtJ89YMhyeGcq20Wuc47Fa4XjyniywA=="],
 
@@ -310,6 +396,12 @@
     "lutin-chat-ui": ["lutin-chat-ui@workspace:workflows/chat/ui"],
 
     "lutin-desktop": ["lutin-desktop@workspace:lutin-desktop"],
+
+    "lutin-image-ui": ["lutin-image-ui@workspace:workflows/image/ui"],
+
+    "lutin-mobile": ["lutin-mobile@workspace:lutin-mobile"],
+
+    "lutin-principled-ui": ["lutin-principled-ui@workspace:workflows/principled/ui"],
 
     "marked": ["marked@16.4.2", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-TI3V8YYWvkVf3KJe1dRkpnjs68JUPyEa5vjKrp1XEEJUAOaQc+Qj+L1qWbPd0SJuAdQkFU0h73sXXqwDYxsiDA=="],
 

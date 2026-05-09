@@ -1,0 +1,76 @@
+/* Live counters footer pinned under a composer shell. Same column
+ * width as the surrounding `.shell` so the numbers align with the
+ * toolbar above. Stays visible (with em-dash placeholders) before
+ * the first usage report lands so the layout doesn't reflow on the
+ * first agent turn. */
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: min(920px, 100%);
+  margin: 6px auto 0;
+  padding: 0 8px;
+  font-size: var(--chat-fs-sm);
+  color: var(--chat-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Vertical hairline divider between groups. Rendered via a span
+ * rather than a CSS `border` so it stays out of the flex flow's
+ * baseline alignment. */
+.summarySep {
+  display: inline-block;
+  width: 1px;
+  height: 12px;
+  background: currentColor;
+  opacity: 0.18;
+}
+
+/* Each metric group: leading icon/dot + dim label + numeric value.
+ * `gap` controls intra-group spacing; the outer `.summary` `gap`
+ * controls inter-group spacing. */
+.metric, .ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.metricLabel, .ctxLabel {
+  opacity: 0.7;
+  letter-spacing: 0.02em;
+}
+.metricValue, .ctxValue {
+  font-weight: 500;
+  color: var(--chat-fg-1, var(--chat-fg-muted));
+}
+
+/* Color-coded ctx readout. Bands match `Sidebar.tsx::ctxBand`:
+ *   low  ≤ 50k tokens  — green  (comfortable)
+ *   mid  ≤ 100k tokens — yellow (busy, watch it)
+ *   high > 100k tokens — red    (compact soon)
+ * `idle` is the pre-first-usage state; falls back to the muted
+ * foreground so the placeholder em-dash doesn't flash green. */
+.ctx[data-band="idle"] { color: var(--chat-fg-muted); }
+.ctx[data-band="low"]  { color: var(--chat-ok,    #4ade80); }
+.ctx[data-band="mid"]  { color: var(--chat-warn,  #facc15); }
+.ctx[data-band="high"] { color: var(--chat-err,   #f87171); }
+.ctx[data-band="low"]  .ctxValue { color: var(--chat-ok,   #4ade80); }
+.ctx[data-band="mid"]  .ctxValue { color: var(--chat-warn, #facc15); }
+.ctx[data-band="high"] .ctxValue { color: var(--chat-err,  #f87171); }
+
+/* Filled status dot matches the band color via `currentColor`.
+ * Hidden when idle so the placeholder row reads as inert. */
+.ctxDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+  opacity: 0.9;
+}
+.ctx[data-band="idle"] .ctxDot {
+  background: transparent;
+  border: 1px solid currentColor;
+  box-shadow: none;
+  opacity: 0.45;
+}

@@ -1,0 +1,29 @@
+title = "Design Data Layout Before Optimizing Code"
+description = '''
+Performance follows from how data is shaped, stored, and accessed. Pick the layout first; clever code on top of bad layout rarely catches up.
+
+## Why
+
+- Modern CPUs are dominated by memory latency. Cache-friendly layouts (contiguous arrays, packed structs) routinely outperform "smarter" algorithms on bad layouts by 10x or more.
+- Allocation patterns dominate many workloads: a thousand tiny heap allocations cost vastly more than one big one with offsets.
+- Once a layout is wrong, the code shape calcifies around it — every consumer assumes the structure, and migration becomes a project.
+- Profilers point at hot code, but the *cause* is often upstream in how the data was arranged.
+
+## Apply
+
+- Think in terms of "what's iterated together, allocated together, and lives the same lifetime?" Group those.
+- Prefer struct-of-arrays over array-of-structs when the hot loop reads only some fields. Prefer the opposite when the hot loop reads all of them.
+- Pack data: avoid pointer-chasing through `Vec<Box<T>>` when `Vec<T>` is possible.
+- Reserve capacity up front when the size is known; avoid repeated growth and reallocation.
+- Use ID/index handles (`u32` indices into a `Vec`) instead of pointers when you need stable references inside an arena.
+
+## Counter-cases
+
+- For cold paths and one-shot operations, layout doesn't matter. Don't burn complexity budget on code that runs once a week.
+- Premature micro-optimization of layout (`#[repr(packed)]`, manual SIMD alignment) without a measured need is just a different flavor of premature optimization.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

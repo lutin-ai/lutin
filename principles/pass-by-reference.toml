@@ -1,0 +1,30 @@
+title = "Pass By Reference, Don't Take Ownership You Don't Need"
+description = '''
+Default to borrowing function arguments. Take ownership only when the function genuinely needs to store, move, or consume the value.
+
+## Why
+
+- Taking ownership forces the caller to clone or give up their value, even when the function only reads it. That cost is invisible at the call site.
+- Borrowing makes the contract explicit: "I will look at this, I will not keep it."
+- In Rust, `&T` lets the compiler verify the function doesn't outlive the data. In C++, `const T&` documents read-only intent. In Go, pointer receivers vs value receivers communicate the same thing.
+- Owning parameters tend to spread: once one function takes `String`, callers up the chain start cloning to feed it, and the cost compounds.
+
+## Apply
+
+- Read-only access: `&T` / `const T&` / pointer-to-const / pass-by-value for cheap copies.
+- Mutation in place: `&mut T` / `T&` / pointer / explicit out-param.
+- Consuming/storing: take ownership (`T`, move, by-value).
+- For small `Copy`/trivially-copyable types (ints, small structs), pass by value — references add indirection without saving anything.
+- If you find yourself cloning at every call site to feed a function, the function probably wants a borrow.
+
+## Counter-cases
+
+- Builder patterns and constructors legitimately consume their inputs.
+- When the function will spawn a task or store the value, ownership is the honest signature.
+- In GC'd languages with reference semantics by default (Java, Python, JS), this principle mostly collapses — but watch for "defensive copy" habits that fight the language.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

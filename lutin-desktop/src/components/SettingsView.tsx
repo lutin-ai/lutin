@@ -14,14 +14,20 @@ import type {
   ConnectionProfile,
   DesktopSettings,
   KeyBind,
+  ParakeetConfig,
+  ParakeetModel,
   ProviderConfig,
   ProviderKind,
+  SttConfig,
   Target,
   WebSearchSettings,
+  WhisperConfig,
+  WhisperModel,
   WorkflowId,
   WorkflowInfo,
 } from "../types";
 import styles from "./SettingsView.module.css";
+import { Select } from "./Select";
 
 const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
   { value: "open_router", label: "OpenRouter" },
@@ -30,7 +36,7 @@ const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
   { value: "open_ai_compat", label: "OpenAI-compatible" },
 ];
 
-type Tab = "connections" | "keybinds" | "audio" | "providers" | "web_search";
+type Tab = "connections" | "keybinds" | "audio" | "stt" | "providers" | "web_search";
 
 const ACTION_LABELS: Record<Action["kind"], string> = {
   ptt: "Push-to-talk (PTT)",
@@ -92,6 +98,13 @@ export function SettingsView() {
           </button>
           <button
             className={styles.tab}
+            data-active={tab === "stt"}
+            onClick={() => setTab("stt")}
+          >
+            Speech-to-text
+          </button>
+          <button
+            className={styles.tab}
             data-active={tab === "providers"}
             onClick={() => setTab("providers")}
           >
@@ -116,6 +129,8 @@ export function SettingsView() {
         {tab === "keybinds" && !settings && <Loading />}
         {tab === "audio" && settings && <AudioPanel initial={settings} />}
         {tab === "audio" && !settings && <Loading />}
+        {tab === "stt" && settings && <SttPanel initial={settings} />}
+        {tab === "stt" && !settings && <Loading />}
         {tab === "providers" && <ProvidersPanel connected={conn.kind === "connected"} />}
         {tab === "web_search" && <WebSearchPanel connected={conn.kind === "connected"} />}
       </div>
@@ -173,16 +188,14 @@ function ConnectionsPanel({ initial }: { initial: DesktopSettings }) {
         description="Used on startup when multiple control-panel profiles are configured."
       >
         <Field label="Profile">
-          <select
-            className={styles.input}
+          <Select
             value={draft.default}
-            onChange={(e) => setDraft({ ...draft, default: e.target.value })}
-          >
-            <option value="">(first available)</option>
-            {draft.connections.map((c) => (
-              <option key={c.name} value={c.name}>{c.name}</option>
-            ))}
-          </select>
+            onChange={(v) => setDraft({ ...draft, default: v })}
+            options={[
+              { value: "", label: "(first available)" },
+              ...draft.connections.map((c) => ({ value: c.name, label: c.name })),
+            ]}
+          />
         </Field>
       </Card>
 
@@ -336,26 +349,204 @@ function DevicePicker({
 
   return (
     <Field label={label}>
-      <select
-        className={styles.input}
+      <Select
         value={value ?? ""}
-        onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+        onChange={(v) => onChange(v === "" ? null : v)}
         disabled={devices == null}
-      >
-        <option value="">Host default</option>
-        {hasSaved && value != null && (
-          <option value={value}>{value} (not currently available)</option>
-        )}
-        {(devices ?? []).map((name) => (
-          <option key={name} value={name}>{name}</option>
-        ))}
-      </select>
+        options={[
+          { value: "", label: "Host default" },
+          ...(hasSaved && value != null
+            ? [{ value, label: `${value} (not currently available)` }]
+            : []),
+          ...(devices ?? []).map((name) => ({ value: name, label: name })),
+        ]}
+      />
       {devices != null && devices.length === 0 && (
         <span className={styles.fieldHint}>
           No devices reported by cpal — only "host default" is available.
         </span>
       )}
     </Field>
+  );
+}
+
+/* ───────── Speech-to-text ───────── */
+
+const WHISPER_MODELS: { value: WhisperModel; label: string }[] = [
+  { value: "large-v3-turbo", label: "large-v3-turbo (recommended)" },
+  { value: "distil-large-v3", label: "distil-large-v3 (smaller / faster)" },
+];
+
+const PARAKEET_MODELS: { value: ParakeetModel; label: string }[] = [
+  { value: "tdt06b-v3", label: "tdt-0.6b-v3 (multilingual, 25 langs)" },
+];
+
+function defaultWhisper(): WhisperConfig {
+  return { model: "large-v3-turbo", language: null, beam_size: 5 };
+}
+
+function defaultParakeet(): ParakeetConfig {
+  return { model: "tdt06b-v3" };
+}
+
+function sttBackend(s: SttConfig): "Whisper" | "Parakeet" {
+  return "Whisper" in s ? "Whisper" : "Parakeet";
+}
+
+function SttPanel({ initial }: { initial: DesktopSettings }) {
+  const setSettings = useApp((s) => s.setSettings);
+  const [draft, setDraft] = useState<SttConfig>(initial.stt);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initial.stt);
+  const backend = sttBackend(draft);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = { ...initial, stt: draft };
+      await settingsSet(next);
+      setSettings(next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const switchBackend = (next: "Whisper" | "Parakeet") => {
+    if (next === backend) return;
+    setDraft(next === "Whisper"
+      ? { Whisper: defaultWhisper() }
+      : { Parakeet: defaultParakeet() });
+  };
+
+  return (
+    <>
+      <Card
+        title="Backend"
+        description="Selected backend handles every push-to-talk transcription. Switching takes effect on the next PTT — no restart."
+      >
+        <label className={styles.checkbox}>
+          <input
+            type="radio"
+            name="stt-backend"
+            checked={backend === "Whisper"}
+            onChange={() => switchBackend("Whisper")}
+          />
+          <span>Whisper (CPU/GPU, multilingual, accurate)</span>
+        </label>
+        <label className={styles.checkbox}>
+          <input
+            type="radio"
+            name="stt-backend"
+            checked={backend === "Parakeet"}
+            onChange={() => switchBackend("Parakeet")}
+          />
+          <span>Parakeet (NVIDIA, ~10× faster, 25 langs)</span>
+        </label>
+      </Card>
+
+      {"Whisper" in draft && (
+        <WhisperFields
+          config={draft.Whisper}
+          onChange={(w) => setDraft({ Whisper: w })}
+        />
+      )}
+
+      {"Parakeet" in draft && (
+        <ParakeetFields
+          config={draft.Parakeet}
+          onChange={(p) => setDraft({ Parakeet: p })}
+        />
+      )}
+
+      {error && <div className={styles.error}>{error}</div>}
+
+      <SaveBar
+        dirty={dirty}
+        saving={saving}
+        onSave={save}
+        onRevert={() => setDraft(initial.stt)}
+        label="Save speech-to-text"
+      />
+    </>
+  );
+}
+
+function WhisperFields({
+  config,
+  onChange,
+}: {
+  config: WhisperConfig;
+  onChange: (next: WhisperConfig) => void;
+}) {
+  return (
+    <Card
+      title="Whisper settings"
+      description="whisper.cpp under the hood. First use of a model downloads its GGUF weights into the CP's model cache."
+    >
+      <Field label="Model">
+        <Select
+          value={config.model}
+          onChange={(v) => onChange({ ...config, model: v as WhisperModel })}
+          options={WHISPER_MODELS.map((m) => ({ value: m.value, label: m.label }))}
+        />
+      </Field>
+      <Field
+        label="Language"
+        hint="Whisper language code (en, sv, …). Leave blank to auto-detect."
+      >
+        <input
+          className={styles.input}
+          placeholder="auto"
+          value={config.language ?? ""}
+          onChange={(e) =>
+            onChange({ ...config, language: e.target.value || null })
+          }
+        />
+      </Field>
+      <Field
+        label={`Beam size: ${config.beam_size <= 1 ? "1 (greedy)" : config.beam_size}`}
+        hint="1 = greedy decoding (fastest); higher trades CPU for accuracy."
+      >
+        <input
+          className={styles.input}
+          type="range"
+          min={1}
+          max={8}
+          step={1}
+          value={config.beam_size <= 1 ? 1 : config.beam_size}
+          onChange={(e) =>
+            onChange({ ...config, beam_size: Number(e.target.value) })
+          }
+        />
+      </Field>
+    </Card>
+  );
+}
+
+function ParakeetFields({
+  config,
+  onChange,
+}: {
+  config: ParakeetConfig;
+  onChange: (next: ParakeetConfig) => void;
+}) {
+  return (
+    <Card
+      title="Parakeet settings"
+      description="NVIDIA Parakeet TDT, ONNX runtime. First use downloads ~2.6 GB of weights into the CP's model cache."
+    >
+      <Field label="Model">
+        <Select
+          value={config.model}
+          onChange={(v) => onChange({ ...config, model: v as ParakeetModel })}
+          options={PARAKEET_MODELS.map((m) => ({ value: m.value, label: m.label }))}
+        />
+      </Field>
+    </Card>
   );
 }
 
@@ -493,15 +684,11 @@ function ProviderCard({ provider, onChange, onRemove }: ProviderCardProps) {
 
       <div className={styles.providerGrid}>
         <Field label="Kind">
-          <select
-            className={styles.input}
+          <Select
             value={provider.kind}
-            onChange={(e) => onChange({ kind: e.target.value as ProviderKind })}
-          >
-            {PROVIDER_KINDS.map((k) => (
-              <option key={k.value} value={k.value}>{k.label}</option>
-            ))}
-          </select>
+            onChange={(v) => onChange({ kind: v as ProviderKind })}
+            options={PROVIDER_KINDS.map((k) => ({ value: k.value, label: k.label }))}
+          />
         </Field>
         <Field label="API key">
           <input
@@ -926,49 +1113,44 @@ function KeybindAdder({
         )}
       </Field>
       <Field label="Action">
-        <select
-          className={styles.input}
+        <Select
           value={actionKind}
-          onChange={(e) => setActionKind(e.target.value as Action["kind"])}
-        >
-          {Object.entries(ACTION_LABELS).map(([k, label]) => (
-            <option key={k} value={k}>{label}</option>
-          ))}
-        </select>
+          onChange={(v) => setActionKind(v as Action["kind"])}
+          options={Object.entries(ACTION_LABELS).map(([k, label]) => ({
+            value: k,
+            label,
+          }))}
+        />
       </Field>
       <Field label="Target">
-        <select
-          className={styles.input}
+        <Select
           value={target.kind}
-          onChange={(e) =>
-            setTarget(TARGET_DRAFTS[e.target.value as Target["kind"]])
-          }
-        >
-          {Object.entries(TARGET_LABELS).map(([k, label]) => (
-            <option key={k} value={k}>{label}</option>
-          ))}
-        </select>
+          onChange={(v) => setTarget(TARGET_DRAFTS[v as Target["kind"]])}
+          options={Object.entries(TARGET_LABELS).map(([k, label]) => ({
+            value: k,
+            label,
+          }))}
+        />
         {target.kind === "workflow" && (
           <>
-            <select
-              className={styles.input}
+            <Select
               style={{ marginTop: 6 }}
               value={target.workflow}
-              onChange={(e) =>
-                setTarget({ kind: "workflow", workflow: e.target.value })
-              }
-            >
-              <option value="">
-                {workflows.length === 0
-                  ? "No workflows available"
-                  : "Select workflow…"}
-              </option>
-              {workflows.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.icon} {w.display_name}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setTarget({ kind: "workflow", workflow: v })}
+              options={[
+                {
+                  value: "",
+                  label:
+                    workflows.length === 0
+                      ? "No workflows available"
+                      : "Select workflow…",
+                },
+                ...workflows.map((w) => ({
+                  value: w.id,
+                  label: `${w.icon} ${w.display_name}`,
+                })),
+              ]}
+            />
             {workflowsError && (
               <span
                 className={styles.fieldHint}

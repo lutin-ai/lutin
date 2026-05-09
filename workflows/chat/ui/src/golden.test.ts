@@ -13,7 +13,7 @@ import {
   decodeChatEvent,
   decodeChatResponse,
   encodeChatRequest,
-} from "./chat";
+} from "@lutin/chat-protocol";
 
 const hex = (...bs: number[]) => new Uint8Array(bs);
 const eqBytes = (a: Uint8Array, b: Uint8Array) =>

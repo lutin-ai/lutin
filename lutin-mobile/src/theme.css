@@ -1,0 +1,55 @@
+/* Mobile shell tokens. chat-widgets/theme.css declares the --chat-*
+ * vars under :where(.lutin-chat); we redeclare a small set at :root
+ * so the surrounding mobile chrome (top bar, drawer, sheets) matches
+ * the chat surface. */
+
+:root {
+  color-scheme: dark;
+
+  --bg-0: #0b0b0d;
+  --bg-1: #101013;
+  --bg-2: #16161a;
+  --bg-3: #1c1c21;
+  --border-1: #1b1b20;
+  --border-2: #23232a;
+
+  --text-1: #e2e2e6;
+  --text-1-strong: #f2f2f4;
+  --text-2: #b4b4bc;
+  --text-3: #8a8a93;
+
+  --accent: #e8743b;
+  --accent-hover: #f08246;
+  --accent-on: #1a0e07;
+  --accent-soft: rgba(232, 116, 59, 0.14);
+  --focus-ring: rgba(232, 116, 59, 0.40);
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+
+  --font-sans: -apple-system, "Inter", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--text-1-strong);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+body {
+  /* Honor iOS safe-area insets via viewport-fit=cover. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}

@@ -1,0 +1,30 @@
+title = "Make Retried Operations Idempotent"
+description = '''
+Anything that can be retried — HTTP handlers, queue consumers, webhook receivers, scheduled jobs, anything behind a network — must be safe to run more than once with the same input.
+
+## Why
+
+- Networks deliver "at least once," not "exactly once." A request that times out has not necessarily failed; it may have succeeded and the response was lost. The client will retry.
+- Job runners, cron systems, and queues all retry on failure. A non-idempotent job duplicates side effects every time it retries — duplicate charges, duplicate emails, duplicate inserts, duplicate webhooks downstream.
+- Idempotency lets the system self-heal. Retry, replay, manual reprocess — all become safe operations instead of incidents.
+- Without idempotency, "exactly-once" has to be enforced somewhere else (distributed locks, transactional outboxes, deduplication tables). That machinery is expensive and easy to get wrong; making the operation idempotent is usually cheaper.
+
+## Apply
+
+- Use a client-supplied idempotency key (request ID, message ID, externally-meaningful ID) and store it. On retry, look up the key and return the prior result instead of re-executing.
+- Prefer operations that are idempotent by construction: `set status = X` instead of `increment counter`, `upsert by id` instead of `insert`, "reach this state" instead of "perform this transition."
+- For multi-step side effects, make each step idempotent independently — don't rely on the whole chain being atomic.
+- Externalize the side effect's "did this already happen" check before the side effect, not after. After-the-fact checks lose the race.
+- For outbound calls (sending an email, charging a card), pass an idempotency key through to the provider so *they* can dedupe.
+
+## Counter-cases
+
+- True one-shot internal operations with no retry path (a CLI invocation, a one-off migration step run by hand) don't need this — but they're rarer than authors think.
+- Operations whose business meaning is "do this exactly N times" (rare) need explicit deduplication or transactional semantics rather than idempotency.
+- Read-only operations are idempotent by definition; the principle is about writes and external effects.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

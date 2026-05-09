@@ -4,6 +4,7 @@
   "workspaces": [
     "packages/*",
     "lutin-desktop",
+    "lutin-mobile",
     "workflows/*/ui"
   ]
 }

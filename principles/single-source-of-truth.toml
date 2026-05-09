@@ -1,0 +1,52 @@
+title = "Single Source of Truth"
+description = '''
+For every piece of data, exactly one place owns it. Everything else is a derivation, a cache, or a copy that must be reconcilable back to that one place.
+
+## Why
+
+- Two places that hold "the same" value will eventually disagree. Bugs that come from this disagreement are notoriously hard to debug because both sides look correct in isolation.
+- When the source is unclear, every reader has to pick one — and different readers pick differently. You end up with subtle, scattered inconsistencies that surface as user-visible weirdness.
+- Updates become a coordination problem: "if I change it here, what else do I have to remember to change?" That mental tax compounds with every duplicate.
+- Without a clear owner, no one can answer "what's the real value right now?" — which is the question every incident eventually reduces to.
+
+## Apply
+
+- Identify the owner for each piece of data and write it down, even informally. "User email lives in the `users` table; everything else is a cache."
+- Derived values: compute them from the source on demand, or materialize them with a clear refresh policy. Never let a derived value be edited directly — that turns it into a second source.
+- When you must duplicate (caches, denormalized columns, search indexes), make the duplication mechanical and one-directional: source → derived, never derived → source.
+- Prefer one ID per concept. Don't have `user_id`, `customer_id`, and `account_id` floating around for the same person without a clear mapping.
+- When you find two places that *might* be the source, pick one explicitly and fix the codebase to match. Document which won and why.
+
+## Concrete examples
+
+**Bad: two sources that drift.** A user's `email` is stored in the `users` table *and* duplicated into the `subscriptions` table at signup. A profile update changes `users.email` but forgets `subscriptions.email`. Now password resets go to the new address and billing receipts go to the old one. Both look correct from their own table.
+
+**Good: one source, derived join.** Only `users.email` exists. The subscriptions view joins against `users` when an email is needed. Updates touch one row.
+
+**Bad: cache treated as authoritative.** A frontend stores `user.displayName` in local storage on login and never refreshes it. The user renames themselves on another device. Half the UI shows the new name (read from API), half shows the old one (read from local storage). Which is "really" their name?
+
+**Good: cache marked as cache.** Local storage holds a TTL'd copy. On any mismatch with a fresh API response, the API wins. The cache layer never feeds back into the server.
+
+**Bad: configuration in two places.** A feature flag is hardcoded as a default in code *and* set in a config service. Someone toggles it in the config service; a new deploy ships a different default; the live behavior depends on which deployment / which pod you hit.
+
+**Good: one owner.** The config service owns the value. Code reads it (with a typed fallback only for "service unreachable", which logs loudly). The default in code, if any, is documented as "only used when the config service is down."
+
+**Bad: two ID systems for one entity.** Internal code uses `user_id` (integer); a third-party integration uses `external_user_id` (string). Different modules use whichever they grabbed first; cross-module joins go through ad-hoc mapping functions scattered across the codebase.
+
+**Good: one canonical ID.** Pick `user_id` as the internal identity. Store `external_user_id` as a non-authoritative attribute on the user row. All internal code uses `user_id` only; mapping happens once, at the integration boundary.
+
+**Bad: derived value editable.** An `order.total` column is stored alongside the line items. Someone fixes a wrong total by `UPDATE orders SET total = ...` without touching line items. Now the total disagrees with `SUM(line_items.amount)` and reports diverge depending on which one they query.
+
+**Good: derived value computed or rebuilt.** `order.total` is either computed on read, or materialized by a single function that always recomputes from line items. There's no path that updates the total without going through that function.
+
+## Counter-cases
+
+- Performance sometimes demands denormalization (a counter column, a materialized view). That's fine — but the denormalized value is explicitly *derived*, with a clearly owned refresh path, not a second source.
+- Distributed systems intentionally replicate data for availability. The principle still applies: one logical owner, replicas that converge back to it.
+- Some data genuinely has multiple legitimate sources (e.g. a user's name in your system vs. in an SSO provider). Decide the precedence rule explicitly — "SSO wins on login, local edits wins between logins" — and write it down.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

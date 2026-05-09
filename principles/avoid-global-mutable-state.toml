@@ -1,0 +1,28 @@
+title = "Avoid Global Mutable State"
+description = '''
+Singletons, module-level mutables, ambient context, and "current X" globals make code hard to reason about, hard to test, and hard to evolve. Pass state explicitly.
+
+## Why
+
+- Globals turn every function into a function of `(its arguments, the entire program state)`. You can't reason about it locally.
+- Tests that depend on globals leak state between cases, and parallel test runs become impossible without ceremony.
+- Globals create invisible coupling: two unrelated modules become entangled because both touch the same singleton.
+- Refactoring is blocked because "everything depends on this" — exactly the situation you wanted to avoid.
+
+## Apply
+
+- Pass dependencies (config, clock, logger, DB pool, feature flags) into functions or constructors. Explicit > ambient.
+- For values that genuinely span the lifetime of the program (a connection pool, a metrics registry), construct them once at the top and thread them down — don't reach for them via a global accessor.
+- Read-only configuration that's truly invariant after startup can live in a `static` / `OnceLock` / `OnceCell`. That's a different beast from mutable global state.
+- Treat any "set the current tenant / user / request context" thread-local as a smell — explicit context arguments scale better.
+
+## Counter-cases
+
+- Logging frameworks, metrics, and tracing infrastructure are commonly global by design. Accept it; don't fight the ecosystem just to make a point.
+- Process-wide caches (interned strings, compiled regexes) where the alternative is dramatically worse performance.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

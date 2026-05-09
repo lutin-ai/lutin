@@ -429,6 +429,12 @@ pub struct OpenAiCompatQuirks {
     pub include_response_format: bool,
     /// Emit `provider.ignore` routing hints from `extensions.ignore_providers`.
     pub include_ignore_providers: bool,
+    /// Emit `chat_template_kwargs: {"enable_thinking": <thinking_enabled>}`.
+    /// vLLM-style flag; consumed by Qwen3.x chat templates (and a few
+    /// others) to skip the `<think>...</think>` block. Without this, a
+    /// thinking model will reason out loud in `content` until it hits
+    /// `max_tokens`, never reaching tool calls.
+    pub include_chat_template_thinking_kwarg: bool,
 }
 
 #[derive(Serialize)]
@@ -521,6 +527,13 @@ pub fn build_request(
         if let Some(fmt) = &request.extensions.response_format {
             extra.insert("response_format".into(), response_format_value(fmt));
         }
+    }
+
+    if quirks.include_chat_template_thinking_kwarg {
+        extra.insert(
+            "chat_template_kwargs".into(),
+            serde_json::json!({ "enable_thinking": request.thinking_enabled }),
+        );
     }
 
     ApiRequest {

@@ -1,0 +1,28 @@
+[package]
+name = "lutin-stt"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1.52", features = ["sync"] }
+crossbeam-channel = "0.5"
+
+whisper-rs = { version = "0.16" }
+
+# Parakeet via ONNX Runtime. `load-dynamic` keeps us on the same
+# system-built libonnxruntime that `lutin-tts` already wires up
+# (located at runtime via `ORT_DYLIB_PATH`); the cargo features here
+# only opt in to ort's option types. Without `cuda`/`tensorrt` the
+# Parakeet backend falls back to the CPU EP — usable but slow.
+parakeet-rs = { version = "0.3", default-features = false, features = ["cpu", "load-dynamic"] }
+
+[features]
+# Match `lutin-tts` so the workspace is always built with one
+# consistent GPU backend selected. Default `cuda` for our target
+# hardware; `vulkan` for cross-vendor fallback. CPU-only build picks
+# neither (Parakeet still works on CPU; Whisper falls back too).
+default = ["cuda"]
+cuda = ["whisper-rs/cuda", "parakeet-rs/cuda", "parakeet-rs/tensorrt"]
+vulkan = ["whisper-rs/vulkan"]

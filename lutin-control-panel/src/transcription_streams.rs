@@ -9,9 +9,9 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use lutin_control_protocol::{TranscriptionLimit, TranscriptionStreamId, WhisperConfig};
+use lutin_control_protocol::{SttConfig, TranscriptionLimit, TranscriptionStreamId};
 
-use crate::transcribe::WhisperTranscriber;
+use crate::transcribe::SttManager;
 
 /// Per-connection cap on simultaneously-open streams. Process-wide
 /// enforcement (the registry is shared across connections) — a more
@@ -31,7 +31,7 @@ pub const MAX_CHUNK_SAMPLES: usize = 160_000;
 /// inference — halves resident memory vs. converting on append.
 pub struct Stream {
     pub id: TranscriptionStreamId,
-    pub config: WhisperConfig,
+    pub config: SttConfig,
     pub samples: Vec<i16>,
 }
 
@@ -42,32 +42,32 @@ struct Inner {
 
 /// Shared transcription state, cloned into every connection's
 /// dispatch path. The `Mutex` is fine: each op (push/find/remove) is
-/// short and never spans an `.await` — actual whisper work runs on
+/// short and never spans an `.await` — actual STT work runs on
 /// `spawn_blocking` with the buffer moved out.
 #[derive(Clone)]
 pub struct TranscriptionRegistry {
     inner: Arc<Mutex<Inner>>,
-    transcriber: Arc<WhisperTranscriber>,
+    manager: Arc<SttManager>,
 }
 
 impl TranscriptionRegistry {
-    pub fn new(transcriber: Arc<WhisperTranscriber>) -> Self {
+    pub fn new(manager: Arc<SttManager>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 next_id: 1,
                 streams: Vec::new(),
             })),
-            transcriber,
+            manager,
         }
     }
 
-    pub fn transcriber(&self) -> &Arc<WhisperTranscriber> {
-        &self.transcriber
+    pub fn manager(&self) -> &Arc<SttManager> {
+        &self.manager
     }
 
     /// Allocate a stream id. Fails with `TooManyStreams` if the
     /// process-wide open count would exceed `MAX_OPEN_STREAMS`.
-    pub fn open(&self, config: WhisperConfig) -> Result<TranscriptionStreamId, TranscriptionLimit> {
+    pub fn open(&self, config: SttConfig) -> Result<TranscriptionStreamId, TranscriptionLimit> {
         let mut inner = self.inner.lock().expect("transcription registry poisoned");
         if inner.streams.len() >= MAX_OPEN_STREAMS {
             return Err(TranscriptionLimit::TooManyStreams {

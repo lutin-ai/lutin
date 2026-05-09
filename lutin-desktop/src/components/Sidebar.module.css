@@ -243,6 +243,85 @@
 }
 .chatCtx { color: var(--text-4); }
 
+/* Color-coded ctx readout matching `SummaryFooter`. Bands:
+ *   low  ≤ 50k tokens  — green  (comfortable)
+ *   mid  ≤ 100k tokens — yellow (busy, watch it)
+ *   high > 100k tokens — red    (compact soon)
+ * Idle / empty stays at the muted base color so a fresh row
+ * doesn't flash green before the first usage report. */
+.chatCtx[data-band="low"]  { color: var(--ok,   #4ade80); }
+.chatCtx[data-band="mid"]  { color: var(--warn, #facc15); }
+.chatCtx[data-band="high"] { color: var(--err,  #f87171); }
+
 .chatRow .deleteBtn { visibility: hidden; }
 .chatRow:hover .deleteBtn { visibility: visible; }
+
+/* Sub-agent rows render directly below their parent chat row. The
+ * row is a flex line (not the chat-row grid) because the indent +
+ * connector + id + persona shape doesn't share columns with the
+ * chats table — keeping it simple avoids fragile column alignment
+ * across nesting depths. */
+.subAgentList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 2px;
+}
+
+.subAgentRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 3px var(--s-2);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.subAgentRow:hover { background: var(--bg-2); color: var(--text-1); }
+.subAgentRow.active {
+  background: var(--bg-3);
+  color: var(--text-1-strong);
+}
+
+.subAgentConnector {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  flex-shrink: 0;
+}
+
+.subAgentDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-4);
+}
+.subAgentDot[data-status="running"] {
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+.subAgentDot[data-status="completed"] { background: var(--ok); }
+.subAgentDot[data-status="failed"] { background: var(--err); }
+.subAgentDot[data-status="stopped"] { background: var(--text-4); }
+
+.subAgentId {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.subAgentPersona {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
 

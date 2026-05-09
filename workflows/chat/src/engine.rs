@@ -47,6 +47,7 @@ use lutin_workflow_sdk::agent::{
 use lutin_workflow_sdk::compaction::{
     maybe_compact, CompactionConfig, CompactionOutcome,
 };
+use lutin_workflow_sdk::summary as sdk_summary;
 use lutin_workflow_sdk::prompt::{
     AgentEntry as PromptAgentEntry, PersonaEntry as PromptPersonaEntry, PromptExtras,
 };
@@ -518,6 +519,23 @@ struct TurnTracker {
     first_thinking_at: Option<Instant>,
     /// Final usage as reported by the provider on the last round.
     last_usage: Option<lutin_llm::Usage>,
+    /// Cumulative prompt/completion tokens across every assistant
+    /// entry committed *before* this turn started. Captured once at
+    /// turn open so live `SummaryUpdated` ticks can present a
+    /// monotonic running total without rescanning the transcript on
+    /// each `AgentEvent::Usage`.
+    total_prompt_pre_turn: u64,
+    total_completion_pre_turn: u64,
+    /// Cumulative tokens across every provider Usage report observed
+    /// *during* this turn — one per agent-loop round. Each round is a
+    /// separate API call (and a separate billable charge), so the
+    /// session-wide totals must sum across rounds rather than replace
+    /// with the latest round's count. Without this, a multi-round turn
+    /// (e.g., three tool-call hops) reports only the final round's
+    /// completion in the live ticks, and `in` tracks `ctx` since both
+    /// resolve to the latest round's prompt size.
+    intra_turn_prompt: u64,
+    intra_turn_completion: u64,
     /// Tool-call lifecycles for this turn. `Vec` rather than `HashMap`
     /// because per-turn tool counts are typically <10; linear scan is
     /// cheaper than hashing on every event.
@@ -534,14 +552,48 @@ struct ToolLifecycle {
 }
 
 impl TurnTracker {
-    fn new() -> Self {
+    /// Build a fresh tracker with the cumulative pre-turn token totals
+    /// already pinned. Doing it in one constructor instead of three
+    /// post-construction assignments keeps the "the tracker is built
+    /// whole, then frozen except for `last_usage` / `tools`" intent
+    /// readable at the call sites in `run_turn` and the rewind retry.
+    fn new(pre_turn: sdk_summary::SummaryTotals) -> Self {
         Self {
             started_at: Instant::now(),
             first_text_at: None,
             first_thinking_at: None,
             last_usage: None,
+            total_prompt_pre_turn: pre_turn.total_prompt_tokens,
+            total_completion_pre_turn: pre_turn.total_completion_tokens,
+            intra_turn_prompt: 0,
+            intra_turn_completion: 0,
             tools: Vec::new(),
         }
+    }
+}
+
+/// Project per-entry text-token stats into the shape consumed by
+/// [`lutin_workflow_sdk::summary::aggregate`]. Lifts the
+/// engine-private `Entry` shape across the SDK boundary without
+/// dragging the full `MessageMetrics` into the shared crate.
+fn entry_tokens(entries: &[Entry]) -> impl Iterator<Item = sdk_summary::EntryTokens> + '_ {
+    entries.iter().map(|e| sdk_summary::EntryTokens {
+        prompt_tokens: e.metrics.text.and_then(|t| t.prompt_tokens),
+        completion_tokens: e.metrics.text.and_then(|t| t.completion_tokens),
+    })
+}
+
+/// Build a `SummaryUpdated` payload from the committed transcript.
+/// Used at turn boundaries (and after history mutations) so chrome
+/// sees the post-aggregation totals without a `summary.json` round-
+/// trip. Aggregation logic is shared with the principled engine via
+/// `lutin-workflow-sdk`; only the wire-event wrap is workflow-local.
+fn build_summary_updated(entries: &[Entry]) -> ChatEvent {
+    let s = sdk_summary::aggregate(entry_tokens(entries));
+    ChatEvent::SummaryUpdated {
+        context_tokens: s.context_tokens,
+        total_prompt_tokens: s.total_prompt_tokens,
+        total_completion_tokens: s.total_completion_tokens,
     }
 }
 
@@ -1052,6 +1104,7 @@ async fn handle_subagent_completion(
     write_summary(ctx, entries);
     let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
     let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(build_summary_updated(entries));
     // text=None: the agent-response message is already on the
     // transcript; we just want the agent loop to take a turn against it.
     run_turn(ctx, rx, a, entries, None, turn).await;
@@ -1096,6 +1149,7 @@ fn apply_mutation(
     write_summary(ctx, entries);
     let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
     let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(build_summary_updated(entries));
     Ok(())
 }
 
@@ -1362,9 +1416,10 @@ async fn run_turn(
         }
         let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
         let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+        let _ = ctx.events.send(build_summary_updated(entries));
     }
     let pre_turn_len = entries.len();
-    let mut tracker = TurnTracker::new();
+    let mut tracker = TurnTracker::new(sdk_summary::aggregate(entry_tokens(entries)));
     let mut stream = match agent.start() {
         Ok(s) => s,
         Err(e) => {
@@ -1425,6 +1480,7 @@ async fn run_turn(
     });
     let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
     let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(build_summary_updated(entries));
     // Capture any spawn / stop / terminal transition the orchestrator
     // produced during this turn. Snapshotting once at the tail rather
     // than per-tool-call avoids spamming the channel; the only cost is
@@ -1521,6 +1577,7 @@ async fn run_compaction(
     let _ = ctx
         .events
         .send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(build_summary_updated(entries));
     info!(
         kept = outcome.kept,
         archived = outcome.archived_prefix.len(),
@@ -1932,7 +1989,21 @@ fn handle_agent_event(
             let _ = events.send(ChatEvent::Reasoning(s));
             None
         }
-        AgentEvent::ToolCallStarted(call) => {
+        AgentEvent::ToolCallStreaming { id, name } => {
+            let _ = events.send(ChatEvent::ToolCallStreaming {
+                id: id.as_str().to_string(),
+                name: name.as_str().to_string(),
+            });
+            None
+        }
+        AgentEvent::ToolCallArgsDelta { id, args } => {
+            let _ = events.send(ChatEvent::ToolCallArgsDelta {
+                id: id.as_str().to_string(),
+                args,
+            });
+            None
+        }
+        AgentEvent::ToolCallArgsParsed(call) => {
             tracker.tools.push(ToolLifecycle {
                 call_id: call.id.as_str().to_string(),
                 started_at: Instant::now(),
@@ -1945,7 +2016,7 @@ fn handle_agent_event(
             // sees a parsed value, not a string.
             let arguments_json = serde_json::to_string(&call.arguments)
                 .expect("serializing serde_json::Value is infallible");
-            let _ = events.send(ChatEvent::ToolCallStarted {
+            let _ = events.send(ChatEvent::ToolCallArgsParsed {
                 id: call.id.as_str().to_string(),
                 name: call.name.as_str().to_string(),
                 arguments_json,
@@ -1977,6 +2048,21 @@ fn handle_agent_event(
             None
         }
         AgentEvent::Usage(u) => {
+            tracker.intra_turn_prompt = tracker
+                .intra_turn_prompt
+                .saturating_add(u.prompt_tokens as u64);
+            tracker.intra_turn_completion = tracker
+                .intra_turn_completion
+                .saturating_add(u.completion_tokens as u64);
+            let _ = events.send(ChatEvent::SummaryUpdated {
+                context_tokens: Some(u.prompt_tokens),
+                total_prompt_tokens: tracker
+                    .total_prompt_pre_turn
+                    .saturating_add(tracker.intra_turn_prompt),
+                total_completion_tokens: tracker
+                    .total_completion_pre_turn
+                    .saturating_add(tracker.intra_turn_completion),
+            });
             tracker.last_usage = Some(u);
             None
         }
@@ -2210,7 +2296,7 @@ mod tests {
             entry(assistant("first")),
             entry(assistant("second")),
         ];
-        let mut tracker = TurnTracker::new();
+        let mut tracker = TurnTracker::new(sdk_summary::SummaryTotals::default());
         // Manually rewind started_at so duration reads as something
         // > 0 even on fast machines.
         tracker.started_at = std::time::Instant::now() - std::time::Duration::from_millis(123);
@@ -2246,7 +2332,7 @@ mod tests {
         // has a place to write into — the runtime path does this in
         // `sync_new_entries`. Length must match `tool_calls`.
         entries[1].metrics.tools = vec![ToolStats::default()];
-        let mut tracker = TurnTracker::new();
+        let mut tracker = TurnTracker::new(sdk_summary::SummaryTotals::default());
         let now = std::time::Instant::now();
         tracker.tools.push(ToolLifecycle {
             call_id: "c1".into(),
@@ -2356,5 +2442,112 @@ mod tests {
         assert!(matches!(metrics[0], MessageMeta::User { .. }));
         assert!(matches!(metrics[1], MessageMeta::Assistant { .. }));
         assert!(matches!(metrics[2], MessageMeta::Tool { .. }));
+    }
+
+    /// `AgentEvent::Usage` arriving mid-turn must broadcast a
+    /// `SummaryUpdated` whose totals = pre-turn baseline + the
+    /// just-reported usage. Driving `handle_agent_event` directly
+    /// gives us a black-box check at the channel boundary without
+    /// spinning a full `run_turn` + provider.
+    #[tokio::test]
+    async fn usage_event_broadcasts_running_summary() {
+        let (tx, mut rx) = broadcast::channel::<ChatEvent>(8);
+        let mut tracker = TurnTracker::new(sdk_summary::SummaryTotals {
+            context_tokens: Some(40),
+            total_prompt_tokens: 100,
+            total_completion_tokens: 25,
+        });
+
+        // First iteration: prompt 60 / completion 12.
+        handle_agent_event(
+            AgentEvent::Usage(lutin_llm::Usage {
+                prompt_tokens: 60,
+                completion_tokens: 12,
+                total_tokens: 72,
+            }),
+            &tx,
+            &mut tracker,
+        );
+        let first = rx.try_recv().expect("usage emits SummaryUpdated");
+        assert!(
+            matches!(
+                &first,
+                ChatEvent::SummaryUpdated {
+                    context_tokens: Some(60),
+                    total_prompt_tokens: 160,
+                    total_completion_tokens: 37,
+                },
+            ),
+            "got {first:?}",
+        );
+
+        // Second iteration in the same turn: prompt 90 / completion 8.
+        // Each round is a separate billable API call, so the cumulative
+        // session totals must sum across rounds. `ctx` still resolves
+        // to the latest round's prompt size (current context-window
+        // fill), but `total_prompt`/`total_completion` walk by the
+        // round's contribution: 100 + 60 + 90 = 250 prompt,
+        // 25 + 12 + 8 = 45 completion.
+        handle_agent_event(
+            AgentEvent::Usage(lutin_llm::Usage {
+                prompt_tokens: 90,
+                completion_tokens: 8,
+                total_tokens: 98,
+            }),
+            &tx,
+            &mut tracker,
+        );
+        let second = rx.try_recv().expect("second usage emits SummaryUpdated");
+        assert!(
+            matches!(
+                &second,
+                ChatEvent::SummaryUpdated {
+                    context_tokens: Some(90),
+                    total_prompt_tokens: 250,
+                    total_completion_tokens: 45,
+                },
+            ),
+            "got {second:?}",
+        );
+    }
+
+    /// `build_summary_updated` walks committed entries via the shared
+    /// SDK aggregator. Locks in the workflow-local wiring: shape of
+    /// the wire event, choice of `last entry's prompt_tokens` for
+    /// `context_tokens`, and that user/empty entries don't disturb
+    /// the totals.
+    #[test]
+    fn build_summary_updated_aggregates_committed_entries() {
+        let stats = |p, c| TextStats {
+            ttft_ms: None,
+            duration_ms: None,
+            prompt_tokens: Some(p),
+            completion_tokens: Some(c),
+        };
+        let with_text = |msg, p, c| Entry {
+            message: msg,
+            metrics: MessageMetrics {
+                text: Some(stats(p, c)),
+                ..Default::default()
+            },
+        };
+        let entries = vec![
+            entry(Message::User("hi".into())),
+            with_text(assistant("a"), 10, 4),
+            entry(Message::User("more".into())),
+            with_text(assistant("b"), 25, 6),
+        ];
+        let ev = build_summary_updated(&entries);
+        assert!(
+            matches!(
+                ev,
+                ChatEvent::SummaryUpdated {
+                    context_tokens: Some(25),
+                    total_prompt_tokens: 35,
+                    total_completion_tokens: 10,
+                },
+            ),
+            "got {ev:?}",
+        );
     }
 }

@@ -29,3 +29,25 @@ export type TtsBackend = {
 
 /// `TtsStreamId(u32)` serializes as a bare number (newtype struct).
 export type TtsStreamId = number;
+
+/// One row in a workflow's sub-agent hierarchy. Today this is a
+/// chat-specific concept (the chat workflow declares the
+/// `sub_agents` capability and pushes its registry up via
+/// `lutin.publishSubAgents`); the shape lives here so chrome and
+/// the workflow side share a single TS definition. Authoritative
+/// source is Rust `chat::SubAgentInfo`.
+export type SubAgentStatus =
+  | { kind: "running" }
+  | { kind: "completed" }
+  | { kind: "failed"; reason: string }
+  | { kind: "stopped" };
+
+export interface SubAgentRow {
+  id: string;
+  /// `null` for top-level children of the parent session;
+  /// otherwise the parent agent's id (also a `SubAgentRow.id`).
+  parentId: string | null;
+  persona: string;
+  status: SubAgentStatus;
+  lastProgress: string | null;
+}

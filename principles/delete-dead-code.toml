@@ -1,0 +1,28 @@
+title = "Delete Dead Code Immediately"
+description = '''
+Commented-out blocks, unused exports, unreachable branches, and "just in case" code paths should be removed the moment you notice them. Version control remembers what you delete.
+
+## Why
+
+- Dead code is read by every future maintainer who must determine whether it's load-bearing. That determination is expensive and never gets cheaper.
+- Commented-out code is the worst kind: it looks intentional, has no tests, and silently rots out of sync with the live code around it.
+- "We might need this again" almost never comes true, and when it does, `git log` is faster than maintaining a dead copy.
+- Dead branches lie to coverage tools, static analyzers, and AI assistants — all of which will reason as if the code matters.
+
+## Apply
+
+- See commented-out code? Delete it. If you're nervous, note the commit SHA in the PR description.
+- See an unused function/export/parameter? Delete it. If a tool flags it as unused, it's almost always actually unused.
+- See an unreachable branch (a `default:` case for an exhaustive enum, an `if false`, a `// TODO: never happens`)? Either delete it or convert it to an explicit `unreachable!()` / `panic` / assertion that documents the invariant.
+- Don't leave breadcrumbs ("// removed legacy X handler"), don't rename variables to `_unused`, don't keep types around "for compatibility" when nothing uses them.
+
+## Counter-cases
+
+- Code behind a feature flag that's actively being rolled out is not dead — it's pending. Track it; clean it up once the flag is fully on or fully removed.
+- Public API surfaces with external consumers can't be deleted unilaterally; deprecate first, then remove on a known schedule.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

@@ -1,0 +1,167 @@
+.root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex-shrink: 0;
+  background: #161616;
+  border-left: 1px solid #2a2a2a;
+  color: #d8d8d8;
+  font-size: 12px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Left-edge handle. Sits on top of the border with a few px of slop on
+ * each side so the cursor flips to col-resize without forcing the user
+ * to land on a 1-pixel target. */
+.resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  user-select: none;
+}
+.resizer:hover,
+.resizer.dragging {
+  background: #4a5d85;
+  opacity: 0.5;
+}
+
+.header {
+  padding: 10px 12px;
+  border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #f0f0f0;
+}
+
+.count {
+  color: #888;
+}
+
+.filters {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a2a2a;
+  flex-wrap: wrap;
+}
+
+.chip {
+  background: #232323;
+  color: #ccc;
+  border: 1px solid #2f2f2f;
+  border-radius: 999px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.chip[data-active="true"] {
+  background: #2f3a52;
+  color: #cfe1ff;
+  border-color: #4a5d85;
+}
+
+.list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.virt {
+  position: relative;
+  width: 100%;
+}
+
+.vrow {
+  position: absolute;
+  left: 0;
+  width: 100%;
+}
+
+.row {
+  padding: 8px 12px;
+  border-bottom: 1px solid #1f1f1f;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: #1d1d1d;
+}
+
+.rowHead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.principle {
+  color: #f0f0f0;
+  font-weight: 500;
+}
+
+.ts {
+  color: #777;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+}
+
+.tool {
+  color: #9aa0a6;
+  margin-top: 2px;
+}
+
+.verdict {
+  margin-top: 4px;
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.verdictPass {
+  background: #1f3b2a;
+  color: #8fe2a8;
+}
+
+.verdictNit {
+  background: #3a3320;
+  color: #e8d27a;
+}
+
+.verdictFix {
+  background: #3b2521;
+  color: #e89181;
+}
+
+.verdictRethink {
+  background: #3a1f33;
+  color: #e885c2;
+}
+
+.reasoning {
+  color: #b8b8b8;
+  margin-top: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.empty {
+  color: #777;
+  padding: 20px 12px;
+  text-align: center;
+  font-style: italic;
+}

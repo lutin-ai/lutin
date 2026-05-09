@@ -1,0 +1,29 @@
+title = "Make Illegal States Unrepresentable"
+description = '''
+Encode invariants in the type system so the compiler rejects bad states. If a combination of fields can never legally coexist, the type should not allow them.
+
+## Why
+
+- Runtime checks can be forgotten, bypassed, or duplicated inconsistently. Type-level invariants cannot.
+- "This field is only set when status is `Pending`" is a comment that rots. A sum type that puts the field *inside* the `Pending` variant cannot rot.
+- Bugs caught at compile time are free. Bugs caught at runtime cost tests, logs, and incidents.
+- The shape of your types is documentation that stays in sync with the code.
+
+## Apply
+
+- Sum types (enums with data, tagged unions, sealed classes) for "one of N exclusive shapes" — `enum Connection { Disconnected, Connecting { since: Instant }, Connected { socket: Socket } }`.
+- Newtypes for values that look the same but mean different things (`UserId` vs `OrderId`, both `u64`).
+- Non-empty collection types when "at least one" is required, instead of `Vec<T>` plus an assertion.
+- Replace `Option<A> + Option<B>` where exactly one must be set with an enum of two variants.
+- Constructors/smart constructors that are the *only* way to build the type, and that enforce invariants once.
+
+## Counter-cases
+
+- Don't over-engineer types for invariants that aren't actually load-bearing — three tiny structs for one concept can obscure more than it protects.
+- Boundaries with external systems (JSON, DB rows) will always have a "raw" representation. Validate at the boundary, then convert into the strict internal type.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

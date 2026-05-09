@@ -1,0 +1,29 @@
+title = "Write for the Reader, Not the Writer"
+description = '''
+Code is read far more often than it is written, often by someone tired, in a hurry, and missing context. Optimize for that reader — not for the satisfaction of the person typing it.
+
+## Why
+
+- The author has all the context the moment they type the code. Every reader after that has less. Writing for yourself-right-now is writing for the worst-informed audience that will ever touch the code.
+- Cleverness imposes a tax on every future reader. Boring, predictable code is a feature.
+- The reader at 2am during an incident is the most important user of your code. They don't need elegance; they need to understand it fast.
+- Most "this is more concise" is "this saved me thirty seconds and will cost the next ten readers a minute each."
+
+## Apply
+
+- Use plain control flow. Avoid one-liners that compress three operations into one inscrutable expression.
+- Name intermediate values. A well-named local is cheaper than a comment and harder to ignore.
+- Prefer the obvious construct over the clever one when both work. `for` loops are not a sign of weakness.
+- Comments earn their place when they explain *why* — a constraint, a workaround, a non-obvious reason. Not *what*; the code does that.
+- Keep the surprising parts visible. If something has to be subtle, flag it; don't hide it inside a normal-looking expression.
+
+## Counter-cases
+
+- Performance-critical paths sometimes require constructs that are harder to read. Comment them generously and isolate them.
+- Domain-specific languages and libraries have their own idioms. Following the idiom is reader-friendly *to people in that domain*, even if it looks dense to outsiders.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

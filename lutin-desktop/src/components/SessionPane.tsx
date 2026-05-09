@@ -54,6 +54,8 @@ export function SessionPane({ project }: Props) {
   }, [project.slug]);
 
   const activeSession = sessions.find((s) => s.id === selected) ?? null;
+  const sessionTitle = activeSession?.summary?.title?.trim() || null;
+  const headerTitle = sessionTitle ?? project.display_name;
 
   return (
     <main className={styles.pane}>
@@ -63,7 +65,7 @@ export function SessionPane({ project }: Props) {
           <span className={styles.crumbSep}>/</span>
           <span>chats</span>
         </div>
-        <h1 className={styles.title}>{project.display_name}</h1>
+        <h1 className={styles.title}>{headerTitle}</h1>
       </header>
 
       {error && <div className={styles.error}>{error}</div>}

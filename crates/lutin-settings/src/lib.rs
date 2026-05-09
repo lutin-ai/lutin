@@ -3,7 +3,7 @@
 //! Loaded from `settings.toml` via [`lutin_storage::Resolver`]: the global
 //! file is read first, then the project file overrides it field-by-field.
 //! Every field is optional in the on-disk format; defaults fill in what's
-//! missing. Subtables override as a unit (project's `[whisper]` replaces
+//! missing. Subtables override as a unit (project's `[chat]` replaces
 //! global's entirely; partial subtable overrides require the user to
 //! restate the table). The `providers` list is treated as a single value
 //! — if the project file sets it, the project list wins outright.
@@ -44,8 +44,6 @@ pub struct Settings {
     pub chat: ChatSettings,
     #[serde(default)]
     pub web_search: WebSearchSettings,
-    #[serde(default)]
-    pub whisper: WhisperSettings,
     #[serde(default)]
     pub limits: LimitsSettings,
     #[serde(default)]
@@ -136,29 +134,6 @@ pub struct WebSearchSettings {
     /// Brave Search API key (free tier: 2K queries/mo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brave_api_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WhisperSettings {
-    /// GGML model filename (e.g. `"ggml-large-v3-turbo.bin"`).
-    #[serde(default = "default_whisper_model")]
-    pub model: String,
-    /// ISO language code; `None` = auto-detect.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-    /// Decoding strategy (1 = greedy / fast; >1 = beam search / accurate).
-    #[serde(default = "default_beam_size")]
-    pub beam_size: i32,
-}
-
-impl Default for WhisperSettings {
-    fn default() -> Self {
-        Self {
-            model: default_whisper_model(),
-            language: None,
-            beam_size: default_beam_size(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,8 +234,6 @@ struct PartialSettings {
     #[serde(default)]
     web_search: Option<WebSearchSettings>,
     #[serde(default)]
-    whisper: Option<WhisperSettings>,
-    #[serde(default)]
     limits: Option<LimitsSettings>,
     #[serde(default)]
     tts: Option<TtsSettings>,
@@ -282,9 +255,6 @@ impl PartialSettings {
         if other.web_search.is_some() {
             self.web_search = other.web_search;
         }
-        if other.whisper.is_some() {
-            self.whisper = other.whisper;
-        }
         if other.limits.is_some() {
             self.limits = other.limits;
         }
@@ -303,7 +273,6 @@ impl From<PartialSettings> for Settings {
             providers: p.providers.unwrap_or_default(),
             chat: p.chat.unwrap_or_default(),
             web_search: p.web_search.unwrap_or_default(),
-            whisper: p.whisper.unwrap_or_default(),
             limits: p.limits.unwrap_or_default(),
             tts: p.tts.unwrap_or_default(),
             tool_permissions: p.tool_permissions.unwrap_or_default(),
@@ -318,12 +287,6 @@ fn default_true() -> bool {
 }
 fn is_false(b: &bool) -> bool {
     !*b
-}
-fn default_whisper_model() -> String {
-    "ggml-large-v3-turbo.bin".into()
-}
-fn default_beam_size() -> i32 {
-    1
 }
 fn default_max_model_upload_bytes() -> u64 {
     10 * 1024 * 1024 * 1024

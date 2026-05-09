@@ -10,6 +10,9 @@ const QUIRKS: OpenAiCompatQuirks = OpenAiCompatQuirks {
     include_reasoning: true,
     include_response_format: true,
     include_ignore_providers: true,
+    // OpenRouter rejects unknown vLLM-style kwargs; keep off here.
+    // `thinking_enabled` already flows through the `reasoning` object.
+    include_chat_template_thinking_kwarg: false,
 };
 
 const BASE_URL: &str = "https://openrouter.ai/api/v1";

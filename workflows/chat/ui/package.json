@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lutin/chat-protocol": "workspace:*",
     "@lutin/chat-widgets": "workspace:*",
     "@lutin/shim-types": "workspace:*",
     "react": "^19.1.0",

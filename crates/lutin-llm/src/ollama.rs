@@ -18,6 +18,7 @@ const QUIRKS: OpenAiCompatQuirks = OpenAiCompatQuirks {
     include_reasoning: false,
     include_response_format: false,
     include_ignore_providers: false,
+    include_chat_template_thinking_kwarg: false,
 };
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";

@@ -4,7 +4,7 @@
 // package shouldn't know about it.
 
 import type { ChatMessage, MessageMeta as WidgetMeta, TurnState } from "@lutin/chat-widgets";
-import type { MessageMeta } from "./chat";
+import type { MessageMeta } from "@lutin/chat-protocol";
 import type { Message, SessionSnapshot } from "./session";
 
 export interface ChatViewModel {
@@ -118,8 +118,9 @@ function project(m: Message, id: string, meta: WidgetMeta | undefined): ChatMess
         meta,
       };
     case "tool": {
-      // m.arguments is already parsed at the wire boundary (decode-time
-      // JSON.parse in chat.ts). Just hand it through to the widget.
+      // `m.args` is already a `ToolArgs` tagged union — streaming
+      // (raw JSON fragments) or parsed (decoded at the wire boundary
+      // by chat.ts). Hand it through to the widget unchanged.
       const widgetState =
         m.status.kind === "ok"
           ? "completed"
@@ -130,7 +131,7 @@ function project(m: Message, id: string, meta: WidgetMeta | undefined): ChatMess
         kind: "toolCall",
         id: m.callId,
         name: m.name,
-        args: m.arguments,
+        args: m.args,
         result: m.status.kind === "ok" ? m.status.output : undefined,
         state: widgetState,
         error: m.status.kind === "failed" ? m.status.reason : undefined,

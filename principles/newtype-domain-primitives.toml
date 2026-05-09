@@ -1,0 +1,28 @@
+title = "Newtype Your Domain Primitives"
+description = '''
+Wrap domain-meaningful values in distinct types instead of passing raw primitives around. `UserId(u64)`, `Email(String)`, `Meters(f64)` — not `u64`, `String`, `f64`.
+
+## Why
+
+- Primitives that mean different things look identical at call sites. `transfer(from: u64, to: u64, amount: u64)` is one argument-swap away from a production incident. `transfer(from: AccountId, to: AccountId, amount: Cents)` is not.
+- Newtypes let you attach behavior and invariants to a concept (validation, formatting, comparison) in one place.
+- They make grep/refactor work: finding every use of `UserId` is trivial; finding every "u64 that happens to be a user id" is not.
+- They give the compiler something to check. Mixing `Meters` with `Feet` becomes a type error, not a silent bug.
+
+## Apply
+
+- Wrap IDs, units (currency, distance, time), and any string with structure (email, URL, slug).
+- Construct through a fallible constructor when the wrapped value has invariants; expose the inner value sparingly.
+- In Rust: tuple struct `pub struct UserId(u64);`. In TypeScript: branded types. In Java/Kotlin/C#: small value classes / records. In Go: `type UserId uint64`.
+- Derive or implement the traits/interfaces you actually need (equality, hashing, display) — don't blanket-derive everything.
+
+## Counter-cases
+
+- Local, short-lived values inside one function don't need a newtype. The win is at API boundaries and across modules.
+- Don't wrap a primitive just because you can. The newtype should carry meaning that the primitive alone doesn't.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

@@ -83,6 +83,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 libdbus-1-3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Dev toolchains for the agent to use inside /project. Kept in its own
+# layer (and ordered before the engine COPY) so a code change in the
+# builder stage doesn't bust this ~hundreds-of-MB apt cache. Versions
+# are whatever bookworm ships — we trade bleeding-edge for cache hits
+# and reproducibility.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nodejs npm \
+        python3 python3-pip python3-venv \
+        git curl build-essential pkg-config \
+        ripgrep jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bookworm's `rustc cargo` is ~1.63 and can't read Cargo.lock v4 (needs
+# 1.78+). Install a current stable toolchain via rustup so the agent
+# can build crates that target newer lock formats. Lives under
+# /usr/local so any uid the container runs as can read it.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"
+
 # Fixed image-side layout. CP reads each artefact path from the label
 # below, so changing them here is a one-line change.
 RUN mkdir -p /workflow /project /session

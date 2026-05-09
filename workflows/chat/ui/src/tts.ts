@@ -12,7 +12,7 @@
 // fire correctly.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { decodeChatEvent } from "./chat";
+import { decodeChatEvent } from "@lutin/chat-protocol";
 import type { Lutin, TtsBackend, TtsStreamId } from "./lutin";
 
 /// Index after the last terminator-followed-by-whitespace in `buf`,

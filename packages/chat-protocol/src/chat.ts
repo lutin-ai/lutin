@@ -138,14 +138,25 @@ export type ChatResponse =
 export type ChatEvent =
   | { kind: "delta"; text: string }
   | { kind: "reasoning"; text: string }
-  | { kind: "toolCallStarted"; id: string; name: string; arguments: unknown }
+  | { kind: "toolCallArgsParsed"; id: string; name: string; arguments: unknown }
   | { kind: "toolCallCompleted"; id: string; outcome: ToolOutcome }
   | { kind: "messageFinished"; turnId: TurnId; reason: FinishReason }
   | { kind: "stateChanged"; state: SessionState }
   | { kind: "historyReplaced"; history: HistoricalMessage[] }
   | { kind: "metricsReplaced"; metrics: MessageMeta[] }
   | { kind: "subAgentsChanged"; subAgents: SubAgentInfo[] }
-  | { kind: "subAgentTranscriptUpdated"; id: string; history: HistoricalMessage[] };
+  | { kind: "subAgentTranscriptUpdated"; id: string; history: HistoricalMessage[] }
+  | { kind: "toolCallStreaming"; id: string; name: string }
+  | { kind: "toolCallArgsDelta"; id: string; args: string }
+  | {
+      kind: "summaryUpdated";
+      /** Most recent prompt-token count — proxy for current context-window fill. */
+      contextTokens: number | null;
+      /** Cumulative provider input tokens across the lifetime of the session. */
+      totalPromptTokens: number;
+      /** Cumulative provider output tokens across the lifetime of the session. */
+      totalCompletionTokens: number;
+    };
 
 // ─── SessionState / HistoricalMessage ────────────────────────────────
 
@@ -301,6 +312,18 @@ function readSubAgentInfo(r: pc.Reader): SubAgentInfo {
     status: readSubAgentStatus(r),
     lastProgress: pc.readOption(r, pc.readString),
   };
+}
+
+/** Cumulative token counters fit comfortably in a JS `number`
+ *  (53-bit safe range > 9e15 — even a runaway session won't hit it).
+ *  Bounds-check at the wire boundary so a corrupted frame fails loud
+ *  instead of silently truncating into the UI. */
+function readU64Safe(r: pc.Reader): number {
+  const raw = pc.readU64(r);
+  if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`postcard: u64 ${raw} exceeds safe integer range`);
+  }
+  return Number(raw);
 }
 
 /** Convert a postcard `Option<u64>` to `number | null`, rejecting values
@@ -473,7 +496,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return { kind: "reasoning", text: pc.readString(r) };
     case 2:
       return {
-        kind: "toolCallStarted",
+        kind: "toolCallArgsParsed",
         id: pc.readString(r),
         name: pc.readString(r),
         arguments: tryParseJson(pc.readString(r)),
@@ -509,6 +532,25 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
         kind: "subAgentTranscriptUpdated",
         id: pc.readString(r),
         history: pc.readVec(r, readHistoricalMessage),
+      };
+    case 10:
+      return {
+        kind: "toolCallStreaming",
+        id: pc.readString(r),
+        name: pc.readString(r),
+      };
+    case 11:
+      return {
+        kind: "toolCallArgsDelta",
+        id: pc.readString(r),
+        args: pc.readString(r),
+      };
+    case 12:
+      return {
+        kind: "summaryUpdated",
+        contextTokens: pc.readOption(r, pc.readU32),
+        totalPromptTokens: readU64Safe(r),
+        totalCompletionTokens: readU64Safe(r),
       };
     default:
       throw new Error(`postcard: invalid ChatEvent ${v}`);

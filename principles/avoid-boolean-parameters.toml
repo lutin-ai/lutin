@@ -1,0 +1,28 @@
+title = "Avoid Boolean Parameters"
+description = '''
+A bare `true` or `false` at a call site is opaque. Use enums, named arguments, or split functions instead.
+
+## Why
+
+- `open(path, true, false)` is unreadable without jumping to the definition. `open(path, Mode::ReadOnly, Create::No)` reads itself.
+- Booleans collapse intent: "is it write mode? is it create mode? is it append mode?" all look the same at the call site.
+- Booleans encourage stacking — one flag becomes three becomes five, and now you have a 32-state combinatorial mess that no test suite covers.
+- Enums force you to enumerate the legal cases and let you add a new one without breaking call sites silently.
+
+## Apply
+
+- Replace `bool` parameters with a small enum whose variants name the cases: `Direction::Asc | Direction::Desc`, not `ascending: bool`.
+- In languages with named arguments (Python, Kotlin, Swift, C#), `force=True` at the call site is acceptable; the name *is* the documentation.
+- If a function has two booleans that interact, it's almost always two functions in disguise. Split it.
+- Avoid `Option<bool>` — three states deserve a three-variant enum.
+
+## Counter-cases
+
+- Predicates that genuinely return a yes/no answer (`is_empty`, `contains`) are correct as booleans.
+- Internal/private helpers where the call site is right next to the definition can use booleans without confusion.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

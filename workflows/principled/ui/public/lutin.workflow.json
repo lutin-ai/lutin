@@ -1,0 +1,7 @@
+{
+  "entry": "index.html",
+  "permissions": [],
+  "capabilities": ["receive_transcription", "tts", "sub_agents"],
+  "display_name": "Principled",
+  "icon": "🛡️"
+}

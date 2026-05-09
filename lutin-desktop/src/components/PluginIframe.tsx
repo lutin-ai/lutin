@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useApp } from "../store";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -18,6 +19,7 @@ import type {
   PluginOpened,
   SessionId,
   Slug,
+  SubAgentRow,
   TtsBackend,
   TtsSpeed,
   TtsStreamId,
@@ -114,7 +116,23 @@ export function PluginIframe(props: Props) {
       // Method-shaped args; we type-narrow below.
       args: Record<string, unknown>;
     };
-    type IframeMsg = RequestMsg | NotificationMsg | TtsCallMsg;
+    type SubAgentsUpdateMsg = { kind: "sub-agents-update"; agents: SubAgentRow[] };
+    type SessionSummaryUpdateMsg = {
+      kind: "session-summary-update";
+      summary: {
+        contextTokens: number | null;
+        totalPromptTokens: number;
+        totalCompletionTokens: number;
+        persona?: string | null;
+        title?: string | null;
+      };
+    };
+    type IframeMsg =
+      | RequestMsg
+      | NotificationMsg
+      | TtsCallMsg
+      | SubAgentsUpdateMsg
+      | SessionSummaryUpdateMsg;
 
     // Tracks streams opened by *this* iframe so cancel/close/speak
     // calls can't reach across to a stream id leaked from another
@@ -242,12 +260,45 @@ export function PluginIframe(props: Props) {
 
     const channel = new MessageChannel();
     port = channel.port1;
+    const hasSubAgents = (opened.manifest.capabilities ?? []).includes("sub_agents");
+
     port.onmessage = (e) => {
       const msg = e.data as IframeMsg | undefined;
       if (!msg || !port) return;
       if (msg.kind === "request") void handleRequest(port, msg);
       else if (msg.kind === "tts-call") void handleTtsCall(port, msg);
       else if (msg.kind === "notification") handleNotification(msg);
+      else if (msg.kind === "session-summary-update") {
+        // Live ctx + cumulative-token tick from the workflow. Updates
+        // the SessionInfo in the store so the sidebar's `ctx` column
+        // refreshes mid-turn (the engine emits a fresh summary on
+        // every provider Usage report). Validate at the trust
+        // boundary so a malformed payload from a wedged iframe can't
+        // poison the store.
+        const parsed = parseSessionSummary(msg.summary);
+        if (parsed === null) {
+          console.warn(`[plugin ${workflow}] dropped malformed session-summary-update`);
+        } else {
+          useApp.getState().setSessionSummary(slug, session, parsed);
+        }
+      }
+      else if (msg.kind === "sub-agents-update") {
+        // Capability gate: a workflow that didn't declare
+        // `sub_agents` can't influence the chrome's sidebar. Same
+        // shape as the `tts-call` capability check below.
+        if (!hasSubAgents) {
+          console.warn(
+            `[plugin ${workflow}] denied: sub_agents not in manifest.capabilities`,
+          );
+          return;
+        }
+        const agents = parseSubAgentRows(msg.agents);
+        if (agents === null) {
+          console.warn(`[plugin ${workflow}] dropped malformed sub-agents-update`);
+          return;
+        }
+        useApp.getState().setSubAgents(session, agents);
+      }
     };
     port.start();
 
@@ -312,8 +363,30 @@ export function PluginIframe(props: Props) {
       [channel.port2],
     );
 
+    // Mirror the chrome's selected-sub-agent state into the iframe.
+    // Selection lives in the desktop store (sidebar drives it); the
+    // iframe just reflects it. Posting the current value once on
+    // mount handles the case where a user clicked a sub-agent before
+    // the iframe finished booting — Zustand's `subscribe` only fires
+    // on subsequent changes.
+    let lastSentSelection: string | null = useApp.getState()
+      .chatStateBySession[session]?.selected ?? null;
+    port.postMessage({ kind: "select-sub-agent", id: lastSentSelection });
+    const unsubSelected = useApp.subscribe((s) => {
+      const next = s.chatStateBySession[session]?.selected ?? null;
+      if (next === lastSentSelection) return;
+      lastSentSelection = next;
+      port?.postMessage({ kind: "select-sub-agent", id: next });
+    });
+
     return () => {
       cancelled = true;
+      unsubSelected();
+      // Drop any sub-agent state we accumulated for this session so
+      // the next iframe mount starts clean. A stale tree would
+      // confuse the sidebar (rows pointing at agents that no longer
+      // exist on the engine side).
+      useApp.getState().clearSubAgentState(session);
       window.removeEventListener("message", onOpenUrl);
       // Tear down any TTS streams the workflow opened but didn't
       // close. Without this, the CP-side stream registry leaks slots
@@ -428,6 +501,92 @@ function Spinner() {
 
 function shortSession(id: string): string {
   return id.length > 12 ? id.slice(0, 10) + "…" : id;
+}
+
+/// Parse an untrusted `sub-agents-update` payload at the trust
+/// boundary. The chat plugin is sandboxed-but-same-origin, so a
+/// minimal shape check is enough to keep a malformed row from
+/// crashing the sidebar's render. Returns `null` on any rejection;
+/// caller logs and drops.
+function parseSubAgentRows(input: unknown): SubAgentRow[] | null {
+  if (!Array.isArray(input)) return null;
+  const out: SubAgentRow[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.id !== "string" || r.id.length === 0) return null;
+    if (r.parentId !== null && typeof r.parentId !== "string") return null;
+    if (typeof r.persona !== "string") return null;
+    if (r.lastProgress !== null && typeof r.lastProgress !== "string") return null;
+    const status = parseSubAgentStatus(r.status);
+    if (status === null) return null;
+    out.push({
+      id: r.id,
+      parentId: r.parentId as string | null,
+      persona: r.persona,
+      status,
+      lastProgress: r.lastProgress as string | null,
+    });
+  }
+  return out;
+}
+
+/// Trust-boundary parser for the live session-summary tick. Returns
+/// the typed counters on success and `null` to mean "rejected, drop"
+/// — the call site logs and bails on `null`. The wire format does
+/// not carry an explicit "clear" sentinel: a session that has not
+/// yet produced a usage report simply doesn't post a summary.
+function parseSessionSummary(input: unknown): SessionSummaryPatch | null {
+  if (!input || typeof input !== "object") return null;
+  const r = input as Record<string, unknown>;
+  if (r.contextTokens !== null && typeof r.contextTokens !== "number") return null;
+  if (typeof r.totalPromptTokens !== "number") return null;
+  if (typeof r.totalCompletionTokens !== "number") return null;
+  // `persona` and `title` are optional — workflows that don't expose
+  // them just omit the field. Reject only if the field is present and
+  // not the right shape; absent is fine.
+  const personaRaw = "persona" in r ? r.persona : undefined;
+  if (personaRaw !== undefined && personaRaw !== null && typeof personaRaw !== "string") {
+    return null;
+  }
+  const titleRaw = "title" in r ? r.title : undefined;
+  if (titleRaw !== undefined && titleRaw !== null && typeof titleRaw !== "string") {
+    return null;
+  }
+  return {
+    contextTokens: r.contextTokens as number | null,
+    totalPromptTokens: r.totalPromptTokens,
+    totalCompletionTokens: r.totalCompletionTokens,
+    persona: personaRaw === undefined ? undefined : (personaRaw as string | null),
+    title: titleRaw === undefined ? undefined : (titleRaw as string | null),
+  };
+}
+
+export interface SessionSummaryPatch {
+  contextTokens: number | null;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  /** `undefined` = field absent in the message, leave as-is in the
+   *  store. `null` = workflow says "no persona / no title yet". */
+  persona?: string | null;
+  title?: string | null;
+}
+
+function parseSubAgentStatus(input: unknown): SubAgentRow["status"] | null {
+  if (!input || typeof input !== "object") return null;
+  const s = input as Record<string, unknown>;
+  switch (s.kind) {
+    case "running":
+    case "completed":
+    case "stopped":
+      return { kind: s.kind };
+    case "failed":
+      return typeof s.reason === "string"
+        ? { kind: "failed", reason: s.reason }
+        : null;
+    default:
+      return null;
+  }
 }
 
 function originOf(url: string): string {

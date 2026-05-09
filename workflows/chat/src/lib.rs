@@ -309,10 +309,12 @@ pub enum ChatEvent {
     Delta(String),
     /// Streaming reasoning / thinking delta.
     Reasoning(String),
-    /// `arguments_json` is the raw JSON the model emitted as the tool
-    /// call's input — the TS decoder parses it once at the wire
-    /// boundary so the UI sees a parsed value.
-    ToolCallStarted { id: String, name: String, arguments_json: String },
+    /// All argument fragments are in; `arguments_json` is the raw
+    /// JSON the model emitted (TS decoder parses it once at the wire
+    /// boundary). Fired right before the tool dispatches. Hosts that
+    /// only need the parsed call (and not the live streaming) can
+    /// listen exclusively to this event.
+    ToolCallArgsParsed { id: String, name: String, arguments_json: String },
     ToolCallCompleted { id: String, outcome: ToolOutcome },
     /// Terminal event for one turn.
     MessageFinished { turn_id: TurnId, reason: FinishReason },
@@ -339,6 +341,29 @@ pub enum ChatEvent {
     SubAgentTranscriptUpdated {
         id: String,
         history: Vec<HistoricalMessage>,
+    },
+    /// Provider opened a tool-call block; arguments are about to
+    /// stream in via `ToolCallArgsDelta`. The UI can render an
+    /// in-progress placeholder keyed by `id`. Appended at the end of
+    /// the variant list so existing postcard tags stay stable.
+    ToolCallStreaming { id: String, name: String },
+    /// Incremental fragment of the tool call's arguments JSON. Fired
+    /// as the LLM streams the call's input; concatenating fragments
+    /// in order yields the raw text that `ToolCallArgsParsed` later
+    /// delivers as parsed JSON.
+    ToolCallArgsDelta { id: String, args: String },
+    /// Live tick of the running session summary — emitted on every
+    /// provider usage report (one per agent-loop iteration) and at
+    /// turn boundaries. `context_tokens` is the most recent prompt
+    /// size (i.e. current context-window fill); the totals are
+    /// cumulative across the lifetime of the session and are kept
+    /// monotonic while a turn is in flight by adding the current
+    /// usage on top of the pre-turn baseline. Appended at the end of
+    /// the variant list so existing postcard tags stay stable.
+    SummaryUpdated {
+        context_tokens: Option<u32>,
+        total_prompt_tokens: u64,
+        total_completion_tokens: u64,
     },
 }
 

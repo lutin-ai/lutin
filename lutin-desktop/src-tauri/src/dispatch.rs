@@ -100,13 +100,15 @@ async fn ptt_down<R: Runtime>(app: AppHandle<R>, trigger: Trigger, target: Targe
         .await;
     }
 
-    // Snapshot whisper config from settings. Cheap clone — sent once
-    // in OpenTranscription, reused by CP for the full stream.
+    // Snapshot STT config from settings. Cheap clone — sent once in
+    // OpenTranscription, reused by CP for the full stream. Both
+    // backend selection (whisper / parakeet) and per-backend params
+    // ride inside the tagged enum.
     let cfg = state
         .settings
         .lock()
         .expect("settings mutex poisoned")
-        .whisper
+        .stt
         .clone();
 
     let Some(rx) = state.audio.start() else {

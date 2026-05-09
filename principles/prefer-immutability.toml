@@ -1,0 +1,29 @@
+title = "Prefer Immutability By Default"
+description = '''
+Default to immutable bindings, fields, and data structures. Make mutability a deliberate, local decision — not an ambient one.
+
+## Why
+
+- Immutable values can be freely shared, cached, compared, and reasoned about. Mutable ones can't.
+- Most bugs in stateful code come from a value changing when the reader assumed it wouldn't. Immutability eliminates that class entirely.
+- `let` / `const` / `final` is a one-character signal to the reader that this binding will not move under their feet.
+- Immutable data composes with concurrency: no locks, no defensive copies, no race conditions on read.
+
+## Apply
+
+- Default to `let` over `let mut` (Rust), `const` over `let` (JS/TS), `final` fields (Java/Dart), `val` over `var` (Kotlin/Scala).
+- Build values up and return them, instead of constructing-then-mutating across many lines.
+- For collections, prefer "produce a new collection" (`map`, `filter`, comprehensions) over in-place mutation when the collection is small or the cost is amortized.
+- Reserve mutation for tight, local scopes — building a buffer, accumulating a result — and immediately freeze/return.
+
+## Counter-cases
+
+- Hot loops where allocating a new value per iteration is measurably costly: mutate in place, but keep the mutable scope small.
+- Builder patterns and parsers that legitimately accumulate state.
+- I/O buffers, ring buffers, and data structures whose whole point is mutation.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

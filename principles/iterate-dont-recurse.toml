@@ -1,0 +1,29 @@
+title = "Iterate, Don't Recurse, When the Stack Matters"
+description = '''
+In languages without guaranteed tail-call optimization, prefer loops over recursion for traversals that can grow with input size. Recursion is for problems whose shape genuinely matches a recursive definition.
+
+## Why
+
+- Recursion that depends on input size will stack-overflow on hostile or large inputs. The crash is often unrecoverable and looks nothing like the actual bug.
+- Most mainstream languages (Java, Python, JS, Go, Rust in non-`-O` builds, C without `-O2`) do not reliably eliminate tail calls. "It works for my test cases" is not the same as "it's safe."
+- Iterative versions are usually no harder to read, and they expose the work-list / accumulator structure plainly.
+- Iterative code is easier to instrument, profile, pause, resume, and bound (max iterations / max depth).
+
+## Apply
+
+- For tree/graph traversal of unbounded depth, use an explicit stack or queue (`Vec`, `Deque`) and a loop.
+- For list/sequence processing, use iterators / `for` loops, not head-tail recursion (unless the language is built for it — Haskell, Erlang, Scheme).
+- When recursion is the natural expression (parsers, divide-and-conquer with bounded depth like `O(log n)`), it's fine — but check that the depth is actually bounded.
+- Add explicit depth limits to any recursion that processes external input. A user-supplied JSON document should not be able to overflow your stack.
+
+## Counter-cases
+
+- Languages with guaranteed TCO (Scheme, Scala with `@tailrec`, some functional languages) — recursion is idiomatic and safe.
+- Algorithms with logarithmic depth (balanced tree operations, binary search) — depth grows so slowly that stack overflow isn't a realistic concern.
+- Toy code, prototypes, and code where input size is bounded by construction.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

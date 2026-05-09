@@ -1,0 +1,74 @@
+# Principle order for the principled workflow.
+#
+# `order` lists principle file stems (`<global>/principles/<name>.toml`)
+# from LEAST important to MOST important — matching the review loop's
+# convention. Later principles override earlier ones when verdicts
+# conflict during sequential adjustment, and when the loop has to
+# pick which failure to ask the agent to address next, it picks the
+# least-important still-failing one (it adjusts the cheap stuff
+# first; the expensive judgments get the last word).
+#
+# Principles installed on disk that aren't listed here are unused.
+# Names listed here that aren't installed are skipped with a warning
+# at startup.
+#
+# To fork this workflow into a domain variant (coder, researcher,
+# reviewer, etc.), copy the workflow directory and edit this file —
+# the engine binary itself is shared.
+
+order = [
+  # Mechanical guardrails — cheapest to satisfy, first to defer.
+  "prefer-small-edits",
+  "separate-refactor-from-feature",
+
+  # Style + readability — easy to fix, easy to defer.
+  "write-for-the-reader",
+  "name-things-for-what-they-are",
+
+  # Performance hints — usually right, occasionally wrong on purpose.
+  "prefer-stack-over-heap",
+  "prefer-vec-over-hashmap",
+  "prefer-slices-over-owned-collections",
+  "iterate-dont-recurse",
+
+  # Local structure — control flow + helper shape.
+  "split-functions-by-responsibility",
+  "inline-single-use-helpers",
+  "pass-by-reference",
+  "guard-clauses-over-nesting",
+  "composition-over-inheritance",
+  "no-premature-abstraction",
+  "scope-mutation-tightly",
+
+  # Module-level design — where data lives, how it flows.
+  "design-data-layout-first",
+  "prefer-immutability",
+  "prefer-pure-functions",
+  "avoid-boolean-parameters",
+  "avoid-nullable-sprawl",
+  "message-passing-over-shared-state",
+  "avoid-locks-and-arc-in-rust",
+  "structured-concurrency",
+  "avoid-global-mutable-state",
+  "single-source-of-truth",
+
+  # Type-system correctness — push errors out at compile time.
+  "newtype-domain-primitives",
+  "parse-dont-validate",
+  "validate-at-boundaries",
+  "make-illegal-states-unrepresentable",
+
+  # Error handling — explicit failure modes.
+  "errors-as-values",
+  "dont-catch-what-you-cant-handle",
+  "idempotency-for-retried-ops",
+
+  # Hygiene + tests — last word, hardest to argue against.
+  "delete-dead-code",
+  "test-behavior-not-implementation",
+
+  # Safety — most important, never deferred. A single dangerous shell
+  # command can wipe a disk, leak credentials, or push to prod; goes
+  # last so its verdict overrides everything else when it fires.
+  "shell-no-dangerous-commands",
+]

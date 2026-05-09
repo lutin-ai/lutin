@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Principled</title>
+    <style>
+      html, body, #root { height: 100%; margin: 0; padding: 0; }
+      html, body { overflow: hidden; }
+      body { background: #0e0e0e; }
+    </style>
+    <!--
+      Chrome-hosted shim. Sets up `window.__lutinReady` (Promise<Lutin>)
+      before the bundled JS runs. Loaded synchronously and from a
+      cross-origin custom scheme served by the desktop chrome — the
+      handler responds with `Access-Control-Allow-Origin: *`.
+    -->
+    <script src="lutin-shim://localhost/shim.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

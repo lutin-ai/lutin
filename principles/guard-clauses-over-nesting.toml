@@ -1,0 +1,38 @@
+title = "Prefer guard clauses over nesting"
+description = """
+Handle error, edge, and exit conditions first with early returns.
+Keep the happy path flat at the bottom of the function.
+
+Why:
+- Deep nesting forces the reader to hold multiple conditions in
+  their head simultaneously to understand what code actually runs.
+- Each `else` branch couples the failure case to the success case
+  visually, even when they are logically independent.
+- Guard clauses make preconditions explicit and easy to audit — you
+  can read them top-down like a checklist.
+- Flat code is easier to extend: adding a new precondition is one
+  new guard, not a restructure of an if/else tree.
+
+How to apply:
+- If a function body is wrapped in `if (ok) { ... }`, invert it:
+  `if (!ok) return ...;` and unwrap.
+- Validate inputs, permissions, and feature flags at the top.
+  Return or throw immediately on failure.
+- Avoid `else` after a `return`, `throw`, `continue`, or `break` —
+  the `else` block is already unreachable on the other path.
+- Aim for one level of indentation for the main logic. Two is fine.
+  Four is a smell.
+
+Counter-cases (pass without complaint):
+- Don't fragment a short, symmetric if/else (two or three lines per
+  branch) just to satisfy the rule — symmetry can be more readable
+  than asymmetry.
+- Don't replace meaningful structure with a wall of guards when the
+  conditions are genuinely interdependent; extract a helper instead.
+"""
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

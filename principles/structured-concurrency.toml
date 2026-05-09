@@ -1,0 +1,31 @@
+title = "Structured Concurrency"
+description = '''
+Every spawned task has an owner that joins it, cancels it, or hands ownership to someone who will. Tasks should not outlive the scope that started them by accident.
+
+## Why
+
+- A `tokio::spawn` (or `go func`, or thread, or `setTimeout`) with no handle is fire-and-forget — the runtime is the only thing keeping it alive, and nothing tells you when it's done, panicked, or leaked.
+- Cancellation is impossible without a handle. When the parent operation is dropped or the request is cancelled, orphaned tasks keep running, holding resources and producing late side effects.
+- Errors disappear silently. A panic inside an unowned task is logged at best, swallowed at worst — the parent thinks everything succeeded.
+- Reasoning about lifetimes becomes guesswork: "is that background task still running?" should be a structural question with a yes/no answer, not a runtime mystery.
+- "Detached" tasks are the async equivalent of leaked threads. They accumulate, and they're invisible until something melts.
+
+## Apply
+
+- Every spawn produces a handle (`JoinHandle`, `JoinSet`, `task::Group`, `errgroup`, `TaskScope`) the parent keeps and joins or aborts.
+- For request-scoped work, tie task lifetimes to the request: cancel them when the request is dropped (e.g. `tokio_util::task::TaskTracker`, scoped tasks, `CancellationToken`).
+- Long-lived background tasks belong to a top-level supervisor that owns them and shuts them down on application exit.
+- Locks and other resources held across `.await` are equally suspect — if the future is dropped, the lock is dropped, but anything *waiting* on that task is now stuck.
+- If you find yourself spawning to "fire and forget," ask whether the work needs to happen at all. If it does, give it an owner.
+
+## Counter-cases
+
+- True top-level daemons (the runtime itself, the global signal handler) own themselves and shut down on process exit. Acceptable when the lifetime really is "forever."
+- Telemetry or logging side-channels where dropping the work on shutdown is genuinely fine — but even those should usually flush on drop.
+- Languages/runtimes with built-in structured concurrency (Kotlin coroutines, Swift's `TaskGroup`, Trio/AnyIO) make this the path of least resistance — follow the idiom.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

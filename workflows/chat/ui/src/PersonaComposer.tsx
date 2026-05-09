@@ -2,9 +2,10 @@
 // after the input bar in the legacy egui desktop. Slots into
 // `<ChatView>` via `slots.Composer`.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ComposerProps } from "@lutin/chat-widgets";
-import type { PersonaInfo } from "./chat";
+import { SummaryFooter } from "@lutin/chat-widgets";
+import type { PersonaInfo } from "@lutin/chat-protocol";
 import styles from "./PersonaComposer.module.css";
 
 export interface PersonaComposerExtra {
@@ -22,6 +23,15 @@ export interface PersonaComposerExtra {
   onToggleTts: () => void;
   ttsSpeed: number;
   onChangeTtsSpeed: (speed: number) => void;
+  /** Live counters from `summaryUpdated`. `null` until the first
+   *  provider usage report arrives. Rendered as a one-line footer
+   *  below the composer shell so the user can see context-window
+   *  fill + lifetime spend without leaving the chat surface. */
+  summary: {
+    contextTokens: number | null;
+    totalPromptTokens: number;
+    totalCompletionTokens: number;
+  } | null;
 }
 
 export function makePersonaComposer(extra: PersonaComposerExtra) {
@@ -53,6 +63,7 @@ function Inner({
   onToggleTts,
   ttsSpeed,
   onChangeTtsSpeed,
+  summary,
 }: InnerProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -198,9 +209,11 @@ function Inner({
           </button>
         </div>
       </div>
+      <SummaryFooter summary={summary} />
     </div>
   );
 }
+
 
 interface PickerProps {
   personas: PersonaInfo[] | null;
@@ -226,26 +239,65 @@ function PersonaPicker({ personas, activePersona, onChange }: PickerProps) {
     );
   }
   const active = personas.find((p) => p.name === activePersona);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const items: { value: string; label: string }[] = [
+    { value: "", label: "No persona" },
+    ...personas.map((p) => ({ value: p.name, label: p.displayName })),
+  ];
   return (
-    <label
-      className={styles.persona}
-      data-active={active ? "true" : undefined}
-      title="Persona"
-    >
-      <PersonaIcon />
-      <select
-        value={activePersona ?? ""}
-        onChange={(e) => onChange(e.target.value || null)}
+    <div className={styles.personaWrap} ref={wrapRef}>
+      <button
+        type="button"
+        className={styles.persona}
+        data-active={active ? "true" : undefined}
+        title="Persona"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
       >
-        <option value="">No persona</option>
-        {personas.map((p) => (
-          <option key={p.name} value={p.name}>
-            {p.displayName}
-          </option>
-        ))}
-      </select>
-      <CaretIcon />
-    </label>
+        <PersonaIcon />
+        <span className={styles.personaLabel}>
+          {active?.displayName ?? "No persona"}
+        </span>
+        <CaretIcon />
+      </button>
+      {open && (
+        <ul role="listbox" className={styles.personaMenu}>
+          {items.map((it) => (
+            <li
+              key={it.value || "__none__"}
+              role="option"
+              aria-selected={(activePersona ?? "") === it.value}
+              className={styles.personaOption}
+              data-selected={(activePersona ?? "") === it.value || undefined}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                onChange(it.value || null);
+                setOpen(false);
+              }}
+            >
+              {it.label}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

@@ -1,0 +1,5 @@
+name = "Image"
+description = "Local image generation via ComfyUI"
+
+[runtime]
+kind = "binary"

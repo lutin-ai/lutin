@@ -3,7 +3,7 @@ resolver = "2"
 members = [
   "lutin-desktop/src-tauri",
   "lutin-control-panel",
-  "crates/*",
+  "crates/*", ".local/projects/default/egui-calculator",
 ]
 
 [workspace.package]
@@ -22,3 +22,4 @@ lutin-keypair = { path = "crates/lutin-keypair" }
 lutin-agent-sdk = { path = "crates/lutin-agent-sdk" }
 lutin-workflow-sdk = { path = "crates/lutin-workflow-sdk" }
 lutin-tts = { path = "crates/lutin-tts" }
+lutin-stt = { path = "crates/lutin-stt" }

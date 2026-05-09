@@ -43,6 +43,8 @@ export { ErrorBanner } from "./components/ErrorBanner";
 export { Header } from "./components/Header";
 export { Thinking } from "./components/Thinking";
 export { ToolCall } from "./components/ToolCall";
+export { SummaryFooter, formatTokens } from "./components/SummaryFooter";
+export type { SummaryFooterProps } from "./components/SummaryFooter";
 
 export { useScrollStick } from "./hooks/useScrollStick";
 

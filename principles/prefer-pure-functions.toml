@@ -1,0 +1,28 @@
+title = "Prefer Pure Functions"
+description = '''
+A pure function takes inputs, returns outputs, and touches nothing else: no globals, no I/O, no clocks, no random, no hidden state. Push effects to the edges of the system; keep the core pure.
+
+## Why
+
+- Pure functions are trivially testable: same input, same output, no setup, no mocks.
+- They compose: you can chain, parallelize, memoize, and reorder them without thinking about ordering hazards.
+- Bugs in pure code are reproducible from the inputs. Bugs in effectful code require reproducing the world.
+- A codebase with a pure core and a thin effectful shell is dramatically easier to reason about than one where every function might secretly hit the database.
+
+## Apply
+
+- Extract decisions and transformations into pure helpers. Keep I/O, time, randomness, and logging in a thin outer layer that calls into them.
+- Pass the clock, the random source, and external dependencies in as parameters or via a small interface — don't read them from the ambient environment.
+- Prefer functions that return a description of what to do (e.g. a struct of changes) over functions that perform side effects directly. The caller decides when to apply them.
+- A function that returns `void`/`()` is a red flag for hidden effects — look at what it mutates.
+
+## Counter-cases
+
+- The shell of any real program is necessarily impure. Don't contort it to fake purity (`IO` monad cosplay in languages that don't support it).
+- Performance-critical code sometimes requires in-place mutation; encapsulate it but don't pretend it's pure.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

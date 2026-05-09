@@ -1,0 +1,41 @@
+title = "Prefer Vec over HashMap in most cases"
+description = """
+Default to Vec<T> (or Vec<(K, V)>) for collections. Reach for HashMap
+only when there is a measured need for keyed lookup at scale.
+
+Why:
+- For small N (often up to several hundred elements), a linear scan
+  over a Vec beats HashMap lookup in wall-clock time: no hashing, no
+  pointer chasing, cache-friendly contiguous memory.
+- HashMap carries hidden costs: hashing per lookup, allocation per
+  insert, non-deterministic iteration order, memory overhead from
+  buckets and load factor slack.
+- Vec preserves insertion order for free. Reproducing that with
+  HashMap requires IndexMap or parallel structures.
+- Vec serializes, clones, and diffs predictably. HashMap iteration
+  order varies, which silently breaks snapshot tests and hashing of
+  derived data.
+- A Vec<T> where T carries its own key is often clearer than a
+  HashMap<K, T> that duplicates the key.
+
+How to apply:
+- For lookup tables under a few hundred entries, use Vec with
+  iter().find(...). Don't pre-optimize for a hash that won't pay off.
+- Use HashMap when N is large *and* the hot path is keyed lookup, or
+  when O(1) insert/remove by key under load is needed.
+- For ordered keyed data, prefer Vec<(K, V)> or BTreeMap over
+  HashMap — explicit ordering beats implicit chaos.
+- When in doubt, write it with Vec first. Switch to HashMap only
+  when a profiler points at the scan.
+
+Counter-cases (pass without complaint):
+- Genuinely large keyed collections with frequent random access:
+  HashMap (or FxHashMap for non-adversarial keys) is correct.
+- Deduplication of large sets: HashSet earns its keep.
+"""
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

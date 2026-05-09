@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { cpSendOk } from "../api";
 import { useApp } from "../store";
-import type { SessionInfo, WorkflowInfo } from "../types";
+import type {
+  SessionId,
+  SessionInfo,
+  SubAgentRow,
+  WorkflowInfo,
+} from "../types";
 import styles from "./Sidebar.module.css";
 
-const CHAT_WORKFLOW_ID = "chat";
+// Sidebar surfaces one section per known workflow so the user can
+// start sessions without a picker. Each entry maps a workflow id to
+// the section label shown above its session list. Order here drives
+// section order in the sidebar.
+const WORKFLOW_SECTIONS: Array<{ id: string; label: string }> = [
+  { id: "chat", label: "Chats" },
+  { id: "principled", label: "Principled" },
+  { id: "image", label: "Images" },
+];
 const SIDEBAR_WIDTH_KEY = "lutin.sidebar.width";
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 600;
@@ -29,6 +42,8 @@ export function Sidebar() {
   const selectedSession = useApp((s) => s.selectedSession);
   const selectSession = useApp((s) => s.selectSession);
   const applyEvent = useApp((s) => s.applyEvent);
+  const chatStateBySession = useApp((s) => s.chatStateBySession);
+  const selectSubAgent = useApp((s) => s.selectSubAgent);
 
   const [width, setWidth] = useState<number>(() => loadInitialWidth());
   const [dragging, setDragging] = useState(false);
@@ -77,11 +92,11 @@ export function Sidebar() {
   const [newSlug, setNewSlug] = useState("");
   const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [chatWorkflow, setChatWorkflow] = useState<WorkflowInfo | null>(null);
+  const [workflows, setWorkflows] = useState<Record<string, WorkflowInfo>>({});
 
-  // Resolve the chat workflow once on connect so the "+" button can
-  // start a session without a picker. If the chat image isn't
-  // installed, we hide the "+" rather than show an error.
+  // Resolve installed workflows once on connect so each section's
+  // "+" button can start a session without a picker. Missing images
+  // hide their "+" rather than show an error.
   useEffect(() => {
     if (conn.kind !== "connected") return;
     let cancelled = false;
@@ -89,8 +104,9 @@ export function Sidebar() {
       .then((r) => {
         if (cancelled) return;
         if (typeof r === "object" && "Workflows" in r) {
-          const found = r.Workflows.find((w) => w.id === CHAT_WORKFLOW_ID);
-          setChatWorkflow(found ?? null);
+          const map: Record<string, WorkflowInfo> = {};
+          for (const w of r.Workflows) map[w.id] = w;
+          setWorkflows(map);
         }
       })
       .catch(() => { /* picker stays hidden */ });
@@ -128,26 +144,32 @@ export function Sidebar() {
 
   const inSettings = view.kind === "settings";
 
-  // Chats list for the active project, filtered to chat-workflow
-  // sessions and sorted most-recently-active first.
-  const chats: SessionInfo[] = (() => {
-    if (!selected || inSettings) return [];
+  // Sessions for the active project, grouped by workflow id and
+  // sorted most-recently-active first within each group. Computed
+  // once so each section reads its slice without re-filtering.
+  const sessionsByWorkflow: Record<string, SessionInfo[]> = (() => {
+    if (!selected || inSettings) return {};
     const all = sessionsBySlug[selected] ?? [];
-    return [...all]
-      .filter((s) => s.workflow === CHAT_WORKFLOW_ID)
-      .sort((a, b) => {
+    const groups: Record<string, SessionInfo[]> = {};
+    for (const s of all) {
+      (groups[s.workflow] ??= []).push(s);
+    }
+    for (const list of Object.values(groups)) {
+      list.sort((a, b) => {
         const ka = a.summary?.last_activity ?? a.created_at;
         const kb = b.summary?.last_activity ?? b.created_at;
         return kb.localeCompare(ka);
       });
+    }
+    return groups;
   })();
 
-  const startChat = async () => {
-    if (!selected || !chatWorkflow) return;
+  const startSession = async (workflowId: string) => {
+    if (!selected) return;
     setError(null);
     try {
       const r = await cpSendOk({
-        StartSession: { slug: selected, workflow: chatWorkflow.id },
+        StartSession: { slug: selected, workflow: workflowId },
       });
       if (typeof r === "object" && "SessionStarted" in r) {
         const info = r.SessionStarted.info;
@@ -159,7 +181,7 @@ export function Sidebar() {
     }
   };
 
-  const deleteChat = async (id: string) => {
+  const deleteSession = async (id: string) => {
     if (!selected) return;
     try {
       await cpSendOk({ DeleteSession: { slug: selected, session: id } });
@@ -260,22 +282,25 @@ export function Sidebar() {
         </div>
       )}
 
-      {selected && !inSettings && (
-        <>
+      {selected && !inSettings && WORKFLOW_SECTIONS.map(({ id: wfId, label }) => {
+        const wf = workflows[wfId];
+        const sessions = sessionsByWorkflow[wfId] ?? [];
+        return (
+          <div key={wfId}>
           <div className={styles.sectionHead}>
-            <span className={styles.sectionLabel}>Chats</span>
+            <span className={styles.sectionLabel}>{label}</span>
             <button
               className={styles.addBtn}
-              title={chatWorkflow ? "New chat" : "Chat workflow not installed"}
-              disabled={conn.kind !== "connected" || !chatWorkflow}
-              onClick={startChat}
+              title={wf ? `New ${label.toLowerCase()}` : `${label} workflow not installed`}
+              disabled={conn.kind !== "connected" || !wf}
+              onClick={() => startSession(wfId)}
             >
               +
             </button>
           </div>
 
           <div className={styles.chatTable}>
-            {chats.length > 0 && (
+            {sessions.length > 0 && (
               <div className={styles.chatHeader}>
                 <span />
                 <span>title</span>
@@ -284,51 +309,166 @@ export function Sidebar() {
                 <span />
               </div>
             )}
-            {chats.length === 0 && (
-              <div className={styles.emptyRow}>No chats yet.</div>
+            {sessions.length === 0 && (
+              <div className={styles.emptyRow}>No sessions yet.</div>
             )}
-            {chats.map((s) => {
-              const title = s.summary?.title?.trim() || `chat · ${shortId(s.id)}`;
+            {sessions.map((s) => {
+              const title = s.summary?.title?.trim() || `${wfId} · ${shortId(s.id)}`;
               const persona = s.summary?.persona ?? "—";
               const ctx = s.summary?.context_tokens;
               const isActive = selectedSession === s.id;
+              // Sub-agents only flow in for the session whose iframe
+              // is mounted (today: the selected chat). Other chats
+              // render as plain rows. The selected sub-agent (if any)
+              // visually de-highlights the parent chat row so the
+              // selection stays unambiguous.
+              const chatState = chatStateBySession[s.id];
+              const subAgents = chatState?.agents ?? [];
+              const subSelected = chatState?.selected ?? null;
+              const parentSelected = isActive && subSelected === null;
               return (
-                <div
-                  key={s.id}
-                  className={`${styles.chatRow} ${isActive ? styles.active : ""}`}
-                  onClick={() => selectSession(s.id)}
-                  title={tooltipFor(s)}
-                >
-                  <span
-                    className={styles.chatState}
-                    data-state={s.state.toLowerCase()}
-                    aria-hidden
-                  />
-                  <span className={styles.chatTitle}>{title}</span>
-                  <span className={styles.chatPersona}>{persona}</span>
-                  <span className={`${styles.chatCtx} ${styles.colRight}`}>
-                    {ctx != null ? formatTokens(ctx) : "—"}
-                  </span>
-                  <button
-                    className={styles.deleteBtn}
-                    title="Delete chat"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`Delete chat "${title}"? History will be lost.`)) {
-                        deleteChat(s.id);
-                      }
+                <div key={s.id}>
+                  <div
+                    className={`${styles.chatRow} ${parentSelected ? styles.active : ""}`}
+                    onClick={() => {
+                      selectSession(s.id);
+                      // Clicking the parent chat row deselects any
+                      // child agent — there's no separate "back"
+                      // affordance in the iframe anymore.
+                      if (subSelected !== null) selectSubAgent(s.id, null);
                     }}
+                    title={tooltipFor(s)}
                   >
-                    ×
-                  </button>
+                    <span
+                      className={styles.chatState}
+                      data-state={s.state.toLowerCase()}
+                      aria-hidden
+                    />
+                    <span className={styles.chatTitle}>{title}</span>
+                    <span className={styles.chatPersona}>{persona}</span>
+                    <span
+                      className={`${styles.chatCtx} ${styles.colRight}`}
+                      data-band={ctx != null ? ctxBand(ctx) : undefined}
+                    >
+                      {ctx != null ? formatTokens(ctx) : "—"}
+                    </span>
+                    <button
+                      className={styles.deleteBtn}
+                      title="Delete session"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(`Delete "${title}"? History will be lost.`)) {
+                          deleteSession(s.id);
+                        }
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {subAgents.length > 0 && (
+                    <SubAgentRows
+                      session={s.id}
+                      agents={subAgents}
+                      selected={subSelected}
+                      onSelect={(id) => {
+                        selectSession(s.id);
+                        selectSubAgent(s.id, id);
+                      }}
+                    />
+                  )}
                 </div>
               );
             })}
           </div>
-        </>
-      )}
+          </div>
+        );
+      })}
     </aside>
   );
+}
+
+// Maximum visual indent depth for sub-agent rows. Direct children of
+// the parent chat sit at depth 1, grandchildren at 2; anything
+// deeper is clamped to depth 3 so the tree stays scannable in the
+// narrow sidebar. Rows past this depth still render — they just
+// stop accumulating indent and tree connectors lose precision.
+const MAX_SUBAGENT_DEPTH = 3;
+
+interface SubAgentRowsProps {
+  session: SessionId;
+  agents: SubAgentRow[];
+  selected: string | null;
+  onSelect: (id: string) => void;
+}
+
+function SubAgentRows({ agents, selected, onSelect }: SubAgentRowsProps) {
+  const rows = flattenSubAgents(agents);
+  return (
+    <div className={styles.subAgentList}>
+      {rows.map((row) => {
+        const depth = Math.min(row.depth, MAX_SUBAGENT_DEPTH);
+        const indent = (depth - 1) * 12;
+        const connector = row.isLast ? "└─" : "├─";
+        const isSelected = selected === row.agent.id;
+        const title =
+          row.agent.status.kind === "failed"
+            ? row.agent.status.reason
+            : (row.agent.lastProgress ?? row.agent.persona);
+        return (
+          <div
+            key={row.agent.id}
+            className={`${styles.subAgentRow} ${isSelected ? styles.active : ""}`}
+            onClick={() => onSelect(row.agent.id)}
+            title={title}
+            style={{ paddingLeft: 8 + indent }}
+          >
+            <span className={styles.subAgentConnector}>{connector}</span>
+            <span
+              className={styles.subAgentDot}
+              data-status={row.agent.status.kind}
+              aria-hidden
+            />
+            <span className={styles.subAgentId}>{row.agent.id}</span>
+            <span className={styles.subAgentPersona}>{row.agent.persona}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+interface FlatSubAgent {
+  agent: SubAgentRow;
+  /// 1-based depth from the parent chat (direct children = 1).
+  depth: number;
+  /// True when the row is the last sibling at its level. Drives the
+  /// `└─` vs `├─` connector glyph.
+  isLast: boolean;
+}
+
+function flattenSubAgents(agents: SubAgentRow[]): FlatSubAgent[] {
+  // Group agents by parentId so the recursion has O(1) child lookup.
+  // Orphans (parentId references an agent we don't have a row for)
+  // get hoisted to the top level — better to render them than to
+  // silently drop a live agent because of a transient ordering race.
+  const ids = new Set(agents.map((a) => a.id));
+  const childrenOf = new Map<string | null, SubAgentRow[]>();
+  for (const a of agents) {
+    const parent = a.parentId !== null && ids.has(a.parentId) ? a.parentId : null;
+    const list = childrenOf.get(parent);
+    if (list) list.push(a);
+    else childrenOf.set(parent, [a]);
+  }
+  const out: FlatSubAgent[] = [];
+  const walk = (parent: string | null, depth: number) => {
+    const kids = childrenOf.get(parent) ?? [];
+    kids.forEach((kid, i) => {
+      out.push({ agent: kid, depth, isLast: i === kids.length - 1 });
+      walk(kid.id, depth + 1);
+    });
+  };
+  walk(null, 1);
+  return out;
 }
 
 function shortId(id: string): string {
@@ -338,6 +478,15 @@ function shortId(id: string): string {
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
   return String(n);
+}
+
+/** Color band for the ctx column. Kept in lockstep with the chat
+ *  composer's `SummaryFooter::bandFor` so both surfaces agree on
+ *  what counts as "comfortable / busy / hot". */
+function ctxBand(tokens: number): "low" | "mid" | "high" {
+  if (tokens <= 50_000) return "low";
+  if (tokens <= 100_000) return "mid";
+  return "high";
 }
 
 // Tooltip aggregates the fields we don't render inline so the row

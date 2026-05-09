@@ -1,0 +1,30 @@
+title = "Prefer Message Passing Over Shared Mutable State"
+description = '''
+For concurrency, default to channels and ownership transfer rather than locks around shared data. Each task owns its data; messages move ownership across boundaries.
+
+## Why
+
+- Shared mutable state plus locks gives you a runtime obligation (lock ordering, deadlock avoidance, contention management) that the compiler cannot help with.
+- Message-passing designs make ownership explicit: at any moment, exactly one task can mutate a given piece of state. Bugs that depend on simultaneous access can't exist.
+- Channels give you natural backpressure. Locks give you queuing-behind-a-mutex with no observability.
+- Actor- and channel-style code tends to scale and decompose better than lock-heavy code, because each task is a unit of reasoning.
+
+## Apply
+
+- Spawn a task per long-lived resource (a connection, a cache, a state machine). Other tasks talk to it via a channel.
+- Move ownership of the value into the message; don't share a pointer back to the sender's copy.
+- Use `mpsc` / `broadcast` / `oneshot` (or your language's equivalents — Go's channels, Erlang's mailboxes, .NET's `Channel<T>`) deliberately, picking the topology that matches the problem.
+- For request/response, pair the request message with a one-shot reply channel.
+- When tempted to add a `Mutex<T>`, ask first: can this be a task that owns `T` and exposes a channel API?
+
+## Counter-cases
+
+- Read-mostly shared data where a `RwLock` or `arc-swap`-style pattern is genuinely simpler than a coordinator task.
+- Performance-critical hot paths where the overhead of channel sends dominates the actual work.
+- Small, well-scoped mutexes inside one module are fine — the principle is about the *default*, not a prohibition.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

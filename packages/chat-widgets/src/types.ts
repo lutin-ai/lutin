@@ -56,11 +56,20 @@ export interface ThinkingMessage {
   meta?: MessageMeta;
 }
 
+/** Tool-call argument lifecycle. While the LLM is still emitting the
+ *  call's input the widget receives `streaming` with the raw partial
+ *  JSON; once the SDK parses it at end-of-stream the widget receives
+ *  `parsed` with the decoded value. The two states are mutually
+ *  exclusive by construction. */
+export type ToolCallArgs =
+  | { kind: "streaming"; raw: string }
+  | { kind: "parsed"; value: unknown };
+
 export interface ToolCallMessage {
   kind: "toolCall";
   id: string;
   name: string;
-  args?: unknown;
+  args: ToolCallArgs;
   result?: unknown;
   state: "pending" | "running" | "completed" | "failed";
   error?: string;
@@ -95,4 +104,5 @@ export type ChatMessage =
 export type TurnState =
   | { kind: "idle" }
   | { kind: "streaming" }
-  | { kind: "errored"; message: string };
+  | { kind: "errored"; message: string }
+  | { kind: "maxRounds" };

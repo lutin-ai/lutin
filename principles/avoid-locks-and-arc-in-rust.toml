@@ -1,0 +1,31 @@
+title = "Avoid Locks and Arc in Rust"
+description = '''
+Treat `Arc<Mutex<T>>` and `Arc<RwLock<T>>` as a last resort, not a default. Most code that reaches for them is fighting the borrow checker rather than modeling real shared state.
+
+## Why
+
+- `Arc<Mutex<T>>` is a signal that ownership wasn't designed — it's reference counting plus runtime borrow checking, paying for both at runtime what Rust normally gives you for free at compile time.
+- Locks introduce deadlocks, lock-order bugs, and contention hot spots that don't exist in single-owner or message-passing designs.
+- `Arc` defeats most of Rust's lifetime reasoning. Once a value is behind `Arc<Mutex<_>>`, you've opted out of the compiler's help with aliasing.
+- Locks held across `.await` points are a common source of subtle deadlocks and priority inversions in async code, and clippy's `await_holding_lock` exists precisely because this happens often.
+- Cloning an `Arc` is cheap but not free — atomic refcount traffic on hot paths shows up in profiles.
+
+## Apply
+
+- Prefer single ownership: pass `&mut T` down, return owned values up. Most "shared state" turns out to be sequential state with bad plumbing.
+- For concurrency, prefer message passing (`mpsc`, `broadcast`, actor-style tasks) over shared mutable state. Each task owns its data; channels move ownership.
+- For read-mostly config or static data, use `OnceLock`, `OnceCell`, or `&'static` references instead of `Arc<RwLock<_>>`.
+- For per-request state in async servers, scope state to the task or request; don't promote it to shared global state.
+- If you do need shared mutation, scope the lock as tightly as possible: lock, mutate, drop the guard, then do work. Never hold a lock across `.await`.
+- When you reach for `Arc<Mutex<T>>`, pause and ask: can this be split per-task? Can it be a channel? Can it be `&mut` threaded through?
+
+## Counter-cases
+
+- Genuinely shared mutable state across threads with no natural owner (e.g. a connection pool, a metrics aggregator) — `Arc<Mutex<_>>` or a purpose-built concurrent type is appropriate.
+- Interfacing with libraries whose APIs require `Arc<dyn Trait + Send + Sync>` — accept it at the boundary, don't let it leak inward.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

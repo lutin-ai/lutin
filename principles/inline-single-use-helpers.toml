@@ -1,0 +1,28 @@
+title = "Inline Single-Use Helpers"
+description = '''
+A function called from exactly one place, especially if it's far from its caller, often costs more than it saves. Inline it unless it earns its keep.
+
+## Why
+
+- Every named helper forces the reader to jump to its definition to understand the caller. If it's used once, that jump is pure friction.
+- A good name is not a substitute for visible code. Reading three clear lines beats reading a name and *believing* it does what it says.
+- Helpers tend to grow parameters over time as the one caller's needs evolve, ending up as awkward shapes that fit nothing else.
+- Premature extraction locks in an abstraction shape before you know whether it's the right one.
+
+## Apply
+
+- Default: write the code inline. Extract when there are two or more real callers, or when the extracted name genuinely improves comprehension at the call site.
+- A helper earns its keep if: it has a name that captures a concept the reader already understands, it hides genuinely complex internals, or it is the natural seam for testing.
+- Trivial wrappers (`fn add_one(x) { x + 1 }`) that exist for no reason — delete them.
+- "Will be useful later" is not a reason. Inline now; extract when "later" actually arrives.
+
+## Counter-cases
+
+- A long top-level function with several distinct phases is easier to read with each phase named, even if each helper is single-use — the names act as section headers.
+- Helpers that exist purely as test seams (to inject a mock or stub) are legitimate even with one caller.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

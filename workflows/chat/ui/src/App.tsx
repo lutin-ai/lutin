@@ -10,10 +10,23 @@ import {
   decodeChatEvent,
   decodeChatResponse,
   encodeChatRequest,
-} from "./chat";
-import { initialSnapshot, reduce } from "./session";
+} from "@lutin/chat-protocol";
+import { type Message, initialSnapshot, reduce } from "./session";
+
+// Mirror of the engine's `summary.json::title` derivation. The
+// truncation cap matches Rust `SUMMARY_TITLE_CHARS` so the live
+// sidebar label and the on-disk fallback agree on what they show.
+const SUMMARY_TITLE_CHARS = 80;
+function deriveTitle(completed: Message[]): string | null {
+  for (const m of completed) {
+    if (m.role !== "user") continue;
+    const t = m.text.trim();
+    if (!t) continue;
+    return t.length > SUMMARY_TITLE_CHARS ? `${t.slice(0, SUMMARY_TITLE_CHARS - 1)}…` : t;
+  }
+  return null;
+}
 import { subAgentViewModel, toViewModel } from "./adapter";
-import type { SubAgentInfo } from "./chat";
 import { makePersonaComposer } from "./PersonaComposer";
 import { useChatTts } from "./tts";
 
@@ -26,7 +39,9 @@ export function App({ lutin }: Props) {
   const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
   const [draft, setDraft] = useState("");
   // `null` = parent session view; `agent#N` = read-only child transcript.
-  // Drives both the rendered transcript and the composer's visibility.
+  // The desktop sidebar drives this — chat doesn't render its own
+  // sub-agent picker anymore. We mirror the chrome's selection in
+  // local state so the transcript swap stays a React render.
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [ttsOn, setTtsOn] = useState(false);
   const [ttsSpeed, setTtsSpeed] = useState(1.0);
@@ -45,10 +60,28 @@ export function App({ lutin }: Props) {
     return off;
   }, [lutin]);
 
-  // Subscribe to engine broadcasts and fetch personas. Personas are
-  // engine-side metadata (file enumeration in `personas/`) so we
-  // request once on mount; if the user adds a new persona file the
-  // page is reloaded today. Hot-reload would need a CP broadcast.
+  // Refetch the persona list. Engine reads TOML fresh from disk on
+  // each `ListPersonas`, so this picks up out-of-band edits to
+  // display_name / model and any added/removed persona files. Called
+  // on mount and again on each send so the dropdown chip stays
+  // aligned with what the engine will actually use on that turn
+  // (`engine.rs` already reloads the persona TOML in `run_turn`).
+  const refreshPersonas = useCallback(() => {
+    lutin
+      .request(encodeChatRequest({ kind: "listPersonas" }))
+      .then((body) => {
+        const resp = decodeChatResponse(body);
+        if (resp.ok && resp.value.kind === "personas") {
+          setPersonas(resp.value.personas);
+        }
+      })
+      .catch(() => {
+        // Persona picker degrades gracefully; keep the previous list
+        // rather than blanking it on a transient error.
+      });
+  }, [lutin]);
+
+  // Subscribe to engine broadcasts and fetch personas.
   useEffect(() => {
     let cancelled = false;
     const off = lutin.onBroadcast((body) => {
@@ -110,20 +143,7 @@ export function App({ lutin }: Props) {
         // Panel is decorative — failure leaves it empty.
       });
 
-    lutin
-      .request(encodeChatRequest({ kind: "listPersonas" }))
-      .then((body) => {
-        if (cancelled) return;
-        const resp = decodeChatResponse(body);
-        if (resp.ok && resp.value.kind === "personas") {
-          setPersonas(resp.value.personas);
-        }
-      })
-      .catch(() => {
-        // Persona picker degrades gracefully; failure here just leaves
-        // the dropdown showing "no personas configured".
-        if (!cancelled) setPersonas([]);
-      });
+    refreshPersonas();
 
     return () => {
       cancelled = true;
@@ -140,6 +160,10 @@ export function App({ lutin }: Props) {
   const dispatchSend = useCallback(
     (text: string) => {
       dispatch({ type: "submitOptimistic", text });
+      // Refresh persona metadata in parallel with the send. The engine
+      // reloads the persona TOML on every turn, so the chip/model label
+      // would otherwise drift from what the LLM is actually using.
+      refreshPersonas();
       lutin
         .request(encodeChatRequest({ kind: "sendMessage", text }))
         .then((body) => {
@@ -236,14 +260,17 @@ export function App({ lutin }: Props) {
     [lutin],
   );
 
-  const selectAgent = useCallback(
-    (id: string | null) => {
+  // Chrome (desktop sidebar) drives sub-agent selection. We mirror it
+  // into local state and pull a fresh transcript for non-null ids —
+  // the live broadcast keeps an open child warm, but one that finished
+  // while it wasn't selected needs a pull to surface its terminal turn.
+  // The capability gate makes these optional at type-level; chat
+  // declares `"sub_agents"` so they're always present at runtime.
+  useEffect(() => {
+    if (!lutin.onSelectSubAgent) return;
+    const off = lutin.onSelectSubAgent((id) => {
       setSelectedAgent(id);
       if (id === null) return;
-      // Fetch a fresh snapshot every time the user opens (or re-opens)
-      // a child — the live broadcast keeps it warm while open, but a
-      // child that finished while the panel was closed needs a pull
-      // to land its terminal turn.
       lutin
         .request(encodeChatRequest({ kind: "getSubAgentTranscript", id }))
         .then((body) => {
@@ -256,9 +283,46 @@ export function App({ lutin }: Props) {
         .catch(() => {
           // Read-only side panel — a missing transcript renders empty.
         });
-    },
-    [lutin],
-  );
+    });
+    return off;
+  }, [lutin]);
+
+  // Mirror the live sub-agent registry up to the chrome so its
+  // sidebar can render the tree. The chat workflow is the
+  // authoritative source; the desktop just displays. Sending the
+  // full list each time keeps the wire shape boringly idempotent.
+  // `SubAgentInfo` and `SubAgentRow` are structurally identical
+  // (chat's postcard schema vs the cross-boundary shim type), so
+  // structural typing covers the assignment.
+  useEffect(() => {
+    lutin.publishSubAgents?.(snap.subAgents);
+  }, [lutin, snap.subAgents]);
+
+  // Mirror live session metadata up to the chrome on every change so
+  // the sidebar's `title`, `persona`, and `ctx` columns update as the
+  // agent loop runs — not only at end-of-turn. Token values are 0 /
+  // null until the first provider Usage report lands, which matches
+  // the on-disk `summary.json` invariant (no usage = no totals yet).
+  // Persona + title piggyback on the same channel so the sidebar
+  // reflects persona switches and the first user message immediately.
+  useEffect(() => {
+    const title = deriveTitle(snap.completed);
+    const tokens = snap.summary ?? {
+      contextTokens: null,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+    };
+    // Omit `title` when we can't derive one (transcript not yet
+    // loaded after a remount). `null` would tell the chrome to clear
+    // the persisted title; `undefined` leaves it intact, so the
+    // sidebar keeps showing the on-disk title until we have something
+    // authoritative to publish.
+    lutin.publishSummary({
+      ...tokens,
+      persona: snap.persona,
+      ...(title !== null ? { title } : {}),
+    });
+  }, [lutin, snap.summary, snap.persona, snap.completed]);
 
   const ttsAvailable = lutin.tts !== undefined;
   const onToggleTts = useCallback(() => setTtsOn((v) => !v), []);
@@ -308,8 +372,9 @@ export function App({ lutin }: Props) {
         onToggleTts,
         ttsSpeed,
         onChangeTtsSpeed: setTtsSpeed,
+        summary: snap.summary,
       }),
-    [personas, snap.persona, changePersona, rerun, ttsAvailable, ttsOn, tts.loading, onToggleTts, ttsSpeed],
+    [personas, snap.persona, snap.summary, changePersona, rerun, ttsAvailable, ttsOn, tts.loading, onToggleTts, ttsSpeed],
   );
 
   // Hide the composer entirely when viewing a child — sub-agents are
@@ -325,299 +390,16 @@ export function App({ lutin }: Props) {
   const composerSlot = viewing === null ? Composer : HiddenComposer;
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
-      <SubAgentsTree
-        agents={snap.subAgents}
-        selected={selectedAgent}
-        onSelect={selectAgent}
-      />
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        {viewing !== null && (
-          <ChildHeader
-            agent={snap.subAgents.find((a) => a.id === viewing) ?? null}
-            id={viewing}
-            onBack={() => selectAgent(null)}
-          />
-        )}
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-          <ChatView
-            messages={vm.messages}
-            turn={vm.turn}
-            onSend={send}
-            onCancel={cancel}
-            draft={draft}
-            onDraftChange={setDraft}
-            messageActions={messageActions}
-            slots={{ Composer: composerSlot }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-interface TreeNode {
-  agent: SubAgentInfo;
-  children: TreeNode[];
-}
-
-/// Build a forest of sub-agent rows out of the flat `parentId` list.
-/// Top-level entries are children of the parent session (parentId
-/// null); deeper levels nest under their parent's id. Orphaned rows
-/// (parent gone before snapshot landed) get hoisted to top-level so
-/// they don't disappear from the tree.
-function buildTree(agents: SubAgentInfo[]): TreeNode[] {
-  const byId = new Map<string, TreeNode>(
-    agents.map((a) => [a.id, { agent: a, children: [] }]),
-  );
-  const roots: TreeNode[] = [];
-  for (const a of agents) {
-    const node = byId.get(a.id)!;
-    if (a.parentId !== null && byId.has(a.parentId)) {
-      byId.get(a.parentId)!.children.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-  return roots;
-}
-
-interface FlatRow {
-  agent: SubAgentInfo;
-  /// Stable prefix string of the parent column ("│ ", "  ") chars in
-  /// order from root → this row's parent. The row's own connector
-  /// (├─ / └─) is appended at render.
-  prefix: string;
-  isLast: boolean;
-}
-
-function flatten(tree: TreeNode[], prefix = "", out: FlatRow[] = []): FlatRow[] {
-  tree.forEach((node, i) => {
-    const isLast = i === tree.length - 1;
-    out.push({ agent: node.agent, prefix, isLast });
-    flatten(node.children, prefix + (isLast ? "  " : "│ "), out);
-  });
-  return out;
-}
-
-interface TreeProps {
-  agents: SubAgentInfo[];
-  selected: string | null;
-  onSelect: (id: string | null) => void;
-}
-
-function SubAgentsTree({ agents, selected, onSelect }: TreeProps) {
-  const rows = flatten(buildTree(agents));
-  return (
-    <aside
-      style={{
-        width: 260,
-        flexShrink: 0,
-        borderRight: "1px solid rgba(255,255,255,0.08)",
-        background: "rgba(255,255,255,0.02)",
-        color: "#ddd",
-        font: "12px/1.4 -apple-system, system-ui, sans-serif",
-        padding: "12px 0",
-        overflowY: "auto",
-      }}
-    >
-      <div
-        style={{
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          fontSize: 10,
-          color: "#888",
-          padding: "0 14px 8px",
-        }}
-      >
-        Agents
-      </div>
-      <RootRow selected={selected === null} onSelect={() => onSelect(null)} />
-      {rows.length === 0 ? (
-        <div style={{ color: "#555", padding: "8px 14px", fontSize: 11 }}>
-          (no sub-agents yet)
-        </div>
-      ) : (
-        rows.map((row) => (
-          <TreeRow
-            key={row.agent.id}
-            row={row}
-            selected={selected === row.agent.id}
-            onSelect={() => onSelect(row.agent.id)}
-          />
-        ))
-      )}
-    </aside>
-  );
-}
-
-function RootRow({ selected, onSelect }: { selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        width: "100%",
-        textAlign: "left",
-        background: selected ? "rgba(255,255,255,0.06)" : "transparent",
-        color: "#ddd",
-        border: "none",
-        padding: "5px 14px",
-        cursor: "pointer",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        fontSize: 12,
-      }}
-    >
-      <FolderIcon />
-      <span>chat</span>
-    </button>
-  );
-}
-
-function TreeRow({
-  row,
-  selected,
-  onSelect,
-}: {
-  row: FlatRow;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const connector = row.isLast ? "└─" : "├─";
-  const { agent } = row;
-  return (
-    <button
-      onClick={onSelect}
-      title={
-        agent.status.kind === "failed"
-          ? agent.status.reason
-          : (agent.lastProgress ?? "")
-      }
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        width: "100%",
-        textAlign: "left",
-        background: selected ? "rgba(255,255,255,0.06)" : "transparent",
-        color: "#ddd",
-        border: "none",
-        padding: "4px 14px",
-        cursor: "pointer",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        fontSize: 12,
-        whiteSpace: "pre",
-      }}
-    >
-      <span style={{ color: "#555" }}>
-        {row.prefix}
-        {connector}
-      </span>
-      <StatusDot status={agent.status} />
-      <span style={{ color: "#aaa" }}>{agent.id}</span>
-      <span
-        style={{
-          color: "#777",
-          fontFamily: "-apple-system, system-ui, sans-serif",
-          fontSize: 11,
-          marginLeft: 4,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          flex: 1,
-        }}
-      >
-        {agent.persona}
-      </span>
-    </button>
-  );
-}
-
-function FolderIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0 }}>
-      <path
-        d="M1.5 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1h6.1a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function StatusDot({ status }: { status: SubAgentInfo["status"] }) {
-  const color = (() => {
-    switch (status.kind) {
-      case "running":
-        return "#5cf";
-      case "completed":
-        return "#7d6";
-      case "failed":
-        return "#f77";
-      case "stopped":
-        return "#999";
-    }
-  })();
-  return (
-    <span
-      style={{
-        width: 7,
-        height: 7,
-        borderRadius: "50%",
-        background: color,
-        flexShrink: 0,
-      }}
+    <ChatView
+      messages={vm.messages}
+      turn={vm.turn}
+      onSend={send}
+      onCancel={cancel}
+      draft={draft}
+      onDraftChange={setDraft}
+      messageActions={messageActions}
+      slots={{ Composer: composerSlot }}
     />
   );
 }
 
-function ChildHeader({
-  agent,
-  id,
-  onBack,
-}: {
-  agent: SubAgentInfo | null;
-  id: string;
-  onBack: () => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "8px 16px",
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-        font: "12px/1.4 -apple-system, system-ui, sans-serif",
-        color: "#bbb",
-        background: "rgba(255,255,255,0.02)",
-      }}
-    >
-      <button
-        onClick={onBack}
-        style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          color: "#ddd",
-          borderRadius: 4,
-          padding: "3px 8px",
-          cursor: "pointer",
-          fontSize: 11,
-        }}
-      >
-        ← chat
-      </button>
-      <span style={{ fontFamily: "ui-monospace, monospace" }}>{id}</span>
-      {agent && <span style={{ color: "#888" }}>· {agent.persona}</span>}
-      {agent && <StatusDot status={agent.status} />}
-      {agent && agent.status.kind === "failed" && (
-        <span style={{ color: "#e88" }} title={agent.status.reason}>
-          failed
-        </span>
-      )}
-    </div>
-  );
-}

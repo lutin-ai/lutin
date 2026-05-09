@@ -1,0 +1,29 @@
+title = "Separate Refactors from Behavior Changes"
+description = '''
+A single edit changes the *shape* of the code or its *behavior* — not both. Mixing the two produces diffs that are nearly impossible to review and bugs that are nearly impossible to bisect.
+
+## Why
+
+- A reviewer reading a mixed diff has to ask "is this line a rename, or a real change?" on every line. They will get tired and miss the real change.
+- When a regression lands, `git bisect` points at a commit that did three things; the reviewer can't tell which one broke it without redoing the work.
+- Refactors are "should be a no-op" — that property is only checkable when the diff *is* a no-op. The moment behavior changes too, the safety net is gone.
+- Splitting forces the author to be honest about what they're actually doing. "Move + rename + tweak the loop condition" usually means three separate problems were tangled together.
+
+## Apply
+
+- Two edits, two operations: first the rename / move / extract / inline (no behavior change), then the behavior change against the new shape.
+- If you catch yourself fixing a bug "while you're in there," stop. Land the refactor as-is, then fix the bug in a separate edit so the bugfix diff is small and obvious.
+- "Drive-by" formatting, import reordering, and whitespace changes belong in their own edit, not riding along with logic changes.
+- When given a task that genuinely needs both ("rename this thing and change how it works"), still split the edits — refactor first so the behavior change is reviewed against final names.
+
+## Counter-cases
+
+- A rename forced by a behavior change (the old name would be wrong after the change) can land together if separating them would produce a temporarily incoherent intermediate state.
+- Trivial edits where the "refactor" is a one-line variable extraction inside the same change — splitting is more ceremony than value.
+- Generated code where the regenerator updates many things at once.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

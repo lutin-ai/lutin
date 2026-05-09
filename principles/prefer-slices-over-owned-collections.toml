@@ -1,0 +1,30 @@
+title = "Prefer Slices and Views Over Owned Collections"
+description = '''
+Function parameters and intermediate values should be the most general, least-owning type that does the job: `&str` over `String`, `&[T]` over `Vec<T>`, `string_view` over `string`, `ReadOnlySpan<T>` over `T[]`.
+
+## Why
+
+- A function that takes `&str` accepts `String`, `&String`, `&str`, and string literals for free. A function that takes `String` forces every caller to allocate or move.
+- Slices/views describe *what the function needs to read* without dictating *how the caller stored it*. That's the right abstraction boundary.
+- Owned types in signatures are contagious: one `Vec<T>` parameter pulls allocations into callers who only had a slice or array.
+- Views compose better with iterators, sub-ranges, and zero-copy parsing.
+
+## Apply
+
+- Read-only collection input: `&[T]`, `&str`, `Span<T>`, `string_view`, `Iterable<T>`.
+- Read-write in place: `&mut [T]`, `Span<T>` (mutable variant).
+- Return owned types when *producing* a value; accept borrowed types when *consuming* one.
+- In APIs, prefer the most permissive input and the most specific output. ("Robustness principle" applied to types.)
+- Watch for `&Vec<T>` / `&String` in Rust signatures — those are almost always wrong; use `&[T]` / `&str`.
+
+## Counter-cases
+
+- If the function stores the value in a struct or sends it to another thread, take the owned type — don't force the caller to keep it alive.
+- Trait objects and FFI boundaries sometimes require owned types for ABI reasons.
+- Tiny fixed-size arrays are often clearer passed by value than as a slice.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

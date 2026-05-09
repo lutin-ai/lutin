@@ -1,0 +1,28 @@
+title = "Errors Are Values, Not Exceptions"
+description = '''
+Where the language supports it, return errors as data (`Result`, `Either`, tagged returns). Reserve panics and exceptions for true bugs and unrecoverable conditions.
+
+## Why
+
+- A function's signature should tell you it can fail. `fn read(path) -> Result<Bytes, IoError>` does. `fn read(path) -> Bytes` (that throws) does not.
+- Errors-as-values force the caller to acknowledge failure at the call site. Exceptions silently propagate through any number of frames, and the recovery point is invisible.
+- Pattern-matching on error variants is cheap and exhaustive. `try/catch` ladders are not.
+- Exceptions interact badly with destructors, defer blocks, async, and resource management. Returned errors don't.
+
+## Apply
+
+- Use `Result<T, E>` (Rust), `Either`/`Try` (Scala/FP), error returns (Go), `Option<T>` for "no value" (not "value or error").
+- Define a domain error type (`enum`, sealed class) that enumerates real failure modes — don't use a string or generic `Error`.
+- Convert exceptions from libraries into typed errors at the boundary of your code.
+- Reserve `panic!` / unchecked exceptions for invariant violations the program cannot recover from (corrupted state, contract violations, "this should never happen").
+
+## Counter-cases
+
+- Languages built around exceptions (Python, Java, C#, Ruby) — fight the language only where it pays. Use exceptions idiomatically there, but still type the failure modes you care about.
+- Truly bug-class conditions (index out of bounds, divide by zero in code that should have checked) — panic; don't pretend they're recoverable.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

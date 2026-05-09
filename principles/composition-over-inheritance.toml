@@ -1,0 +1,29 @@
+title = "Composition Over Inheritance"
+description = '''
+Build behavior by combining small, focused pieces (traits, interfaces, fields, functions) rather than by extending a base class hierarchy.
+
+## Why
+
+- Inheritance couples subclasses to the implementation of their parents. A change in the base ripples into every descendant, often in non-obvious ways.
+- Deep hierarchies make it hard to answer simple questions like "what does this method actually do?" — you have to walk up the chain.
+- Composition lets each concern (caching, logging, retry, validation) be a separate piece you opt into. Inheritance forces you to take everything the parent gives you.
+- Most "is-a" relationships in real code are actually "has-a" or "behaves-as" relationships — better modeled with fields or interfaces.
+
+## Apply
+
+- Prefer interfaces / traits / protocols for "behaves-as" — the consumer depends on capability, not on a class.
+- Prefer fields / wrapped objects for "has-a" — a `Cache` *contains* a `Storage`, not *extends* one.
+- Use small, single-purpose interfaces and combine them at the use site.
+- In Rust: traits + `impl` blocks + struct fields. In Go: interfaces are structural; embed when sensible. In Java/Kotlin/C#: prefer interfaces and `final` classes; reach for `abstract class` rarely.
+- When you find yourself overriding a method to "skip" or "neutralize" parent behavior, the hierarchy is wrong.
+
+## Counter-cases
+
+- Genuine "is-a" hierarchies with stable shared invariants (e.g. AST node base classes, GUI widget trees) can be a reasonable fit for inheritance.
+- Some frameworks demand you extend their base classes; do so at the boundary but keep your own logic in composed pieces.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

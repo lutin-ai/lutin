@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useScrollStick } from "../hooks/useScrollStick";
 import type { Slots } from "../slots";
 import type { ChatMessage, TurnState } from "../types";
@@ -46,6 +47,11 @@ export interface ChatViewProps {
   className?: string;
 }
 
+// Rough first-paint estimate before the virtualizer measures real rows.
+// Tuned to a typical assistant bubble; over- or under-shooting just
+// means the scroll thumb settles after first measure.
+const EST_ROW_PX = 96;
+
 export function ChatView({
   messages,
   turn,
@@ -66,7 +72,24 @@ export function ChatView({
   const controlled = draftProp !== undefined && onDraftChange !== undefined;
   const draft = controlled ? draftProp! : draftLocal;
   const setDraft = controlled ? onDraftChange! : setDraftLocal;
-  const scrollRef = useScrollStick([messages.length, lastTextLen(messages), turn]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => EST_ROW_PX,
+    overscan: 6,
+    getItemKey: (i) => messages[i].id ?? `${messages[i].kind}-${i}`,
+  });
+  const totalSize = virtualizer.getTotalSize();
+  // Re-stick when the virtualizer remeasures rows (mid-stream height
+  // changes) as well as when the message list itself grows.
+  useScrollStick(scrollRef, [
+    messages.length,
+    lastTextLen(messages),
+    turn,
+    totalSize,
+  ]);
 
   const Header = slots?.Header ?? DefaultHeader;
   const ErrorBanner = slots?.ErrorBanner ?? DefaultErrorBanner;
@@ -86,7 +109,12 @@ export function ChatView({
   };
 
   const busy = turn.kind === "streaming";
-  const errored = turn.kind === "errored" ? turn.message : null;
+  const errored =
+    turn.kind === "errored"
+      ? turn.message
+      : turn.kind === "maxRounds"
+        ? "Reached max rounds — agent paused. Send a message to continue."
+        : null;
 
   const root = ["lutin-chat", className].filter(Boolean).join(" ");
 
@@ -96,30 +124,32 @@ export function ChatView({
       {errored && <ErrorBanner message={errored} />}
 
       <div ref={scrollRef} className="lutin-chat__scrollback">
-        {messages.map((m, i) => {
-          const key = m.id ?? `${m.kind}-${i}`;
-          switch (m.kind) {
-            case "user":
-              return <User key={key} message={m} actions={messageActions} />;
-            case "assistant":
-              return <Assistant key={key} message={m} actions={messageActions} />;
-            case "system":
-              return <System key={key} message={m} actions={messageActions} />;
-            case "thinking":
-              return <ThinkingC key={key} message={m} actions={messageActions} />;
-            case "toolCall":
-              return (
-                <ToolCallC
-                  key={key}
-                  message={m}
-                  onApprove={onApproveTool}
-                  onDeny={onDenyTool}
-                />
-              );
-            case "agent":
-              return <Agent key={key} message={m} actions={messageActions} />;
-          }
-        })}
+        <div className="lutin-chat__virt" style={{ height: totalSize }}>
+          {virtualizer.getVirtualItems().map((vi) => {
+            const m = messages[vi.index];
+            return (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                ref={virtualizer.measureElement}
+                className="lutin-chat__vrow"
+                style={{ transform: `translateY(${vi.start}px)` }}
+              >
+                {renderMessage(m, {
+                  User,
+                  Assistant,
+                  System,
+                  ThinkingC,
+                  ToolCallC,
+                  Agent,
+                  messageActions,
+                  onApproveTool,
+                  onDenyTool,
+                })}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {!hideComposer && (
@@ -135,6 +165,42 @@ export function ChatView({
       )}
     </div>
   );
+}
+
+interface RenderCtx {
+  User: NonNullable<Slots["UserMessage"]> | typeof UserBubble;
+  Assistant: NonNullable<Slots["AssistantMessage"]> | typeof AssistantBubble;
+  System: NonNullable<Slots["SystemMessage"]> | typeof SystemBubble;
+  ThinkingC: NonNullable<Slots["Thinking"]> | typeof DefaultThinking;
+  ToolCallC: NonNullable<Slots["ToolCall"]> | typeof DefaultToolCall;
+  Agent: NonNullable<Slots["AgentMessage"]> | typeof AgentBubble;
+  messageActions?: MessageActions;
+  onApproveTool?: (id: string) => void;
+  onDenyTool?: (id: string) => void;
+}
+
+function renderMessage(m: ChatMessage, ctx: RenderCtx) {
+  const { User, Assistant, System, ThinkingC, ToolCallC, Agent } = ctx;
+  switch (m.kind) {
+    case "user":
+      return <User message={m} actions={ctx.messageActions} />;
+    case "assistant":
+      return <Assistant message={m} actions={ctx.messageActions} />;
+    case "system":
+      return <System message={m} actions={ctx.messageActions} />;
+    case "thinking":
+      return <ThinkingC message={m} actions={ctx.messageActions} />;
+    case "toolCall":
+      return (
+        <ToolCallC
+          message={m}
+          onApprove={ctx.onApproveTool}
+          onDeny={ctx.onDenyTool}
+        />
+      );
+    case "agent":
+      return <Agent message={m} actions={ctx.messageActions} />;
+  }
 }
 
 // Cheap signal for "did the streaming buffer grow?" — feeds the

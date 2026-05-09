@@ -271,7 +271,7 @@ pub enum Request {
     /// per-stream rather than persisted CP-side: each desktop holds
     /// its own user prefs and just ships them along.
     OpenTranscription {
-        config: WhisperConfig,
+        config: SttConfig,
     },
     /// Append `samples` to the open stream. Wire format is
     /// `MonoPcm16k`: 16 kHz mono signed PCM, the only shape whisper
@@ -512,6 +512,24 @@ impl Default for WhisperModel {
     }
 }
 
+/// Closed catalogue of NVIDIA Parakeet exports CP knows how to fetch.
+/// Same closed-enum contract as `WhisperModel` / `OrpheusModel` — CP
+/// owns the model-id → HF directory mapping; the wire surface stays
+/// opaque so a malicious payload can't pivot to arbitrary URLs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParakeetModel {
+    /// `nvidia/parakeet-tdt-0.6b-v3` — multilingual (25 langs), TDT
+    /// decoder, ~600M params.
+    Tdt06bV3,
+}
+
+impl Default for ParakeetModel {
+    fn default() -> Self {
+        Self::Tdt06bV3
+    }
+}
+
 /// Sampling strategy for one transcription. `Greedy` is fastest;
 /// `Beam(n)` trades CPU for accuracy. Persisted as a plain integer so
 /// the JSON config stays human-editable: `0` and `1` round-trip to
@@ -566,6 +584,34 @@ impl Default for WhisperConfig {
             language: None,
             beam_size: BeamSize::default(),
         }
+    }
+}
+
+/// Per-stream Parakeet parameters. Multilingual + auto-detect, no beam
+/// search exposed by the model — `model` is the only knob today.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ParakeetConfig {
+    pub model: ParakeetModel,
+}
+
+/// STT backend selection carried by `OpenTranscription`. Externally
+/// tagged on the variant name (matches `TtsBackend`'s shape and keeps
+/// postcard happy — postcard rejects internally-tagged enums). New
+/// backends become new variants — no other request type changes.
+///
+/// CP keeps a per-`SttConfig` worker cache so two streams on the same
+/// backend share the loaded model; switching backends mid-session
+/// triggers a one-time load on first use.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SttConfig {
+    Whisper(WhisperConfig),
+    Parakeet(ParakeetConfig),
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self::Whisper(WhisperConfig::default())
     }
 }
 
@@ -710,17 +756,17 @@ pub enum ApiError {
     /// client can self-diagnose.
     #[error("transcription limit exceeded: {0}")]
     TranscriptionLimit(TranscriptionLimit),
-    /// Whisper model file is not available locally and a download
+    /// Backend model files are not available locally and a download
     /// was attempted but failed (network, disk, validation). Distinct
-    /// from `Inference` so the desktop can surface a different
+    /// from `SttInference` so the desktop can surface a different
     /// message and consider retrying.
-    #[error("whisper model unavailable: {0}")]
-    WhisperModelUnavailable(String),
-    /// Whisper inference itself failed (decode error, context
-    /// rejected the audio, internal panic). Generic catch-all for the
-    /// last leg of the pipeline.
-    #[error("whisper inference: {0}")]
-    WhisperInference(String),
+    #[error("stt model unavailable: {0}")]
+    SttModelUnavailable(String),
+    /// STT inference itself failed (decode error, model rejected the
+    /// audio, internal panic). Generic catch-all for the last leg of
+    /// the pipeline.
+    #[error("stt inference: {0}")]
+    SttInference(String),
     #[error("tts stream not found: {0:?}")]
     TtsStreamNotFound(TtsStreamId),
     /// `OpenTtsStream` arrived before `EnsureTtsBackend` for the
@@ -896,14 +942,22 @@ mod tests {
 
     #[test]
     fn open_transcription_roundtrip() {
-        let r = Request::OpenTranscription {
-            config: WhisperConfig {
-                model: WhisperModel::DistilLargeV3,
-                language: Some("en".into()),
-                beam_size: BeamSize::Beam(std::num::NonZeroU8::new(3).unwrap()),
+        for r in [
+            Request::OpenTranscription {
+                config: SttConfig::Whisper(WhisperConfig {
+                    model: WhisperModel::DistilLargeV3,
+                    language: Some("en".into()),
+                    beam_size: BeamSize::Beam(std::num::NonZeroU8::new(3).unwrap()),
+                }),
             },
-        };
-        assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+            Request::OpenTranscription {
+                config: SttConfig::Parakeet(ParakeetConfig {
+                    model: ParakeetModel::Tdt06bV3,
+                }),
+            },
+        ] {
+            assert_eq!(decode::<Request>(&encode(&r).unwrap()).unwrap(), r);
+        }
     }
 
     #[test]
@@ -958,8 +1012,8 @@ mod tests {
             Response::Err(ApiError::TranscriptionLimit(
                 TranscriptionLimit::TooManyStreams { max: 32 },
             )),
-            Response::Err(ApiError::WhisperModelUnavailable("404 from hf".into())),
-            Response::Err(ApiError::WhisperInference("decode failed".into())),
+            Response::Err(ApiError::SttModelUnavailable("404 from hf".into())),
+            Response::Err(ApiError::SttInference("decode failed".into())),
         ] {
             assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
         }

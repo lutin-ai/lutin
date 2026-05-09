@@ -19,8 +19,8 @@ use futures_util::{SinkExt, StreamExt};
 use lutin_auth::{Scope, SigningKey, VerifyingKey, verify};
 use lutin_control_protocol::{
     self as cp, ApiError, DisplayName, Event, MonoPcm16k, ProjectInfo, Request, Response,
-    ResponseOk, SessionId, Slug, TranscriptionStreamId, TtsBackend, TtsLimit, TtsSpeed,
-    TtsStreamId, WhisperConfig, WorkflowId,
+    ResponseOk, SessionId, Slug, SttConfig, TranscriptionStreamId, TtsBackend, TtsLimit, TtsSpeed,
+    TtsStreamId, WorkflowId,
 };
 use lutin_tts::TtsEvent;
 use std::sync::Arc;
@@ -160,10 +160,10 @@ impl Supervisor {
         // second connection (or a re-press during finish) reuses the
         // already-loaded model instead of rebuilding it.
         transcribe::install_log_callback();
-        let transcriber = Arc::new(transcribe::WhisperTranscriber::new(
+        let manager = Arc::new(transcribe::SttManager::new(
             config.global_config_dir.clone(),
         ));
-        let transcription = transcription_streams::TranscriptionRegistry::new(transcriber);
+        let transcription = transcription_streams::TranscriptionRegistry::new(manager);
 
         // Single sink for every loaded TTS backend; CP fans events
         // out onto the broadcast as they arrive. Unbounded because
@@ -302,20 +302,20 @@ impl AppState {
         }
     }
 
-    fn handle_open_transcription(&self, config: WhisperConfig) -> Response {
-        let model = config.model;
+    fn handle_open_transcription(&self, config: SttConfig) -> Response {
+        let warm_config = config.clone();
         let stream_id = match self.transcription.open(config) {
             Ok(id) => id,
             Err(limit) => return Response::Err(ApiError::TranscriptionLimit(limit)),
         };
-        // Kick off model warmup so by the time the user finishes
-        // talking the context is loaded. Failures are non-fatal —
-        // `FinishTranscription` re-runs `ensure_ctx` and surfaces any
-        // real error there.
-        let transcriber = self.transcription.transcriber().clone();
+        // Kick off backend warmup so by the time the user finishes
+        // talking the model is loaded. Failures are non-fatal —
+        // `FinishTranscription` re-runs `ensure_worker` and surfaces
+        // any real error there.
+        let manager = self.transcription.manager().clone();
         tokio::spawn(async move {
-            if let Err(e) = transcriber.warmup(model).await {
-                warn!(error = %e, "whisper warmup after OpenTranscription failed");
+            if let Err(e) = manager.ensure_worker(&warm_config).await {
+                warn!(error = %e, "stt warmup after OpenTranscription failed");
             }
         });
         Response::Ok(ResponseOk::TranscriptionOpened { stream_id })
@@ -343,29 +343,20 @@ impl AppState {
         };
         match self
             .transcription
-            .transcriber()
+            .manager()
             .transcribe(stream.samples, &stream.config)
             .await
         {
             Ok(text) => Response::Ok(ResponseOk::Transcription { text }),
-            Err(e) => {
-                // Distinguish model-availability errors from inference
-                // errors so the desktop can surface different messages
-                // and decide whether retrying makes sense. The error
-                // chain from `ensure_model` runs through
-                // `download_streaming` (reqwest, fs, size mismatch);
-                // anything below the inference call is a model issue.
-                let chain = format!("{e:#}");
-                let looks_like_model_issue = e.is::<reqwest::Error>()
-                    || e.is::<std::io::Error>()
-                    || chain.contains("download")
-                    || chain.contains("size mismatch")
-                    || chain.contains("load whisper model");
-                if looks_like_model_issue {
-                    Response::Err(ApiError::WhisperModelUnavailable(chain))
-                } else {
-                    Response::Err(ApiError::WhisperInference(chain))
-                }
+            // Variant is the source of truth: `ModelUnavailable` means
+            // the desktop should surface "model couldn't be made
+            // available" (often retryable); `Inference` is "the model
+            // ran and rejected the audio" (not user-recoverable).
+            Err(transcribe::SttFailure::ModelUnavailable(e)) => {
+                Response::Err(ApiError::SttModelUnavailable(format!("{e:#}")))
+            }
+            Err(transcribe::SttFailure::Inference(e)) => {
+                Response::Err(ApiError::SttInference(format!("{e:#}")))
             }
         }
     }

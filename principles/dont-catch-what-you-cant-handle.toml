@@ -1,0 +1,28 @@
+title = "Don't Catch What You Can't Handle"
+description = '''
+Only catch (or match) an error when you have a real recovery strategy. Otherwise, propagate it up to a layer that does.
+
+## Why
+
+- Catching an error and logging it is not handling it — it's hiding it. The caller now thinks the operation succeeded.
+- "Swallowing" exceptions or `Err(_) => ()` patterns destroy the information needed to diagnose problems in production.
+- Wrapping every call in `try/catch` produces code where every operation looks fallible at every level, drowning the real recovery points in noise.
+- The right place to handle errors is usually high up — at the request boundary, the job boundary, the CLI entry point — not deep in business logic.
+
+## Apply
+
+- Default action on error: propagate (`?` in Rust, `throw` in Java/JS, `return err` in Go, rethrow elsewhere).
+- Catch when you have a *specific* alternative: retry with backoff, fall back to a cache, return a default to the user, log-and-continue *as a deliberate policy*.
+- When catching, name the specific error type/variant. Catching the bare top-level error/exception class is almost always wrong.
+- If you catch only to wrap-and-rethrow, make sure the wrapping adds context — otherwise just let it propagate.
+
+## Counter-cases
+
+- The top of a request handler, job runner, or main loop legitimately catches everything to log and convert to a user-facing response. That's the *one* place a broad catch belongs.
+- Some FFI or platform boundaries require catching to translate between error models.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

@@ -1,7 +1,7 @@
 {
   "entry": "index.html",
   "permissions": [],
-  "capabilities": ["receive_transcription", "tts"],
+  "capabilities": ["receive_transcription", "tts", "sub_agents"],
   "display_name": "Chat",
   "icon": "💬"
 }

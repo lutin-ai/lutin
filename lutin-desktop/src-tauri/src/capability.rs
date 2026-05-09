@@ -22,6 +22,14 @@ pub const RECEIVE_TRANSCRIPTION: &str = "receive_transcription";
 #[allow(dead_code)]
 pub const TTS: &str = "tts";
 
+/// Workflow opts in to publishing a sub-agent hierarchy that chrome
+/// renders in its sidebar (chat workflow today). Without this,
+/// the shim doesn't expose `lutin.publishSubAgents` /
+/// `onSelectSubAgent` and chrome ignores `sub-agents-update`
+/// envelopes — same shape as `TTS`/`RECEIVE_TRANSCRIPTION`.
+#[allow(dead_code)]
+pub const SUB_AGENTS: &str = "sub_agents";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,5 +42,6 @@ mod tests {
     fn capability_string_values_are_stable() {
         assert_eq!(RECEIVE_TRANSCRIPTION, "receive_transcription");
         assert_eq!(TTS, "tts");
+        assert_eq!(SUB_AGENTS, "sub_agents");
     }
 }

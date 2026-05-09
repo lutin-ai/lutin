@@ -34,6 +34,13 @@
   --chat-err-soft: var(--err-soft, rgba(184, 106, 106, 0.14));
   --chat-err-border: var(--err-border, rgba(184, 106, 106, 0.30));
 
+  /* Status ramp consumed by the live ctx readout in the composer
+   * footer. Defaults track muted, low-saturation tones so they sit
+   * comfortably alongside the dim metadata text; the host can
+   * override `--ok` / `--warn` to retune. */
+  --chat-ok:   var(--ok,   #6abf7a);
+  --chat-warn: var(--warn, #c9a84a);
+
   --chat-user-bg: var(--chat-accent-soft);
   --chat-user-border: var(--accent-line, rgba(232, 116, 59, 0.32));
   --chat-assistant-bg: transparent;
@@ -123,11 +130,31 @@
   flex: 1;
   overflow-y: auto;
   padding: 28px 32px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
   min-height: 0;
 }
+
+/* Inner spacer driven by the virtualizer's getTotalSize(); virtual
+ * rows are absolutely positioned inside it. The 24px row gap that
+ * used to live on the flex parent now hangs off each row's bottom
+ * padding (see .lutin-chat__vrow). */
+.lutin-chat__virt {
+  position: relative;
+  width: 100%;
+}
+
+.lutin-chat__vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding-bottom: 24px;
+}
+
+/* Inside a non-flex wrapper, recreate the "centered column with
+ * per-message cross-axis alignment" that the old gap-flex parent
+ * provided. The msg becomes the flex container; its children are the
+ * meta row and the bubble. */
+.lutin-chat__vrow > .lutin-chat__msg { margin: 0 auto; }
 
 .lutin-chat__error {
   margin: var(--chat-s-2) var(--chat-s-5);

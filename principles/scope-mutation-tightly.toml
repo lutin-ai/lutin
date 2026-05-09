@@ -1,0 +1,28 @@
+title = "Scope Mutation Tightly"
+description = '''
+Where mutation is necessary, keep it local, brief, and contained. Long-lived mutable state is where bugs live.
+
+## Why
+
+- A mutable variable that lives for three lines is trivial to reason about. One that lives across a 200-line function or a whole module is not.
+- Tightly-scoped mutation lets you "freeze" the result and treat it as immutable from then on — the rest of the function reads a stable value.
+- Lock duration mirrors mutation scope: a lock held for one statement is fine; a lock held across `.await` or across half a function is a bug waiting to happen.
+- Tight scopes localize blast radius. A bug in mutation that spans 5 lines is a 5-line search; one that spans a class is a debugging session.
+
+## Apply
+
+- Build-then-freeze: accumulate into a mutable buffer/builder in a small block, then return or assign to an immutable binding.
+- Lock, mutate, drop the guard, then do other work. Never hold a lock longer than the critical section requires.
+- Never hold a lock across an `.await`, an I/O call, or any operation that can block — if you must, restructure so the I/O happens with the lock dropped.
+- Prefer `let result = { let mut x = ...; ...; x }` patterns to declaring `let mut` at the top and mutating throughout.
+
+## Counter-cases
+
+- Genuinely long-lived state machines (a connection, a parser) require their mutable state to live as long as they do — encapsulate it in an object/task that owns it.
+- Performance-critical code reusing buffers across iterations is fine; the mutation is "tight" in a different sense (one buffer, one owner).'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

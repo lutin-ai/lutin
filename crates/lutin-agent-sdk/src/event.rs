@@ -12,7 +12,27 @@ pub enum AgentEvent {
     AssistantText(String),
     AssistantReasoning(String),
     AssistantMessage(lutin_llm::Message),
-    ToolCallStarted(Arc<lutin_llm::ToolCall>),
+    /// Provider opened a tool-call block. Fired as soon as the LLM
+    /// stream announces the call (id + name); arguments are still
+    /// streaming and will arrive via [`AgentEvent::ToolCallArgsDelta`].
+    /// Hosts can render an in-progress placeholder against `id`.
+    ToolCallStreaming {
+        id: lutin_llm::CallId,
+        name: lutin_llm::ToolName,
+    },
+    /// Incremental fragment of the tool call's `arguments` JSON, in
+    /// stream order. Concatenating the fragments for a given `id`
+    /// yields the raw JSON the model emitted; the agent SDK parses it
+    /// internally and emits [`AgentEvent::ToolCallArgsParsed`] when
+    /// the stream end is reached.
+    ToolCallArgsDelta {
+        id: lutin_llm::CallId,
+        args: String,
+    },
+    /// All argument fragments for `call.id` are in and parsed; the
+    /// agent is about to dispatch the tool. This is the moment hosts
+    /// should start a duration timer.
+    ToolCallArgsParsed(Arc<lutin_llm::ToolCall>),
     ToolCallCompleted {
         call: Arc<lutin_llm::ToolCall>,
         outcome: ToolResult,

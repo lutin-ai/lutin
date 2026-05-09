@@ -20,6 +20,7 @@ lutin-auth.workspace = true
 lutin-keypair = { path = "../crates/lutin-keypair" }
 lutin-control-protocol = { path = "../crates/lutin-control-protocol" }
 lutin-tts = { path = "../crates/lutin-tts" }
+lutin-stt = { path = "../crates/lutin-stt" }
 lutin-storage = { path = "../crates/lutin-storage" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process", "fs", "signal"] }
 tokio-tungstenite = "0.29"
@@ -35,7 +36,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 libc = "0.2"
 dotenvy = "0.15"
 getrandom = "0.3"
-whisper-rs = { version = "0.16", features = ["vulkan"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 bytes = "1"
 dirs = "5"

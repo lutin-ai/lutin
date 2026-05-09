@@ -1,0 +1,29 @@
+title = "Prefer Stack Over Heap When Lifetime Is Local"
+description = '''
+If a value lives for the duration of a function call and isn't shared, keep it on the stack. Reach for `Box`, `new`, `make_unique`, etc. only when you need heap semantics.
+
+## Why
+
+- Stack allocation is effectively free: a register adjustment. Heap allocation involves an allocator call, potential lock contention, and later a free.
+- Stack-allocated values are cache-hot and contiguous with the function's other locals. Heap-allocated ones force a pointer indirection.
+- Heap allocations create lifetime obligations — who frees this, when, in what order — that the stack handles automatically via scope.
+- "Just `Box` it" is a common reflex from C# / Java / JS habits where everything is reference-typed by default; in systems languages it's measurable overhead.
+
+## Apply
+
+- Default to value types and stack locals. Reach for heap allocation when: the value is large (multi-KB), polymorphic (trait object / interface), shared across owners, or escapes the calling frame.
+- Reuse buffers across iterations instead of allocating per iteration in hot loops.
+- In Rust: prefer `T` over `Box<T>`, `[T; N]` or `&[T]` over `Vec<T>` when size is bounded, `&str` over `String`. In C++: prefer values and `std::array` to `new` and `std::vector` when the size is fixed.
+- Watch out for accidental heap allocation: closures that capture by move into `Box<dyn Fn>`, async state machines, recursive data types.
+
+## Counter-cases
+
+- Large values (multi-KB structs) on the stack risk overflow, especially in async tasks with small stacks — `Box` them.
+- Recursive data structures (trees, lists) require indirection by definition.
+- When the value's lifetime genuinely outlives the current frame, owning it on the heap is correct.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use lutin_control_protocol::{WhisperConfig, WorkflowId};
+use lutin_control_protocol::{SttConfig, WorkflowId};
 use serde::{Deserialize, Serialize};
 
 /// One named control-panel endpoint.
@@ -84,10 +84,12 @@ pub struct DesktopSettings {
     /// callers wanting a sensible default for first-run UX can call
     /// `effective_keybinds()` instead which seeds a PTT default.
     pub keybinds: Vec<KeyBind>,
-    /// Local whisper.cpp settings — model file, language, beam size.
-    /// Defaults to large-v3-turbo with autodetect; first PTT after a
-    /// fresh install triggers the download.
-    pub whisper: WhisperConfig,
+    /// STT backend selection + per-backend prefs. Defaults to whisper
+    /// large-v3-turbo with autodetect; first PTT after a fresh install
+    /// triggers the model download. Switching to Parakeet is just a
+    /// `{ "kind": "parakeet", "model": "tdt-0.6b-v3" }` swap here —
+    /// CP downloads the ONNX bundle on first use.
+    pub stt: SttConfig,
     /// Pinned input/output devices. Defaults to host defaults.
     pub audio: AudioSettings,
 }

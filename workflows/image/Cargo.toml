@@ -1,0 +1,38 @@
+[package]
+name = "image_workflow"
+edition = "2024"
+version = "0.1.0"
+
+# Standalone crate — workflows are deliberately NOT workspace members
+# (see PLAN.md). The empty [workspace] table tells cargo to treat this
+# crate as its own workspace root rather than walk up to the parent.
+[workspace]
+
+[[bin]]
+name = "image"
+path = "src/engine.rs"
+
+[lib]
+# `image` clashes with the popular image-processing crate, so we name
+# the library `image_workflow` for crate-resolution purposes; the
+# binary still ships as `image` per the [[bin]] above.
+name = "image_workflow"
+path = "src/lib.rs"
+
+[dependencies]
+lutin-auth = { path = "../../crates/lutin-auth" }
+lutin-keypair = { path = "../../crates/lutin-keypair" }
+lutin-protocol = { path = "../../crates/lutin-protocol" }
+
+anyhow = "1"
+base64 = "0.22"
+futures-util = "0.3"
+postcard = { version = "1.1.3", features = ["alloc"] }
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52", features = ["full"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

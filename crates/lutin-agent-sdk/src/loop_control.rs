@@ -19,7 +19,7 @@ pub enum ToolCallOutcome {
 
 /// Record of a completed tool call within a round; passed to custom stop predicates
 /// so they can decide based on which tools fired. Arguments are intentionally
-/// omitted — hosts that need them can snapshot from `AgentEvent::ToolCallStarted`.
+/// omitted — hosts that need them can snapshot from `AgentEvent::ToolCallArgsParsed`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ToolCallRecord {
@@ -90,7 +90,7 @@ pub struct LoopConfig {
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
-            max_rounds: 32,
+            max_rounds: 128,
             stop_condition: StopCondition::NoToolCalls,
             loop_detection: LoopDetection::Disabled,
             recovery: RecoveryPolicy::FailFast,

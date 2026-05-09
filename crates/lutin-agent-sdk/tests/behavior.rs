@@ -112,7 +112,7 @@ async fn approval_deny_emits_started_before_completed() {
     }
     let _ = agent.join().await;
 
-    let started_idx = events.iter().position(|e| matches!(e, AgentEvent::ToolCallStarted(_)));
+    let started_idx = events.iter().position(|e| matches!(e, AgentEvent::ToolCallArgsParsed(_)));
     let completed_idx = events
         .iter()
         .position(|e| matches!(e, AgentEvent::ToolCallCompleted { .. }));

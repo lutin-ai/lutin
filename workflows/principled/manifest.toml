@@ -1,0 +1,5 @@
+name = "Principled"
+description = "Chat workflow with reviewer-gated tool calls"
+
+[runtime]
+kind = "binary"

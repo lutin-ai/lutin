@@ -1,0 +1,28 @@
+title = "Test Behavior, Not Implementation"
+description = '''
+Assert what the code *does* — its outputs, returned values, and observable effects. Don't assert *how* it does it: which helpers it calls, in what order, with what intermediate state.
+
+## Why
+
+- Implementation tests break on every refactor that doesn't change behavior. They make the code more expensive to improve, not less.
+- Mock-heavy tests assert that the system-under-test made specific calls — they verify the test's model of the code, not the code's correctness. The real bug walks past unnoticed.
+- Behavior tests survive rewrites. You can swap the entire implementation and the tests still tell you whether the result is right.
+- "100% coverage" with implementation tests is a worse signal than 60% coverage with behavior tests, because the high-coverage suite resists the changes you most need to make.
+
+## Apply
+
+- Test through the public API. Inputs in, outputs out. Effects observed at the boundary (DB row, HTTP response, file written), not at the seam between two private functions.
+- Prefer real dependencies (in-memory DBs, fakes, test containers) over mocks where feasible. Reserve mocks for things that are genuinely external and slow/expensive (third-party APIs).
+- When a test fails, it should point at a behavior the user cares about. If a test fails because "the cache method was called 3 times instead of 2," ask whether that's actually a bug.
+- Refactor your tests with your code. Tests are code; they rot too.
+
+## Counter-cases
+
+- Some narrow unit tests of pure functions essentially are behavior tests of small units — that's fine.
+- For genuinely effect-driven code (a logger, a metrics sink), the call *is* the observable behavior. Test the call.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

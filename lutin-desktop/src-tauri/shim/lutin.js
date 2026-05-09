@@ -8,9 +8,12 @@
 //   chrome → iframe: { kind: "response", request_id, body | error }
 //                  | { kind: "broadcast", body }
 //                  | { kind: "transcription", text, source }
+//                  | { kind: "select-sub-agent", id }
 //   iframe → chrome: { kind: "request", request_id, body }
 //                  | { kind: "tts-call", request_id, method, args }
 //                  | { kind: "notification", title?, body }
+//                  | { kind: "sub-agents-update", agents }
+//                  | { kind: "session-summary-update", summary }
 // `tts-call` and `request` share the same request_id space + pending
 // map; chrome replies with `{ kind: "response", ... }` for both.
 (function () {
@@ -24,6 +27,11 @@
     const pending = new Map();
     const broadcastHandlers = new Set();
     const transcriptionHandlers = new Set();
+    // Only populated when the workflow declared `sub_agents` in its
+    // manifest; otherwise the chrome filters out `select-sub-agent`
+    // messages on the receive side too, so this set never sees a
+    // dispatch.
+    const selectSubAgentHandlers = new Set();
 
     port.onmessage = function (e) {
       const msg = e.data;
@@ -38,6 +46,13 @@
       }
       if (msg.kind === "broadcast") {
         for (const h of broadcastHandlers) h(msg.body);
+        return;
+      }
+      if (msg.kind === "select-sub-agent") {
+        // Chrome-driven sub-agent selection. Plugins that don't render
+        // a sub-agent surface (most workflows) simply don't subscribe;
+        // the message lands and is dropped.
+        for (const h of selectSubAgentHandlers) h(msg.id);
         return;
       }
       if (msg.kind === "transcription") {
@@ -56,6 +71,7 @@
     // Strings must match Rust `capability::*`.
     const hasReceiveTranscription = caps.indexOf("receive_transcription") >= 0;
     const hasTts = caps.indexOf("tts") >= 0;
+    const hasSubAgents = caps.indexOf("sub_agents") >= 0;
 
     const api = Object.assign({}, init, {
       request: function (body) {
@@ -72,6 +88,15 @@
       notify: function (body, title) {
         port.postMessage({ kind: "notification", body: body, title: title });
       },
+      // Session-level live counters (ctx fill + cumulative provider
+      // tokens). Always exposed — the chrome's sidebar wants them
+      // for every workflow, so this isn't capability-gated. Plugins
+      // call this once per `summaryUpdated` broadcast they observe;
+      // there's no "clear back to not-yet-known" sentinel — a session
+      // that hasn't seen a usage report simply doesn't post.
+      publishSummary: function (summary) {
+        port.postMessage({ kind: "session-summary-update", summary: summary });
+      },
     });
 
     // Only expose `onTranscription` when the manifest opted in.
@@ -82,6 +107,21 @@
       api.onTranscription = function (cb) {
         transcriptionHandlers.add(cb);
         return function () { transcriptionHandlers.delete(cb); };
+      };
+    }
+
+    // Sub-agent surface: only expose when the manifest declares
+    // `"sub_agents"`. Same shape as the TTS / transcription gates —
+    // chrome filters incoming `select-sub-agent` deliveries on the
+    // capability too, so a non-declaring workflow can't observe
+    // chrome's selection state.
+    if (hasSubAgents) {
+      api.publishSubAgents = function (agents) {
+        port.postMessage({ kind: "sub-agents-update", agents: agents });
+      };
+      api.onSelectSubAgent = function (cb) {
+        selectSubAgentHandlers.add(cb);
+        return function () { selectSubAgentHandlers.delete(cb); };
       };
     }
 

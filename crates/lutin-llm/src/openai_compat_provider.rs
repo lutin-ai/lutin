@@ -17,10 +17,17 @@ use super::{
 /// Conservative defaults: forward `response_format` (broadly supported),
 /// skip OpenRouter-specific routing/reasoning extensions which most
 /// generic endpoints reject as unknown fields.
+///
+/// `include_chat_template_thinking_kwarg` is on because this provider
+/// targets vLLM-class endpoints, where `chat_template_kwargs.enable_thinking`
+/// is the canonical knob for Qwen3.x and similar thinking models. Without
+/// it, those models reason out loud in `content` until they hit
+/// `max_tokens`, never reaching tool calls.
 const QUIRKS: OpenAiCompatQuirks = OpenAiCompatQuirks {
     include_reasoning: false,
     include_response_format: true,
     include_ignore_providers: false,
+    include_chat_template_thinking_kwarg: true,
 };
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,29 @@
+title = "Avoid Nullable / Optional Sprawl"
+description = '''
+`Option<Option<T>>`, `T | null | undefined`, and structs full of independently-nullable fields are signs the type isn't modeling the domain — it's modeling the author's uncertainty.
+
+## Why
+
+- Each nullable field doubles the number of states the type can be in. Five independent `Option` fields = 32 combinations, most of which are illegal.
+- Callers end up writing nested `if let Some(...) = ... { if let Some(...) = ... { ... } }` ladders to handle states that often can't actually occur.
+- Doubly-optional types (`Option<Option<T>>`, `T??`) almost always indicate two different "absent" meanings ("not loaded yet" vs "loaded and empty") that should be a real enum.
+- Nullable everywhere is the type-system equivalent of `Object` everywhere: it compiles, but it carries no information.
+
+## Apply
+
+- If multiple optional fields must be set together, group them into one struct that's either fully present or absent (`Option<UserDetails>` instead of three separate `Option`s).
+- If you find `Option<Option<T>>`, define an enum that names the three real states.
+- Replace nullable booleans with three-variant enums.
+- At parse time, collapse `T | null | undefined | ""` into one canonical representation.
+- Push optionality to the outermost type that can carry it, not into every field.
+
+## Counter-cases
+
+- Genuinely independent optional fields (e.g. user profile with optional bio, optional avatar, optional pronouns) are fine as separate `Option`s.
+- Wire formats and partial-update payloads (PATCH bodies) legitimately have many independently-optional fields — but parse them into a stricter internal type as soon as possible.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

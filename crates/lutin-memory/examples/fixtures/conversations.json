@@ -1,0 +1,793 @@
+{
+  "chats": [
+    {
+      "external_id": "chat-rust-compile-debug",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "I'm getting a weird borrow checker error in crates/memory/src/store.rs. Can you take a look?",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Sure. Let me read the file and the error first. Can you paste the cargo output?",
+          "delta_ms": 4200
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "error[E0502]: cannot borrow `self.events` as mutable because it is also borrowed as immutable",
+          "delta_ms": 18000
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"crates/memory/src/store.rs\", \"range\": \"40-120\"}",
+          "delta_ms": 1100
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "pub fn flush(&mut self) {\n    let last = self.events.last();\n    if let Some(e) = last {\n        self.events.push(e.clone());\n    }\n}",
+          "delta_ms": 480
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Found it. You hold an immutable ref via `last` while pushing. Clone the event before the push or scope the borrow with a block.",
+          "delta_ms": 6200
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Right, classic. Let me try cloning into a local first.",
+          "delta_ms": 12500
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:bash",
+          "content": "{\"cmd\": \"cargo check -p memory\"}",
+          "delta_ms": 22000
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:bash",
+          "content": "    Checking memory v0.1.0 (/home/enander/projects/lutin/crates/memory)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.84s",
+          "delta_ms": 1900
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Compiles. Thanks!",
+          "delta_ms": 3400
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Nice. Worth adding a test that exercises flush on a non-empty buffer so this doesn't regress.",
+          "delta_ms": 4800
+        },
+        {
+          "event_type": "note",
+          "source": "william",
+          "content": "TODO: add regression test for store.flush — assigned to alice",
+          "delta_ms": 9100
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Filed it. Moving on.",
+          "delta_ms": 7200
+        }
+      ]
+    },
+    {
+      "external_id": "chat-q4-launch-planning",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Kickoff for the Q4 launch. We need a rough timeline by Friday.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "What are the must-have features versus stretch goals?",
+          "delta_ms": 5400
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Must: workflow editor, persona library, billing. Stretch: shared workspaces.",
+          "delta_ms": 24000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Suggest splitting into three milestones: M1 editor (3w), M2 personas + billing (4w), M3 polish/QA (2w). Shared workspaces slot into M3 if capacity allows.",
+          "delta_ms": 11200
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "Billing in 4 weeks is tight. Stripe integration alone took 3 weeks last time.",
+          "delta_ms": 16800
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Fair. Reuse the Phoenix migration billing adapter? Carol mentioned it was extracted into a shared crate.",
+          "delta_ms": 7900
+        },
+        {
+          "event_type": "user_message",
+          "source": "carol",
+          "content": "Yes, the adapter is in shared/billing. Needs a thin wrapper for Lutin's plan tiers but core is solid.",
+          "delta_ms": 21000
+        },
+        {
+          "event_type": "note",
+          "source": "system",
+          "content": "Decision: reuse shared/billing adapter from Phoenix migration for Q4 launch.",
+          "delta_ms": 5500
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Good. Bob, can you scope the wrapper this week?",
+          "delta_ms": 8200
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "On it. Will have an estimate by Wednesday.",
+          "delta_ms": 13700
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "I'll draft the milestone doc and circulate before Friday.",
+          "delta_ms": 4100
+        },
+        {
+          "event_type": "note",
+          "source": "alice",
+          "content": "Owners: M1 = dan, M2 = bob, M3 = alice. Review every Monday 10:00.",
+          "delta_ms": 19500
+        },
+        {
+          "event_type": "user_message",
+          "source": "dan",
+          "content": "Acknowledged on M1. I'll need a designer pass on the editor by week 2.",
+          "delta_ms": 14200
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Logged. Adding design dependency to M1 risks list.",
+          "delta_ms": 3800
+        }
+      ]
+    },
+    {
+      "external_id": "chat-pr-review-auth",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "dan",
+          "content": "Can you review my PR? It's the auth refactor in engine/src/handler/auth.rs.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"engine/src/handler/auth.rs\"}",
+          "delta_ms": 3200
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "pub async fn login(req: LoginReq) -> Result<Session> {\n    let user = db::find_user(&req.email).await?;\n    if user.password_hash == hash(&req.password) {\n        Ok(Session::new(user.id))\n    } else {\n        Err(AuthError::Invalid)\n    }\n}",
+          "delta_ms": 510
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "Two issues. (1) Direct equality on hashes is timing-attackable — use constant_time_eq. (2) `hash()` looks unsalted; confirm it's argon2 with per-user salt.",
+          "delta_ms": 9300
+        },
+        {
+          "event_type": "user_message",
+          "source": "dan",
+          "content": "Hash function uses argon2id with salt stored alongside, that part's fine. Will swap the comparison.",
+          "delta_ms": 27000
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:grep",
+          "content": "{\"pattern\": \"constant_time_eq\", \"path\": \"engine/\"}",
+          "delta_ms": 2400
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:grep",
+          "content": "engine/src/crypto.rs:14: pub use subtle::ConstantTimeEq;\nengine/src/handler/session.rs:88:     if token.ct_eq(&expected).into() {",
+          "delta_ms": 320
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "subtle::ConstantTimeEq already in scope via crypto.rs. Just import and use `.ct_eq()`.",
+          "delta_ms": 4600
+        },
+        {
+          "event_type": "user_message",
+          "source": "dan",
+          "content": "Done. Also added a rate limiter on the login route.",
+          "delta_ms": 41000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "Per-IP or per-account? Per-IP alone lets distributed attempts through.",
+          "delta_ms": 5800
+        },
+        {
+          "event_type": "user_message",
+          "source": "dan",
+          "content": "Both, with Redis-backed counters. 5/min per account, 30/min per IP.",
+          "delta_ms": 19200
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "Solid. LGTM after the ct_eq change is pushed.",
+          "delta_ms": 3400
+        },
+        {
+          "event_type": "note",
+          "source": "dan",
+          "content": "Followup: audit other handlers for unsafe hash comparisons.",
+          "delta_ms": 8700
+        }
+      ]
+    },
+    {
+      "external_id": "chat-meeting-summary-standup",
+      "events": [
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Alice: alright let's do standup, dan you start.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Dan: yesterday I finished the auth refactor PR, dependent on review from carol today.",
+          "delta_ms": 4800
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Dan: today I'm starting on the workflow editor M1 scope doc.",
+          "delta_ms": 5200
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Carol: I'll prioritize dan's PR after standup. Yesterday I migrated the billing adapter docs.",
+          "delta_ms": 6700
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Carol: blocker — the staging Postgres is still on 13, need it on 15 for the new index types.",
+          "delta_ms": 4100
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Bob: I can take the upgrade, was planning to touch staging anyway.",
+          "delta_ms": 3800
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Alice: great. I'm in interviews most of today, async otherwise.",
+          "delta_ms": 5600
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Bob: one heads up, sqlite tests are flaky on CI, opened an issue.",
+          "delta_ms": 7300
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Dan: I saw that, I think it's the temp dir cleanup race. Will look after the doc.",
+          "delta_ms": 6400
+        },
+        {
+          "event_type": "transcription",
+          "source": "mic:room-1",
+          "content": "Alice: anything else? Okay, ending here.",
+          "delta_ms": 4900
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Summarize the standup and list owners + blockers.",
+          "delta_ms": 32000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Summary:\n- Dan: finished auth PR, awaiting Carol review; starts workflow editor M1 doc today.\n- Carol: reviewing dan's PR; blocker — staging Postgres on 13, needs 15.\n- Bob: taking the Postgres 13->15 upgrade. Flagged flaky sqlite CI tests.\n- Alice: in interviews, async.\n\nBlockers: Postgres upgrade (Bob), CI sqlite flake (Dan investigating).",
+          "delta_ms": 7800
+        },
+        {
+          "event_type": "note",
+          "source": "alice",
+          "content": "Action items captured. Posting to #standup channel.",
+          "delta_ms": 11400
+        }
+      ]
+    },
+    {
+      "external_id": "chat-data-analysis-churn",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "carol",
+          "content": "Need to understand why churn spiked in March on Lutin Pro tier.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "Do you have the cancellation events exported? I'd start by bucketing by signup cohort and account age at cancel.",
+          "delta_ms": 5200
+        },
+        {
+          "event_type": "user_message",
+          "source": "carol",
+          "content": "Yeah, dumped to data/churn_march.csv.",
+          "delta_ms": 14000
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:bash",
+          "content": "{\"cmd\": \"wc -l data/churn_march.csv && head -3 data/churn_march.csv\"}",
+          "delta_ms": 1800
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:bash",
+          "content": "428 data/churn_march.csv\nuser_id,signup_date,cancel_date,plan,reason\n8821,2024-09-12,2026-03-04,pro,price\n8843,2024-10-01,2026-03-09,pro,unused",
+          "delta_ms": 250
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:bash",
+          "content": "{\"cmd\": \"awk -F, 'NR>1 {print $5}' data/churn_march.csv | sort | uniq -c | sort -rn\"}",
+          "delta_ms": 900
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:bash",
+          "content": "  189 price\n  112 unused\n   58 missing_feature\n   42 switched\n   27 other",
+          "delta_ms": 180
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "44% cite price, 26% unused. Did the price increase land in February? That timing is suspicious.",
+          "delta_ms": 6100
+        },
+        {
+          "event_type": "user_message",
+          "source": "carol",
+          "content": "Yes, Pro went from $19 to $29 on Feb 15. Annual renewals hit in March.",
+          "delta_ms": 22000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "Then 'price' churn is largely renewal-shock, not steady-state. Recommend separating involuntary (annual renewal at new price) from voluntary monthly churn before drawing conclusions.",
+          "delta_ms": 8400
+        },
+        {
+          "event_type": "user_message",
+          "source": "carol",
+          "content": "Good point. Can you draft the breakdown query?",
+          "delta_ms": 11700
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:researcher",
+          "content": "SELECT CASE WHEN billing_cycle='annual' AND cancel_date BETWEEN renewal_date AND renewal_date+'7d' THEN 'renewal_shock' ELSE 'voluntary' END as kind, count(*) FROM cancellations WHERE cancel_date >= '2026-03-01' GROUP BY 1;",
+          "delta_ms": 9300
+        },
+        {
+          "event_type": "note",
+          "source": "carol",
+          "content": "Insight: March churn likely inflated by annual renewal cohort hitting new $29 price.",
+          "delta_ms": 14000
+        }
+      ]
+    },
+    {
+      "external_id": "chat-docs-memory-crate",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "I want to write a README for crates/memory. What should it cover?",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Standard sections: purpose, model (events + chats), public API, storage backend, examples. Want me to scan the crate first?",
+          "delta_ms": 5400
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Yes please.",
+          "delta_ms": 4200
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"crates/memory/src/lib.rs\"}",
+          "delta_ms": 600
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "pub mod store;\npub mod event;\npub mod query;\n\npub use event::{Event, EventType};\npub use store::Store;",
+          "delta_ms": 200
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"crates/memory/src/event.rs\", \"range\": \"1-40\"}",
+          "delta_ms": 700
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "pub enum EventType { UserMessage, AgentMessage, Transcription, ToolCall, ToolResult, Note }\npub struct Event { pub id: Uuid, pub chat_id: Uuid, pub kind: EventType, pub source: String, pub content: String, pub at: DateTime<Utc> }",
+          "delta_ms": 220
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Draft outline: 1) What it is — append-only event log per chat. 2) Core types — Event, EventType, Store. 3) Backends — sqlite default, postgres optional. 4) Querying — by chat, by source, by kind, by time range. 5) Example — fixture loader.",
+          "delta_ms": 7900
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Add a section on durability guarantees too.",
+          "delta_ms": 18500
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Will do — sqlite WAL mode, fsync on commit, and the in-memory backend explicitly marked non-durable.",
+          "delta_ms": 4800
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Perfect. Send the draft when ready.",
+          "delta_ms": 9600
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Drafting now, will paste in ~10 min.",
+          "delta_ms": 3200
+        }
+      ]
+    },
+    {
+      "external_id": "chat-refactor-auth-session",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "We should split engine/src/handler/auth.rs — it's grown to 800 lines.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "What logical groups exist? Login/logout, token refresh, password reset, MFA?",
+          "delta_ms": 5800
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Yes plus session management and OAuth callbacks.",
+          "delta_ms": 16000
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:grep",
+          "content": "{\"pattern\": \"pub async fn\", \"path\": \"engine/src/handler/auth.rs\"}",
+          "delta_ms": 1100
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:grep",
+          "content": "12: pub async fn login(...)\n88: pub async fn logout(...)\n134: pub async fn refresh(...)\n201: pub async fn reset_request(...)\n267: pub async fn reset_confirm(...)\n340: pub async fn mfa_enroll(...)\n412: pub async fn mfa_verify(...)\n488: pub async fn oauth_start(...)\n556: pub async fn oauth_callback(...)\n640: pub async fn session_info(...)\n712: pub async fn revoke_all(...)",
+          "delta_ms": 280
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "Suggest: handler/auth/login.rs, handler/auth/reset.rs, handler/auth/mfa.rs, handler/auth/oauth.rs, handler/auth/session.rs. mod.rs re-exports.",
+          "delta_ms": 6700
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Agreed. Any shared state to thread through?",
+          "delta_ms": 14200
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "AuthCtx with db pool + Redis client + crypto config. Pass by &Arc<AuthCtx>. Avoids each submodule reaching into the global app state.",
+          "delta_ms": 7100
+        },
+        {
+          "event_type": "note",
+          "source": "alice",
+          "content": "Decision: refactor into auth/ subdir with AuthCtx shared state. Dan owns.",
+          "delta_ms": 12500
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Will the OAuth callback need anything special?",
+          "delta_ms": 8800
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:writer",
+          "content": "It needs the HTTP client for token exchange — extend AuthCtx with an HttpClient field, or take it as a separate param if you want to keep AuthCtx pure.",
+          "delta_ms": 6400
+        },
+        {
+          "event_type": "user_message",
+          "source": "alice",
+          "content": "Keep AuthCtx pure. Pass the client where needed.",
+          "delta_ms": 11000
+        }
+      ]
+    },
+    {
+      "external_id": "chat-brainstorm-features",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "Free-form: what are the highest-leverage features we could add to Lutin in the next quarter?",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "A few candidates: cross-chat memory recall, voice-first capture, scheduled workflows, shared persona libraries, browser extension for context capture.",
+          "delta_ms": 7600
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "Cross-chat memory is the one users keep asking for. What does it cost to build?",
+          "delta_ms": 21000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Foundations already exist via crates/memory event log. Need: embedding index over events, retrieval API, UI surface. Estimate 3-4 weeks for v1.",
+          "delta_ms": 8200
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "What backend for the embedding index?",
+          "delta_ms": 11400
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "If you stay on PostgreSQL, pgvector is the lowest-friction. If you want decoupling, Qdrant. Given the team already runs Postgres, pgvector wins on ops cost.",
+          "delta_ms": 6900
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "We use sqlite locally though — does pgvector work there?",
+          "delta_ms": 18000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "No, pgvector is Postgres-only. For sqlite-local, sqlite-vec is the closest analog. You'd abstract behind a VectorStore trait with two impls.",
+          "delta_ms": 7400
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "Fine. What about voice-first capture?",
+          "delta_ms": 13800
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Higher build cost — needs reliable on-device transcription, push-to-talk UX, calibration. Probably 6+ weeks. Lower urgency than memory recall.",
+          "delta_ms": 7800
+        },
+        {
+          "event_type": "user_message",
+          "source": "bob",
+          "content": "Okay, let's anchor on cross-chat memory for the quarter.",
+          "delta_ms": 9500
+        },
+        {
+          "event_type": "note",
+          "source": "bob",
+          "content": "Decision: Q-prio = cross-chat memory. Stack = pgvector (server) + sqlite-vec (local) behind VectorStore trait.",
+          "delta_ms": 14200
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:planner",
+          "content": "Logged. I'll draft an RFC outline tomorrow and circulate to alice and carol.",
+          "delta_ms": 5300
+        }
+      ]
+    },
+    {
+      "external_id": "chat-bug-openrouter-streaming",
+      "events": [
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "OpenRouter streaming responses are getting truncated mid-message in the chat view. Started after the Phoenix migration merge.",
+          "delta_ms": 0
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:debugger",
+          "content": "Truncated where — UI side or before the bytes leave the engine? Any error in the logs?",
+          "delta_ms": 6200
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "No error. Just stops. Logs show the SSE stream closing cleanly around 2-4kb in.",
+          "delta_ms": 22000
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"crates/llm/src/openrouter.rs\", \"range\": \"80-160\"}",
+          "delta_ms": 480
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "async fn stream_chunks(resp: Response) -> Result<impl Stream<Item=Chunk>> {\n    let mut buf = BytesMut::with_capacity(4096);\n    let stream = resp.bytes_stream().map(move |b| {\n        buf.extend_from_slice(&b?);\n        if let Some(idx) = find_event_boundary(&buf) {\n            let frame = buf.split_to(idx);\n            parse_sse(&frame)\n        } else { Ok(Chunk::Pending) }\n    });\n    Ok(stream)\n}",
+          "delta_ms": 320
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:debugger",
+          "content": "Hypothesis 1: capacity 4096 caps the buffer. But BytesMut grows, so likely not it. Let me check the boundary parser.",
+          "delta_ms": 7100
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:grep",
+          "content": "{\"pattern\": \"find_event_boundary\", \"path\": \"crates/llm/src/\"}",
+          "delta_ms": 240
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:grep",
+          "content": "crates/llm/src/openrouter.rs:142: fn find_event_boundary(buf: &[u8]) -> Option<usize> {\ncrates/llm/src/openrouter.rs:143:     buf.windows(2).position(|w| w == b\"\\n\\n\").map(|i| i + 2)\ncrates/llm/src/context.rs:88:     // see openrouter::find_event_boundary",
+          "delta_ms": 180
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:debugger",
+          "content": "OpenRouter sends keep-alive comments as `: ping\\n\\n`. Parser splits on \\n\\n but only consumes one frame per chunk callback. If two boundaries arrive in one TCP read, second is lost on next iteration because buf is split only once. Could be it.",
+          "delta_ms": 9800
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:bash",
+          "content": "{\"cmd\": \"cargo test -p llm openrouter::tests::stream -- --nocapture\"}",
+          "delta_ms": 320
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:bash",
+          "content": "running 1 test\ntest openrouter::tests::stream_multi_event ... FAILED\n\nfailures:\n---- openrouter::tests::stream_multi_event stdout ----\nassertion failed: got 1 chunk, expected 3\nthread 'openrouter::tests::stream_multi_event' panicked at crates/llm/src/openrouter.rs:284",
+          "delta_ms": 2400
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:debugger",
+          "content": "Confirmed. Multi-event chunk drops 2 of 3 frames. Truncation = first `[DONE]` sentinel parsed before real content frames behind it.",
+          "delta_ms": 5400
+        },
+        {
+          "event_type": "note",
+          "source": "agent:debugger",
+          "content": "Root cause: openrouter.rs::stream_chunks parses only one SSE frame per inbound TCP chunk; subsequent frames in the same chunk are discarded. Regression introduced when Phoenix migration replaced the futures::stream::unfold loop with a flat .map().",
+          "delta_ms": 4200
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:read_file",
+          "content": "{\"path\": \"crates/llm/src/openrouter.rs\", \"range\": \"80-100\"}",
+          "delta_ms": 220
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:read_file",
+          "content": "async fn stream_chunks(resp: Response) -> Result<impl Stream<Item=Chunk>> {\n    let mut buf = BytesMut::with_capacity(4096);\n    let stream = resp.bytes_stream().map(move |b| { ... });",
+          "delta_ms": 140
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:write_file",
+          "content": "{\"path\": \"crates/llm/src/openrouter.rs\", \"patch\": \"replace .map with try_unfold that drains all complete frames from buf before awaiting next bytes\"}",
+          "delta_ms": 540
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:write_file",
+          "content": "wrote 38 lines to crates/llm/src/openrouter.rs",
+          "delta_ms": 90
+        },
+        {
+          "event_type": "tool_call",
+          "source": "tool:bash",
+          "content": "{\"cmd\": \"cargo test -p llm openrouter::tests\"}",
+          "delta_ms": 280
+        },
+        {
+          "event_type": "tool_result",
+          "source": "tool:bash",
+          "content": "running 4 tests\ntest openrouter::tests::stream_single_event ... ok\ntest openrouter::tests::stream_multi_event ... ok\ntest openrouter::tests::stream_keepalive ... ok\ntest openrouter::tests::stream_partial_frame ... ok\n\ntest result: ok. 4 passed; 0 failed",
+          "delta_ms": 3100
+        },
+        {
+          "event_type": "user_message",
+          "source": "william",
+          "content": "Pulled and reproduced — full responses now land in the UI. Fix verified.",
+          "delta_ms": 48000
+        },
+        {
+          "event_type": "agent_message",
+          "source": "agent:debugger",
+          "content": "Fixed. Drain loop in stream_chunks resolves the multi-frame truncation. Suggest carol cherry-pick this onto the release branch given Phoenix migration is already shipping.",
+          "delta_ms": 5800
+        }
+      ]
+    }
+  ]
+}

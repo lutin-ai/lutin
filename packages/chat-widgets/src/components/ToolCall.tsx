@@ -5,7 +5,12 @@ import { MetricsHeader } from "./MessageBubble";
 export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
   const showActions = message.state === "pending" && (onApprove || onDeny);
-  const summary = argPreview(message.args);
+  const summary =
+    message.args.kind === "parsed"
+      ? argPreview(message.args.value)
+      : message.args.raw.length > 0
+        ? truncate(message.args.raw.replace(/\s+/g, " "), MAX_PREVIEW)
+        : null;
   const resultBody =
     message.state === "failed" && message.error
       ? message.error
@@ -43,10 +48,18 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
       </button>
       {expanded && (
         <div className="lutin-chat__tool-detail">
-          {hasArgs(message.args) && (
+          {message.args.kind === "parsed" && hasArgs(message.args.value) && (
             <>
               <div className="lutin-chat__tool-label">Input</div>
-              <ArgsView value={message.args} />
+              <ArgsView value={message.args.value} />
+            </>
+          )}
+          {message.args.kind === "streaming" && message.args.raw.length > 0 && (
+            // While the LLM is still streaming the call's input, show
+            // the raw partial JSON so users see args fill in live.
+            <>
+              <div className="lutin-chat__tool-label">Input</div>
+              <pre className="lutin-chat__tool-arg-json">{message.args.raw}</pre>
             </>
           )}
           {resultBody && (

@@ -1,0 +1,29 @@
+title = "Name Things for What They Are, Not Where They're Used"
+description = '''
+A name should describe the thing itself: what it is, what it returns, what it represents. Not its current caller, the ticket that introduced it, or where it happens to be used today.
+
+## Why
+
+- Names that reference callers (`parseConfigForStartup`, `userServiceForAdminPanel`) lie the moment a second caller appears — and they always do.
+- Context-bound names obscure the actual concept. `parseConfig` is reusable; `parseConfigForStartup` is a private joke between the writer and the original caller.
+- Names tied to tickets (`fixForBug1234`, `legacyAuthShim2023`) rot fast. The ticket is closed; the name remains.
+- Good names let the reader *predict* what a function does without reading it. Caller-bound names defeat that prediction.
+
+## Apply
+
+- Describe the input/output relationship: `parse_config`, `render_html`, `to_canonical_form`.
+- Describe invariants or guarantees the value carries: `SortedVec`, `NonEmpty`, `ValidatedEmail`.
+- Avoid: `helper`, `utils`, `manager`, `handler` (without further specificity), `processData`, `doTheThing`.
+- Avoid embedding caller, ticket, time, or version in names. Put that in the commit message and PR description.
+- If you can't name something well, the abstraction is probably wrong — try writing it concretely first.
+
+## Counter-cases
+
+- Domain-specific naming conventions (e.g. `OnUserLogin` event handlers) where the role *is* the thing.
+- Internal/private symbols where context is obvious from the surrounding scope.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

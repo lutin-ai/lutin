@@ -1,0 +1,29 @@
+title = "Parse, Don't Validate"
+description = '''
+At the boundary, convert untrusted input into a strict, typed value once. After that, trust the type — don't re-check the same invariants in every function that touches it.
+
+## Why
+
+- Validation that returns `bool` throws away the proof. The next function has to validate again, or hope someone did.
+- Parsing returns a *new type* that can only exist if the check passed. The proof is the value.
+- Re-validation is a smell: every duplicated check is a place where the rules can drift apart.
+- Centralizing the parse step makes input handling auditable. Scattered `if (x.isValid())` checks make it impossible.
+
+## Apply
+
+- At the edge (HTTP handler, file loader, CLI parser), parse raw input into a domain type: `parse_email(s: &str) -> Result<Email, _>`, not `is_valid_email(s: &str) -> bool`.
+- Internal functions take `Email`, not `String`. They cannot be called with garbage.
+- Use smart constructors / private constructors so the only way to build the type is through the parse step.
+- For collections, parse into `NonEmpty<T>`, `SortedVec<T>`, etc. when those properties matter downstream.
+- Replace `assert!`/`require()` deep inside business logic with a stricter type at the boundary.
+
+## Counter-cases
+
+- For one-off, throwaway checks where no value is produced (e.g. "is the user allowed to do this *right now*?"), a boolean predicate is fine.
+- Over-engineering tiny invariants into bespoke types adds friction without payoff. Reserve this for properties that *recur* across the codebase.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

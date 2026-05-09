@@ -1,0 +1,66 @@
+title = "Split functions by responsibility"
+description = """
+A function should own one responsibility. When a single function does too many things it's difficult to test, maintain and understand.
+For example, a function that paints
+the display *and* the button grid *and* the history panel *and*
+dispatches keyboard input stops being readable as a unit — every
+change forces a re-skim of hundreds of lines to find the right region. Split it.
+
+Why:
+- Responsibility is the unit of comprehension, not line count. A 60-line
+  function doing one thing reads faster than a 60-line function doing
+  three.
+- Distinct concerns have distinct reasons to change. Bundling them means
+  every edit risks the unrelated regions sharing the same body.
+- Big functions are where bugs hide. A stray `i += 1` or a forgotten
+  early return is invisible in 300 lines and obvious in 30.
+- Named regions document intent. `draw_history_panel` tells the reader
+  what the next 40 lines are *for*; an unlabeled block of painter calls
+  does not.
+- Widgets, components, and helpers are the idiomatic units of reuse and
+  testing in most paradigms. Writing them as inline blocks fights the
+  tools.
+
+How to apply:
+- If a function is long *and* its body has visual section dividers
+  (`// ── Display ──`, `# --- validation ---`), each section is a
+  candidate for extraction. The comments are already telling you the
+  responsibilities are distinct.
+- Extract a *named region* — a thing with a purpose — not an arbitrary
+  chunk of code. The extracted name should describe what the region
+  *is*, not where it sits ("draw_history_panel", not "section_3").
+- Surfaces this applies to:
+  - OO / procedural code: extract a method per coherent step.
+  - React / Vue / Svelte and similar: extract a component per visual
+    region or concern; prefer composition over a single component with
+    many `{condition && <...>}` branches.
+  - Immediate-mode UI (egui, imgui, raylib): extract a `draw_x` method
+    or a widget type per region.
+  - Data pipelines / transformations: one function per stage.
+  - Event/command dispatch: one handler per command family, not one
+    mega-match.
+
+Defers to `inline-single-use-helpers`:
+- That principle takes precedence in tension. Do not extract a 3-line
+  helper used once just to shorten a function. This principle is about
+  splitting *distinct responsibilities* (a widget, a phase, a concern),
+  not chasing a line-count target.
+- A function staying long because each of its lines does something
+  different is fine. A function long because it owns five separate
+  widgets is not.
+
+Counter-cases (pass without complaint):
+- Small programs and demos where the whole thing fits on one screen —
+  splitting is overhead.
+- Functions whose "sections" share so much local state that extracting
+  forces a giant parameter list. The coupling is real; leave it inline,
+  or rethink the state.
+- Symmetric, parallel sections (a switch with one short arm per case)
+  where the structure itself communicates the responsibilities.
+"""
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
+on_max_retries = "continue"

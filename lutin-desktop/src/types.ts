@@ -168,6 +168,8 @@ import type { TtsBackend } from "@lutin/shim-types";
 export type {
   OrpheusModel,
   OrpheusVoice,
+  SubAgentRow,
+  SubAgentStatus,
   TtsBackend,
   TtsStreamId,
 } from "@lutin/shim-types";
@@ -189,6 +191,21 @@ export interface WhisperConfig {
   beam_size: number;
 }
 
+export type ParakeetModel = "tdt06b-v3";
+
+/// Mirrors Rust `ParakeetConfig`. Multilingual auto-detect — no
+/// language hint or beam knob today, just the model id.
+export interface ParakeetConfig {
+  model: ParakeetModel;
+}
+
+/// Mirrors Rust `SttConfig` — externally tagged on the variant name
+/// (same shape as `TtsBackend`). The desktop only constructs one of
+/// these in `dispatch.rs` from settings + ships it to CP.
+export type SttConfig =
+  | { Whisper: WhisperConfig }
+  | { Parakeet: ParakeetConfig };
+
 /// Mirrors Rust `AudioSettings` (settings.rs). `null` ⇒ host default;
 /// values are cpal device names (`Device::description().name()`).
 export interface AudioSettings {
@@ -200,7 +217,7 @@ export interface DesktopSettings {
   default: string;
   connections: ConnectionProfile[];
   keybinds: KeyBind[];
-  whisper: WhisperConfig;
+  stt: SttConfig;
   audio: AudioSettings;
 }
 

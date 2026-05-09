@@ -153,9 +153,17 @@ pub async fn run_round(input: RoundInput<'_>) -> Result<RoundOutput, RoundError>
                 acc.push_thinking(&t);
             }
             Ok(StreamEvent::ToolCallStart { id, name }) => {
+                let _ = events.send(AgentEvent::ToolCallStreaming {
+                    id: id.clone(),
+                    name: name.clone(),
+                });
                 acc.start_tool_call(id, name);
             }
             Ok(StreamEvent::ToolCallDelta { id, arguments }) => {
+                let _ = events.send(AgentEvent::ToolCallArgsDelta {
+                    id: id.clone(),
+                    args: arguments.clone(),
+                });
                 if let Err(orphan_id) = acc.push_delta(id, &arguments) {
                     return Err(RoundError::Provider(LlmError::Stream(format!(
                         "orphan tool-call delta: id={} received without ToolCallStart",
@@ -192,7 +200,7 @@ pub async fn run_round(input: RoundInput<'_>) -> Result<RoundOutput, RoundError>
     for (idx, call) in tool_calls.iter().enumerate() {
         // Why: build Arc once per call; both events share it via cheap refcount bumps.
         let call_shared = std::sync::Arc::new(call.clone());
-        let _ = events.send(AgentEvent::ToolCallStarted(std::sync::Arc::clone(&call_shared)));
+        let _ = events.send(AgentEvent::ToolCallArgsParsed(std::sync::Arc::clone(&call_shared)));
         let outcome = if let Some(msg) = parse_errors.remove(&call.id) {
             ToolResult::Err(ToolError::InvalidArgs(msg))
         } else {

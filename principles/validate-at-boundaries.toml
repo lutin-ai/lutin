@@ -1,0 +1,28 @@
+title = "Validate at Boundaries, Trust Internally"
+description = '''
+Check inputs once, at the edge of your system. Inside, trust the types and skip redundant defensive checks.
+
+## Why
+
+- Re-validating the same value at every layer is noise that obscures the real logic and lets validation rules drift apart over time.
+- Defensive checks deep inside the system suggest the author didn't trust the boundary — but the right fix is to make the boundary trustworthy, not to scatter `assert` everywhere.
+- A clear boundary turns "untrusted input" into "domain value" once. After that, the type system carries the proof.
+- It localizes security and correctness reasoning: to audit input handling, you read one place.
+
+## Apply
+
+- Boundaries: HTTP handlers, message queue consumers, file/CLI parsers, FFI calls, anything reading from a database or external service.
+- At each boundary, parse into a strict domain type (see *Parse, Don't Validate*). Reject early with a clear error.
+- Inside business logic, take domain types as parameters. Do not re-check `if x is None` / `if !s.is_empty()` for invariants the type already guarantees.
+- Use `debug_assert!` / debug-only checks for invariant *bugs* you want to catch in development, but don't conflate those with input validation.
+
+## Counter-cases
+
+- Trust boundaries within the system: if a subsystem is itself called from many places with weak typing, treat it as its own boundary.
+- Security-sensitive operations (auth, authz, crypto) sometimes warrant defense in depth — redundant checks are cheap insurance against a single missed validation.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps", "chat"]
+max_retries = 2
+on_max_retries = "continue"

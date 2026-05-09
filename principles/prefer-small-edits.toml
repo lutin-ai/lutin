@@ -1,0 +1,33 @@
+title = "Prefer Small Edits and Writes"
+description = '''
+A single Edit or Write operation should be small — roughly a few hundred lines at most. Large drops are harder to review, harder to recover from, and usually mean two or more unrelated changes rode in together.
+
+## Why
+
+- A 1000-line edit is unreviewable in practice. Reviewers skim, miss things, and approve out of fatigue. A 100-line edit gets read.
+- Small edits fail small. If something goes wrong (bad regex, wrong file, broken refactor), the blast radius is bounded to the lines touched.
+- Big writes are usually a sign of mixed intent: a real change, plus drive-by reformatting, plus moving things around. Splitting them surfaces what's actually happening.
+- Iterating in small steps lets each step be verified independently. Iterating in one giant step means re-doing the whole thing if any piece is wrong.
+- Future-you reading `git log` will thank present-you for commits that change one thing at a time.
+
+## Apply
+
+- Default ceiling: a few hundred lines added/changed per Edit or Write call. Past that, split.
+- Splitting strategies:
+  - Multiple smaller Edit calls instead of one big one.
+  - Land structural moves separately from content changes.
+  - Land additions separately from deletions when both are large.
+- For Write: if you're writing a new file longer than a few hundred lines, ask whether it should be two files, or whether the first version can be a stub that grows in follow-ups.
+- Generated/templated content (snapshots, fixtures, large data files) is the obvious exception — flag it as such.
+
+## Counter-cases
+
+- Generated files (lockfiles, snapshots, vendored code, large fixtures): size is dictated by the generator, not the author.
+- A genuinely cohesive new file (a parser, a config schema) that has to land as a unit: fine, but check whether parts of it could come later.
+- Mechanical search-and-replace across many sites: the line count is high but the conceptual change is one. Acceptable if the diff is uniform and easy to skim.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call"]
+max_retries = 2
+on_max_retries = "continue"

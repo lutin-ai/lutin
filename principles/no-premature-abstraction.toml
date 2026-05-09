@@ -1,0 +1,29 @@
+title = "No Premature Abstraction (Rule of Three)"
+description = '''
+Write the code concretely the first time. Duplicate it the second time. On the third occurrence, when the shape is finally clear, abstract.
+
+## Why
+
+- The first two occurrences look similar but rarely *are* similar. Abstracting on N=2 locks in a shape that the third use case will then have to fight.
+- Wrong abstractions are more expensive than duplication. Duplicated code can be deleted; a wrong abstraction has callers depending on its specific shape.
+- "DRY" is widely misapplied: it's about a single source of truth for *knowledge*, not about deduplicating any text that looks alike.
+- Three concrete instances let you see what's genuinely common versus what's incidental.
+
+## Apply
+
+- First time: write it.
+- Second time: copy and adapt it. Resist the urge to extract.
+- Third time: look at all three. Extract only the parts that are truly the same; leave the divergent parts at the call sites.
+- When extracting, prefer the smallest abstraction that captures the commonality. A 50-parameter function with seventeen booleans is the symptom of an abstraction made too early.
+- Be willing to *un*-abstract. If a shared helper has grown into a tangle of special cases, inline it back into its callers and start over.
+
+## Counter-cases
+
+- Some abstractions are obvious from the start: a domain concept the team already names ("an Order", "a Money amount"). Don't pretend not to see them.
+- External contracts (APIs, schemas) are abstractions you don't get to delay.'''
+
+persona = "reviewer"
+applies_to = ["edit", "write", "edit_lines"]
+context = ["tool_call", "tool_artifact", "prior_steps"]
+max_retries = 2
+on_max_retries = "continue"

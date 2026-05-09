@@ -11,7 +11,7 @@ import {
   type SubAgentInfo,
   type ToolOutcome,
   chatErrorMessage,
-} from "./chat";
+} from "@lutin/chat-protocol";
 
 /**
  * One tool exchange's lifecycle. Three states, encoded as variants so
@@ -23,13 +23,22 @@ export type ToolStatus =
   | { kind: "ok"; output: string }
   | { kind: "failed"; reason: string };
 
+/** Tool-call arguments lifecycle: either still streaming raw JSON
+ *  fragments from the model, or fully parsed at the wire boundary.
+ *  Encoded as a tagged union so the two states are mutually exclusive
+ *  by construction — the previous `arguments?: unknown` +
+ *  `argumentsRaw?: string` shape let both fields coexist, which the
+ *  type system can no longer express. */
+export type ToolArgs =
+  | { kind: "streaming"; raw: string }
+  | { kind: "parsed"; value: unknown };
+
 export interface ToolEntry {
   role: "tool";
   /** Engine-assigned tool-call id; matches a started→completed pair. */
   callId: string;
   name: string;
-  /** Parsed JSON, decoded once at the wire boundary. */
-  arguments: unknown;
+  args: ToolArgs;
   status: ToolStatus;
 }
 
@@ -65,6 +74,16 @@ export interface SessionSnapshot {
    *  refreshed by `subAgentTranscriptUpdated` broadcasts. The reducer
    *  doesn't prune — sub-agent counts stay small per session. */
   subAgentTranscripts: Record<string, Message[]>;
+  /** Live token counters projected from the latest `summaryUpdated`
+   *  broadcast. The engine emits one of these on every provider Usage
+   *  report (i.e. each agent-loop iteration) and at turn boundaries,
+   *  so this struct ticks during a long agent loop rather than only
+   *  at message-end. `null` until the first usage report arrives. */
+  summary: {
+    contextTokens: number | null;
+    totalPromptTokens: number;
+    totalCompletionTokens: number;
+  } | null;
   turn: Turn;
 }
 
@@ -74,6 +93,7 @@ export const initialSnapshot: SessionSnapshot = {
   metrics: [],
   subAgents: [],
   subAgentTranscripts: {},
+  summary: null,
   turn: { kind: "idle" },
 };
 
@@ -115,8 +135,12 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
       return appendStream(state, "assistant", ev.text);
     case "reasoning":
       return appendStream(state, "thinking", ev.text);
-    case "toolCallStarted":
-      return pushToolStart(state, ev.id, ev.name, ev.arguments);
+    case "toolCallStreaming":
+      return pushToolStart(state, ev.id, ev.name);
+    case "toolCallArgsDelta":
+      return appendToolArgs(state, ev.id, ev.args);
+    case "toolCallArgsParsed":
+      return setToolArgsParsed(state, ev.id, ev.name, ev.arguments);
     case "toolCallCompleted":
       return updateToolCompleted(state, ev.id, ev.outcome);
     case "messageFinished": {
@@ -143,6 +167,15 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
         subAgentTranscripts: {
           ...state.subAgentTranscripts,
           [ev.id]: ev.history.map(fromHistorical),
+        },
+      };
+    case "summaryUpdated":
+      return {
+        ...state,
+        summary: {
+          contextTokens: ev.contextTokens,
+          totalPromptTokens: ev.totalPromptTokens,
+          totalCompletionTokens: ev.totalCompletionTokens,
         },
       };
   }
@@ -188,13 +221,12 @@ function pushToolStart(
   state: SessionSnapshot,
   callId: string,
   name: string,
-  args: unknown,
 ): SessionSnapshot {
   const entry: ToolEntry = {
     role: "tool",
     callId,
     name,
-    arguments: args,
+    args: { kind: "streaming", raw: "" },
     status: { kind: "running" },
   };
   if (state.turn.kind !== "streaming") {
@@ -212,6 +244,54 @@ function pushToolStart(
     ...state,
     turn: { ...state.turn, buf: "", flushed },
   };
+}
+
+// Append a streaming-args fragment to the running ToolEntry for `callId`.
+// Once `args.kind === "parsed"`, deltas are ignored — the SDK still
+// emits the final flush after parse, but the parsed value is the
+// source of truth and shouldn't be shadowed by a tail fragment.
+function appendToolArgs(
+  state: SessionSnapshot,
+  callId: string,
+  args: string,
+): SessionSnapshot {
+  const updateOne = (m: Message): Message => {
+    if (m.role !== "tool" || m.callId !== callId) return m;
+    if (m.args.kind !== "streaming") return m;
+    return { ...m, args: { kind: "streaming", raw: m.args.raw + args } };
+  };
+  if (state.turn.kind === "streaming") {
+    return {
+      ...state,
+      turn: { ...state.turn, flushed: state.turn.flushed.map(updateOne) },
+    };
+  }
+  return { ...state, completed: state.completed.map(updateOne) };
+}
+
+// All argument fragments arrived: swap the streaming `args` for the
+// parsed value. Status stays `running` — the actual tool dispatch
+// fires next, completion lands via toolCallCompleted. The agent SDK
+// guarantees a `toolCallStreaming` precedes every `toolCallArgsParsed`
+// for a given id, so a missing entry would be a producer bug; we let
+// it disappear silently rather than synthesize a stand-in here.
+function setToolArgsParsed(
+  state: SessionSnapshot,
+  callId: string,
+  name: string,
+  value: unknown,
+): SessionSnapshot {
+  const updateOne = (m: Message): Message => {
+    if (m.role !== "tool" || m.callId !== callId) return m;
+    return { ...m, name, args: { kind: "parsed", value } };
+  };
+  if (state.turn.kind === "streaming") {
+    return {
+      ...state,
+      turn: { ...state.turn, flushed: state.turn.flushed.map(updateOne) },
+    };
+  }
+  return { ...state, completed: state.completed.map(updateOne) };
 }
 
 // First-match-wins; ids are unique per session.
@@ -258,7 +338,7 @@ function fromHistorical(h: HistoricalMessage): Message {
         role: "tool",
         callId: h.callId,
         name: h.name,
-        arguments: h.arguments,
+        args: { kind: "parsed", value: h.arguments },
         status,
       };
     }

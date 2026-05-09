@@ -13,10 +13,12 @@ before continuing.
 """
 
 default_skills = []
-model = "minimax/minimax-m2.7"
-provider = "open-router"
+model = "Qwen/Qwen3.6-35B-A3B-FP8"
+provider = "open-ai-compat"
+temperature = 0.3
+# presence_penalty = 1.5
 thinking_enabled = false
-reasoning_effort = "medium"
+reasoning_effort = "low"
 
 tool_filter_mode = "blacklist"
 tool_filter_list = []
