@@ -83,6 +83,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 libdbus-1-3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Dev headers for libs the agent's `cargo check`/`build` may need inside
+# /project. lutin-llm pulls in keyring → dbus-secret-service → libdbus-sys,
+# whose build script needs `dbus-1.pc` (libdbus-1-dev), and reqwest's
+# native-tls path needs libssl-dev.
+
 # Dev toolchains for the agent to use inside /project. Kept in its own
 # layer (and ordered before the engine COPY) so a code change in the
 # builder stage doesn't bust this ~hundreds-of-MB apt cache. Versions
@@ -92,6 +97,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs npm \
         python3 python3-pip python3-venv \
         git curl build-essential pkg-config \
+        libssl-dev libdbus-1-dev \
         ripgrep jq \
     && rm -rf /var/lib/apt/lists/*
 
