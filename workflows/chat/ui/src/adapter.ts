@@ -54,6 +54,7 @@ function wireToWidgetMeta(m: MessageMeta | undefined): WidgetMeta | undefined {
     case "user":
     case "subAgentReply":
     case "subAgentFailure":
+    case "summary":
       return time === null ? undefined : { time };
     case "tool":
       if (time === null && m.durationMs === null) return undefined;
@@ -117,6 +118,8 @@ function project(m: Message, id: string, meta: WidgetMeta | undefined): ChatMess
         ok: false,
         meta,
       };
+    case "summary":
+      return { kind: "system", id, text: m.text, meta };
     case "tool": {
       // `m.args` is already a `ToolArgs` tagged union — streaming
       // (raw JSON fragments) or parsed (decoded at the wire boundary

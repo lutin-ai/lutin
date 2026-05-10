@@ -96,6 +96,7 @@ function wireToWidgetMeta(m: MessageMeta | undefined): WidgetMeta | undefined {
     case "user":
     case "subAgentReply":
     case "subAgentFailure":
+    case "summary":
       return time === null ? undefined : { time };
     case "tool":
       if (time === null && m.durationMs === null) return undefined;
@@ -159,6 +160,8 @@ function project(m: Message, id: string, meta: WidgetMeta | undefined): ChatMess
         ok: false,
         meta,
       };
+    case "summary":
+      return { kind: "system", id, text: m.text, meta };
     case "tool": {
       // m.arguments is already parsed at the wire boundary (decode-time
       // JSON.parse in chat.ts). Just hand it through to the widget.

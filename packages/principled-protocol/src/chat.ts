@@ -40,7 +40,8 @@ export type HistoricalMessage =
       outcome: ToolOutcome | null;
     }
   | { kind: "subAgentReply"; agentId: string; text: string }
-  | { kind: "subAgentFailure"; agentId: string; reason: string };
+  | { kind: "subAgentFailure"; agentId: string; reason: string }
+  | { kind: "summary"; text: string };
 
 /** Live sub-agent registry row. Mirrors `chat::SubAgentInfo`. */
 export interface SubAgentInfo {
@@ -101,7 +102,8 @@ export type MessageMeta =
     }
   | { kind: "tool"; timestamp: string | null; durationMs: number | null }
   | { kind: "subAgentReply"; timestamp: string | null }
-  | { kind: "subAgentFailure"; timestamp: string | null };
+  | { kind: "subAgentFailure"; timestamp: string | null }
+  | { kind: "summary"; timestamp: string | null };
 
 export interface PersonaInfo {
   name: string;
@@ -310,6 +312,8 @@ function readHistoricalMessage(r: pc.Reader): HistoricalMessage {
         agentId: pc.readString(r),
         reason: pc.readString(r),
       };
+    case 6:
+      return { kind: "summary", text: pc.readString(r) };
     default:
       throw new Error(`postcard: invalid HistoricalMessage ${v}`);
   }
@@ -469,6 +473,8 @@ function readMessageMeta(r: pc.Reader): MessageMeta {
       return { kind: "subAgentReply", timestamp: pc.readOption(r, pc.readString) };
     case 5:
       return { kind: "subAgentFailure", timestamp: pc.readOption(r, pc.readString) };
+    case 6:
+      return { kind: "summary", timestamp: pc.readOption(r, pc.readString) };
     default:
       throw new Error(`postcard: invalid MessageMeta ${v}`);
   }
@@ -572,11 +578,11 @@ function readChatError(r: pc.Reader): ChatError {
     case 6:
       return { kind: "turnInFlight" };
     case 7:
-      return { kind: "historyIndexOutOfRange", index: pc.readU32(r) };
-    case 8:
-      return { kind: "persistFailed", op: pc.readString(r) };
-    case 9:
       return { kind: "reviewInFlight" };
+    case 8:
+      return { kind: "historyIndexOutOfRange", index: pc.readU32(r) };
+    case 9:
+      return { kind: "persistFailed", op: pc.readString(r) };
     default:
       throw new Error(`postcard: invalid ChatError ${v}`);
   }

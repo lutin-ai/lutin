@@ -48,7 +48,8 @@ export type Message =
   | { role: "thinking"; text: string }
   | ToolEntry
   | { role: "subAgentReply"; agentId: string; text: string }
-  | { role: "subAgentFailure"; agentId: string; reason: string };
+  | { role: "subAgentFailure"; agentId: string; reason: string }
+  | { role: "summary"; text: string };
 
 export type StreamKind = "assistant" | "thinking";
 
@@ -327,6 +328,8 @@ function fromHistorical(h: HistoricalMessage): Message {
       return { role: "subAgentReply", agentId: h.agentId, text: h.text };
     case "subAgentFailure":
       return { role: "subAgentFailure", agentId: h.agentId, reason: h.reason };
+    case "summary":
+      return { role: "summary", text: h.text };
     case "tool": {
       const status: ToolStatus =
         h.outcome === null
