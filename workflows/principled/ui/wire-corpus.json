@@ -1,0 +1,326 @@
+[
+  {
+    "name": "ChatRequest::Subscribe",
+    "channel": "request",
+    "kind": "subscribe",
+    "hex": "00"
+  },
+  {
+    "name": "ChatRequest::SendMessage",
+    "channel": "request",
+    "kind": "sendMessage",
+    "hex": "01026869"
+  },
+  {
+    "name": "ChatRequest::Cancel",
+    "channel": "request",
+    "kind": "cancel",
+    "hex": "02"
+  },
+  {
+    "name": "ChatRequest::SetPersona",
+    "channel": "request",
+    "kind": "setPersona",
+    "hex": "030105616c696365"
+  },
+  {
+    "name": "ChatRequest::GetState",
+    "channel": "request",
+    "kind": "getState",
+    "hex": "04"
+  },
+  {
+    "name": "ChatRequest::ListPersonas",
+    "channel": "request",
+    "kind": "listPersonas",
+    "hex": "05"
+  },
+  {
+    "name": "ChatRequest::Rerun",
+    "channel": "request",
+    "kind": "rerun",
+    "hex": "06"
+  },
+  {
+    "name": "ChatRequest::EditMessage",
+    "channel": "request",
+    "kind": "editMessage",
+    "hex": "0703026869"
+  },
+  {
+    "name": "ChatRequest::DeleteMessage",
+    "channel": "request",
+    "kind": "deleteMessage",
+    "hex": "0802"
+  },
+  {
+    "name": "ChatRequest::DeleteFromHere",
+    "channel": "request",
+    "kind": "deleteFromHere",
+    "hex": "0901"
+  },
+  {
+    "name": "ChatRequest::GetMetrics",
+    "channel": "request",
+    "kind": "getMetrics",
+    "hex": "0a"
+  },
+  {
+    "name": "ChatRequest::ListSubAgents",
+    "channel": "request",
+    "kind": "listSubAgents",
+    "hex": "0b"
+  },
+  {
+    "name": "ChatRequest::GetSubAgentTranscript",
+    "channel": "request",
+    "kind": "getSubAgentTranscript",
+    "hex": "0c076167656e742331"
+  },
+  {
+    "name": "ChatRequest::ListReviews",
+    "channel": "request",
+    "kind": "listReviews",
+    "hex": "0d"
+  },
+  {
+    "name": "ChatOk::Subscribed",
+    "channel": "response",
+    "kind": "subscribed",
+    "hex": "00000000000100026869"
+  },
+  {
+    "name": "ChatOk::MessageQueued",
+    "channel": "response",
+    "kind": "messageQueued",
+    "hex": "000107"
+  },
+  {
+    "name": "ChatOk::Cancelled",
+    "channel": "response",
+    "kind": "cancelled",
+    "hex": "0002"
+  },
+  {
+    "name": "ChatOk::StateUpdated",
+    "channel": "response",
+    "kind": "stateUpdated",
+    "hex": "0003000000"
+  },
+  {
+    "name": "ChatOk::State",
+    "channel": "response",
+    "kind": "state",
+    "hex": "0004000000"
+  },
+  {
+    "name": "ChatOk::Personas",
+    "channel": "response",
+    "kind": "personas",
+    "hex": "0005010170015000"
+  },
+  {
+    "name": "ChatOk::HistoryAcknowledged",
+    "channel": "response",
+    "kind": "historyAcknowledged",
+    "hex": "0006"
+  },
+  {
+    "name": "ChatOk::Metrics",
+    "channel": "response",
+    "kind": "metrics",
+    "hex": "0007070001015401010154016401f403010a01140201015401320178030101540128040101540501015406010154"
+  },
+  {
+    "name": "ChatOk::SubAgents",
+    "channel": "response",
+    "kind": "subAgents",
+    "hex": "000801076167656e7423310005636f6465720000"
+  },
+  {
+    "name": "ChatOk::SubAgentTranscript",
+    "channel": "response",
+    "kind": "subAgentTranscript",
+    "hex": "0009076167656e742331070001750101610201740301630465646974027b7d0100026f6b04076167656e742331017205076167656e74233104626f6f6d060773756d6d617279"
+  },
+  {
+    "name": "ChatOk::Reviews",
+    "channel": "response",
+    "kind": "reviews",
+    "hex": "000a0101540701017001017204656469740000010163"
+  },
+  {
+    "name": "ChatError::NoTurnInFlight",
+    "channel": "response",
+    "kind": "noTurnInFlight",
+    "hex": "0100"
+  },
+  {
+    "name": "ChatError::PersonaNotFound",
+    "channel": "response",
+    "kind": "personaNotFound",
+    "hex": "01010178"
+  },
+  {
+    "name": "ChatError::ProviderNotFound",
+    "channel": "response",
+    "kind": "providerNotFound",
+    "hex": "01020178"
+  },
+  {
+    "name": "ChatError::ProviderMisconfigured",
+    "channel": "response",
+    "kind": "providerMisconfigured",
+    "hex": "010301780179"
+  },
+  {
+    "name": "ChatError::ProviderUnsupported",
+    "channel": "response",
+    "kind": "providerUnsupported",
+    "hex": "01040178"
+  },
+  {
+    "name": "ChatError::Internal",
+    "channel": "response",
+    "kind": "internal",
+    "hex": "0105046f6f7073"
+  },
+  {
+    "name": "ChatError::TurnInFlight",
+    "channel": "response",
+    "kind": "turnInFlight",
+    "hex": "0106"
+  },
+  {
+    "name": "ChatError::ReviewInFlight",
+    "channel": "response",
+    "kind": "reviewInFlight",
+    "hex": "0107"
+  },
+  {
+    "name": "ChatError::HistoryIndexOutOfRange",
+    "channel": "response",
+    "kind": "historyIndexOutOfRange",
+    "hex": "010805"
+  },
+  {
+    "name": "ChatError::PersistFailed",
+    "channel": "response",
+    "kind": "persistFailed",
+    "hex": "01090473617665"
+  },
+  {
+    "name": "ChatEvent::Delta",
+    "channel": "event",
+    "kind": "delta",
+    "hex": "00026869"
+  },
+  {
+    "name": "ChatEvent::Reasoning",
+    "channel": "event",
+    "kind": "reasoning",
+    "hex": "01027468"
+  },
+  {
+    "name": "ChatEvent::ToolCallArgsParsed",
+    "channel": "event",
+    "kind": "toolCallArgsParsed",
+    "hex": "0201630465646974027b7d"
+  },
+  {
+    "name": "ChatEvent::ToolCallCompleted",
+    "channel": "event",
+    "kind": "toolCallCompleted",
+    "hex": "0301630004646f6e65"
+  },
+  {
+    "name": "ChatEvent::MessageFinished",
+    "channel": "event",
+    "kind": "messageFinished",
+    "hex": "040700"
+  },
+  {
+    "name": "ChatEvent::StateChanged",
+    "channel": "event",
+    "kind": "stateChanged",
+    "hex": "05000000"
+  },
+  {
+    "name": "ChatEvent::HistoryReplaced",
+    "channel": "event",
+    "kind": "historyReplaced",
+    "hex": "06070001750101610201740301630465646974027b7d0100026f6b04076167656e742331017205076167656e74233104626f6f6d060773756d6d617279"
+  },
+  {
+    "name": "ChatEvent::MetricsReplaced",
+    "channel": "event",
+    "kind": "metricsReplaced",
+    "hex": "07070001015401010154016401f403010a01140201015401320178030101540128040101540501015406010154"
+  },
+  {
+    "name": "ChatEvent::SubAgentsChanged",
+    "channel": "event",
+    "kind": "subAgentsChanged",
+    "hex": "0801076167656e74233101076167656e74233005636f6465720204626f6f6d0103e280a6"
+  },
+  {
+    "name": "ChatEvent::SubAgentTranscriptUpdated",
+    "channel": "event",
+    "kind": "subAgentTranscriptUpdated",
+    "hex": "09076167656e74233101010568656c6c6f"
+  },
+  {
+    "name": "ChatEvent::ReviewFrameOpened",
+    "channel": "event",
+    "kind": "reviewFrameOpened",
+    "hex": "0a070163046564697400"
+  },
+  {
+    "name": "ChatEvent::ReviewerStarted",
+    "channel": "event",
+    "kind": "reviewerStarted",
+    "hex": "0b070163010170"
+  },
+  {
+    "name": "ChatEvent::ReviewerCompleted",
+    "channel": "event",
+    "kind": "reviewerCompleted",
+    "hex": "0c0701630201700200026e6f000154"
+  },
+  {
+    "name": "ChatEvent::ReviewFrameProgress",
+    "channel": "event",
+    "kind": "reviewFrameProgress",
+    "hex": "0d0701630103010170"
+  },
+  {
+    "name": "ChatEvent::ReviewFrameResolved",
+    "channel": "event",
+    "kind": "reviewFrameResolved",
+    "hex": "0e07016301026662"
+  },
+  {
+    "name": "ChatEvent::ToolCallStreaming",
+    "channel": "event",
+    "kind": "toolCallStreaming",
+    "hex": "0f01630465646974"
+  },
+  {
+    "name": "ChatEvent::ToolCallArgsDelta",
+    "channel": "event",
+    "kind": "toolCallArgsDelta",
+    "hex": "100163017b"
+  },
+  {
+    "name": "ChatEvent::SummaryUpdated",
+    "channel": "event",
+    "kind": "summaryUpdated",
+    "hex": "110180088827fa01"
+  },
+  {
+    "name": "ChatEvent::AttemptsSquashed",
+    "channel": "event",
+    "kind": "attemptsSquashed",
+    "hex": "1202026331026332"
+  }
+]

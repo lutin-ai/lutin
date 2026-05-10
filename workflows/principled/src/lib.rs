@@ -1026,4 +1026,569 @@ mod tests {
         save_state(tmp.path(), &s).unwrap();
         assert_eq!(load_state(tmp.path()).unwrap(), s);
     }
+
+    /// Exhaustive snapshot of every wire-visible variant. The Rust
+    /// side is the authority: this test constructs one canonical
+    /// instance per variant, serializes it, and writes the result to
+    /// `ui/wire-corpus.json`. The TS test in
+    /// `workflows/principled/ui/src/wire-corpus.test.ts` reads the
+    /// same file and decodes every entry, so any Rust-side variant
+    /// addition (or reordering) that the JS decoder hasn't been
+    /// updated for fails loudly at test time instead of as a runtime
+    /// `postcard: unexpected EOF` in the chrome.
+    ///
+    /// Coverage is enforced at compile time: each `variant_tag` match
+    /// below has no `_` arm, so adding a new variant to any wire enum
+    /// breaks compilation here. The matching `cases` table must then
+    /// be extended to construct the new variant.
+    ///
+    /// Re-roll after intentional wire changes by setting
+    /// `WIRE_CORPUS_REGEN=1`. Otherwise the test fails (after
+    /// rewriting the file) so CI catches drift.
+    #[test]
+    fn wire_corpus_in_sync() {
+        #[derive(Serialize)]
+        struct Entry {
+            name: String,
+            channel: &'static str,
+            kind: &'static str,
+            hex: String,
+        }
+        let mut entries: Vec<Entry> = Vec::new();
+        let push_req = |entries: &mut Vec<Entry>, name: &str, r: ChatRequest| {
+            let kind = chat_request_tag(&r);
+            entries.push(Entry {
+                name: format!("ChatRequest::{name}"),
+                channel: "request",
+                kind,
+                hex: hex_encode(&encode(&r).unwrap()),
+            });
+        };
+        let push_ok = |entries: &mut Vec<Entry>, name: &str, ok: ChatOk| {
+            let kind = chat_ok_tag(&ok);
+            let resp: ChatResponse = Ok(ok);
+            entries.push(Entry {
+                name: format!("ChatOk::{name}"),
+                channel: "response",
+                kind,
+                hex: hex_encode(&encode(&resp).unwrap()),
+            });
+        };
+        let push_err = |entries: &mut Vec<Entry>, name: &str, err: ChatError| {
+            let kind = chat_error_tag(&err);
+            let resp: ChatResponse = Err(err);
+            entries.push(Entry {
+                name: format!("ChatError::{name}"),
+                channel: "response",
+                kind,
+                hex: hex_encode(&encode(&resp).unwrap()),
+            });
+        };
+        let push_evt = |entries: &mut Vec<Entry>, name: &str, e: ChatEvent| {
+            let kind = chat_event_tag(&e);
+            entries.push(Entry {
+                name: format!("ChatEvent::{name}"),
+                channel: "event",
+                kind,
+                hex: hex_encode(&encode(&e).unwrap()),
+            });
+        };
+
+        // ── ChatRequest ───────────────────────────────────────────
+        push_req(&mut entries, "Subscribe", ChatRequest::Subscribe);
+        push_req(
+            &mut entries,
+            "SendMessage",
+            ChatRequest::SendMessage { text: "hi".into() },
+        );
+        push_req(&mut entries, "Cancel", ChatRequest::Cancel);
+        push_req(
+            &mut entries,
+            "SetPersona",
+            ChatRequest::SetPersona { name: Some("alice".into()) },
+        );
+        push_req(&mut entries, "GetState", ChatRequest::GetState);
+        push_req(&mut entries, "ListPersonas", ChatRequest::ListPersonas);
+        push_req(&mut entries, "Rerun", ChatRequest::Rerun);
+        push_req(
+            &mut entries,
+            "EditMessage",
+            ChatRequest::EditMessage { index: 3, text: "hi".into() },
+        );
+        push_req(
+            &mut entries,
+            "DeleteMessage",
+            ChatRequest::DeleteMessage { index: 2 },
+        );
+        push_req(
+            &mut entries,
+            "DeleteFromHere",
+            ChatRequest::DeleteFromHere { index: 1 },
+        );
+        push_req(&mut entries, "GetMetrics", ChatRequest::GetMetrics);
+        push_req(&mut entries, "ListSubAgents", ChatRequest::ListSubAgents);
+        push_req(
+            &mut entries,
+            "GetSubAgentTranscript",
+            ChatRequest::GetSubAgentTranscript { id: "agent#1".into() },
+        );
+        push_req(&mut entries, "ListReviews", ChatRequest::ListReviews);
+
+        // ── ChatOk ────────────────────────────────────────────────
+        let one_state = SessionState::default();
+        push_ok(
+            &mut entries,
+            "Subscribed",
+            ChatOk::Subscribed {
+                state: one_state.clone(),
+                history: vec![HistoricalMessage::User("hi".into())],
+            },
+        );
+        push_ok(
+            &mut entries,
+            "MessageQueued",
+            ChatOk::MessageQueued { turn_id: TurnId(7) },
+        );
+        push_ok(&mut entries, "Cancelled", ChatOk::Cancelled);
+        push_ok(
+            &mut entries,
+            "StateUpdated",
+            ChatOk::StateUpdated { state: one_state.clone() },
+        );
+        push_ok(&mut entries, "State", ChatOk::State(one_state.clone()));
+        push_ok(
+            &mut entries,
+            "Personas",
+            ChatOk::Personas {
+                personas: vec![PersonaInfo {
+                    name: "p".into(),
+                    display_name: "P".into(),
+                    model: String::new(),
+                }],
+            },
+        );
+        push_ok(&mut entries, "HistoryAcknowledged", ChatOk::HistoryAcknowledged);
+        // Embed every MessageMeta variant so the TS readMessageMeta
+        // decoder is exercised end-to-end.
+        push_ok(&mut entries, "Metrics", ChatOk::Metrics(all_message_metas()));
+        push_ok(
+            &mut entries,
+            "SubAgents",
+            ChatOk::SubAgents(vec![SubAgentInfo {
+                id: "agent#1".into(),
+                parent_id: None,
+                persona: "coder".into(),
+                status: SubAgentStatus::Running,
+                last_progress: None,
+            }]),
+        );
+        // Embed every HistoricalMessage variant so readHistoricalMessage
+        // is exercised end-to-end (Summary at variant 6 was the
+        // missing case that motivated this test).
+        push_ok(
+            &mut entries,
+            "SubAgentTranscript",
+            ChatOk::SubAgentTranscript {
+                id: "agent#1".into(),
+                history: all_historical_messages(),
+            },
+        );
+        push_ok(
+            &mut entries,
+            "Reviews",
+            ChatOk::Reviews {
+                reviews: vec![ReviewLogEntry {
+                    ts: "T".into(),
+                    step_id: 7,
+                    reviewer_call_id: 1,
+                    principle: "p".into(),
+                    persona: Some("r".into()),
+                    tool_name: "edit".into(),
+                    args_summary: String::new(),
+                    verdict: ReviewVerdictWire::Pass,
+                    call_id: Some("c".into()),
+                }],
+            },
+        );
+
+        // ── ChatError ─────────────────────────────────────────────
+        push_err(&mut entries, "NoTurnInFlight", ChatError::NoTurnInFlight);
+        push_err(
+            &mut entries,
+            "PersonaNotFound",
+            ChatError::PersonaNotFound("x".into()),
+        );
+        push_err(
+            &mut entries,
+            "ProviderNotFound",
+            ChatError::ProviderNotFound("x".into()),
+        );
+        push_err(
+            &mut entries,
+            "ProviderMisconfigured",
+            ChatError::ProviderMisconfigured {
+                name: "x".into(),
+                reason: "y".into(),
+            },
+        );
+        push_err(
+            &mut entries,
+            "ProviderUnsupported",
+            ChatError::ProviderUnsupported("x".into()),
+        );
+        push_err(&mut entries, "Internal", ChatError::Internal("oops".into()));
+        push_err(&mut entries, "TurnInFlight", ChatError::TurnInFlight);
+        push_err(&mut entries, "ReviewInFlight", ChatError::ReviewInFlight);
+        push_err(
+            &mut entries,
+            "HistoryIndexOutOfRange",
+            ChatError::HistoryIndexOutOfRange(5),
+        );
+        push_err(
+            &mut entries,
+            "PersistFailed",
+            ChatError::PersistFailed { op: "save".into() },
+        );
+
+        // ── ChatEvent ─────────────────────────────────────────────
+        push_evt(&mut entries, "Delta", ChatEvent::Delta("hi".into()));
+        push_evt(&mut entries, "Reasoning", ChatEvent::Reasoning("th".into()));
+        push_evt(
+            &mut entries,
+            "ToolCallArgsParsed",
+            ChatEvent::ToolCallArgsParsed {
+                id: "c".into(),
+                name: "edit".into(),
+                arguments_json: "{}".into(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ToolCallCompleted",
+            ChatEvent::ToolCallCompleted {
+                id: "c".into(),
+                outcome: ToolOutcome::Ok("done".into()),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "MessageFinished",
+            ChatEvent::MessageFinished {
+                turn_id: TurnId(7),
+                reason: FinishReason::Completed,
+            },
+        );
+        push_evt(
+            &mut entries,
+            "StateChanged",
+            ChatEvent::StateChanged(one_state.clone()),
+        );
+        push_evt(
+            &mut entries,
+            "HistoryReplaced",
+            ChatEvent::HistoryReplaced(all_historical_messages()),
+        );
+        push_evt(
+            &mut entries,
+            "MetricsReplaced",
+            ChatEvent::MetricsReplaced(all_message_metas()),
+        );
+        push_evt(
+            &mut entries,
+            "SubAgentsChanged",
+            ChatEvent::SubAgentsChanged(vec![SubAgentInfo {
+                id: "agent#1".into(),
+                parent_id: Some("agent#0".into()),
+                persona: "coder".into(),
+                status: SubAgentStatus::Failed { reason: "boom".into() },
+                last_progress: Some("…".into()),
+            }]),
+        );
+        push_evt(
+            &mut entries,
+            "SubAgentTranscriptUpdated",
+            ChatEvent::SubAgentTranscriptUpdated {
+                id: "agent#1".into(),
+                history: vec![HistoricalMessage::Assistant("hello".into())],
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ReviewFrameOpened",
+            ChatEvent::ReviewFrameOpened {
+                step_id: 7,
+                call_id: "c".into(),
+                tool_name: "edit".into(),
+                args_summary: String::new(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ReviewerStarted",
+            ChatEvent::ReviewerStarted {
+                step_id: 7,
+                call_id: "c".into(),
+                reviewer_call_id: 1,
+                principle: "p".into(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ReviewerCompleted",
+            ChatEvent::ReviewerCompleted {
+                step_id: 7,
+                call_id: "c".into(),
+                reviewer_call_id: 2,
+                principle: "p".into(),
+                verdict: ReviewVerdictWire::Fail {
+                    severity: ReviewSeverityWire::Fix,
+                    reasoning: "no".into(),
+                    suggested_fix: None,
+                },
+                ts: "T".into(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ReviewFrameProgress",
+            ChatEvent::ReviewFrameProgress {
+                step_id: 7,
+                call_id: "c".into(),
+                attempt: 1,
+                max_attempts: 3,
+                blocking: vec!["p".into()],
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ReviewFrameResolved",
+            ChatEvent::ReviewFrameResolved {
+                step_id: 7,
+                call_id: "c".into(),
+                outcome: ReviewResolution::Rewound { feedback: "fb".into() },
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ToolCallStreaming",
+            ChatEvent::ToolCallStreaming {
+                id: "c".into(),
+                name: "edit".into(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "ToolCallArgsDelta",
+            ChatEvent::ToolCallArgsDelta {
+                id: "c".into(),
+                args: "{".into(),
+            },
+        );
+        push_evt(
+            &mut entries,
+            "SummaryUpdated",
+            ChatEvent::SummaryUpdated {
+                context_tokens: Some(1024),
+                total_prompt_tokens: 5_000,
+                total_completion_tokens: 250,
+            },
+        );
+        push_evt(
+            &mut entries,
+            "AttemptsSquashed",
+            ChatEvent::AttemptsSquashed { call_ids: vec!["c1".into(), "c2".into()] },
+        );
+
+        let json = serde_json::to_string_pretty(&entries).unwrap() + "\n";
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/wire-corpus.json");
+        if std::env::var("WIRE_CORPUS_REGEN").is_ok() {
+            std::fs::write(&path, &json).unwrap();
+            return;
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        if on_disk != json {
+            std::fs::write(&path, &json).unwrap();
+            panic!(
+                "wire-corpus.json was out of date — regenerated at {}. \
+                 Commit the change (or set WIRE_CORPUS_REGEN=1 to skip the assert).",
+                path.display()
+            );
+        }
+    }
+
+    /// Hex-encode bytes in lowercase, no separators. Mirrors the format
+    /// the bun-side test parses with `parseInt(byte, 16)`.
+    fn hex_encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+
+    /// One instance of every `HistoricalMessage` variant, in declared
+    /// variant order. Keep in sync with the enum — a new variant
+    /// breaks `historical_message_tag`'s exhaustive match below.
+    fn all_historical_messages() -> Vec<HistoricalMessage> {
+        let v = vec![
+            HistoricalMessage::User("u".into()),
+            HistoricalMessage::Assistant("a".into()),
+            HistoricalMessage::Thinking("t".into()),
+            HistoricalMessage::Tool {
+                call_id: "c".into(),
+                name: "edit".into(),
+                arguments_json: "{}".into(),
+                outcome: Some(ToolOutcome::Ok("ok".into())),
+            },
+            HistoricalMessage::SubAgentReply {
+                agent_id: "agent#1".into(),
+                text: "r".into(),
+            },
+            HistoricalMessage::SubAgentFailure {
+                agent_id: "agent#1".into(),
+                reason: "boom".into(),
+            },
+            HistoricalMessage::Summary { text: "summary".into() },
+        ];
+        // Compile-time exhaustiveness probe — adding a variant breaks here.
+        for h in &v {
+            let _ = historical_message_tag(h);
+        }
+        v
+    }
+
+    fn all_message_metas() -> Vec<MessageMeta> {
+        let v = vec![
+            MessageMeta::User { timestamp: Some("T".into()) },
+            MessageMeta::Assistant {
+                timestamp: Some("T".into()),
+                ttft_ms: Some(100),
+                duration_ms: Some(500),
+                prompt_tokens: Some(10),
+                completion_tokens: Some(20),
+            },
+            MessageMeta::Thinking {
+                timestamp: Some("T".into()),
+                ttft_ms: Some(50),
+                duration_ms: Some(120),
+            },
+            MessageMeta::Tool {
+                timestamp: Some("T".into()),
+                duration_ms: Some(40),
+            },
+            MessageMeta::SubAgentReply { timestamp: Some("T".into()) },
+            MessageMeta::SubAgentFailure { timestamp: Some("T".into()) },
+            MessageMeta::Summary { timestamp: Some("T".into()) },
+        ];
+        for m in &v {
+            let _ = message_meta_tag(m);
+        }
+        v
+    }
+
+    // ── Compile-time exhaustiveness probes ───────────────────────
+    //
+    // Each `*_tag` returns the variant name as a string; the `match`
+    // body has no `_` arm, so adding a new variant breaks compilation
+    // here. That's the contract that keeps the corpus exhaustive
+    // without hand-maintained "did you forget anything?" docs.
+
+    fn chat_request_tag(r: &ChatRequest) -> &'static str {
+        match r {
+            ChatRequest::Subscribe => "subscribe",
+            ChatRequest::SendMessage { .. } => "sendMessage",
+            ChatRequest::Cancel => "cancel",
+            ChatRequest::SetPersona { .. } => "setPersona",
+            ChatRequest::GetState => "getState",
+            ChatRequest::ListPersonas => "listPersonas",
+            ChatRequest::Rerun => "rerun",
+            ChatRequest::EditMessage { .. } => "editMessage",
+            ChatRequest::DeleteMessage { .. } => "deleteMessage",
+            ChatRequest::DeleteFromHere { .. } => "deleteFromHere",
+            ChatRequest::GetMetrics => "getMetrics",
+            ChatRequest::ListSubAgents => "listSubAgents",
+            ChatRequest::GetSubAgentTranscript { .. } => "getSubAgentTranscript",
+            ChatRequest::ListReviews => "listReviews",
+        }
+    }
+
+    fn chat_ok_tag(ok: &ChatOk) -> &'static str {
+        match ok {
+            ChatOk::Subscribed { .. } => "subscribed",
+            ChatOk::MessageQueued { .. } => "messageQueued",
+            ChatOk::Cancelled => "cancelled",
+            ChatOk::StateUpdated { .. } => "stateUpdated",
+            ChatOk::State(_) => "state",
+            ChatOk::Personas { .. } => "personas",
+            ChatOk::HistoryAcknowledged => "historyAcknowledged",
+            ChatOk::Metrics(_) => "metrics",
+            ChatOk::SubAgents(_) => "subAgents",
+            ChatOk::SubAgentTranscript { .. } => "subAgentTranscript",
+            ChatOk::Reviews { .. } => "reviews",
+        }
+    }
+
+    fn chat_error_tag(e: &ChatError) -> &'static str {
+        match e {
+            ChatError::NoTurnInFlight => "noTurnInFlight",
+            ChatError::PersonaNotFound(_) => "personaNotFound",
+            ChatError::ProviderNotFound(_) => "providerNotFound",
+            ChatError::ProviderMisconfigured { .. } => "providerMisconfigured",
+            ChatError::ProviderUnsupported(_) => "providerUnsupported",
+            ChatError::Internal(_) => "internal",
+            ChatError::TurnInFlight => "turnInFlight",
+            ChatError::ReviewInFlight => "reviewInFlight",
+            ChatError::HistoryIndexOutOfRange(_) => "historyIndexOutOfRange",
+            ChatError::PersistFailed { .. } => "persistFailed",
+        }
+    }
+
+    fn chat_event_tag(e: &ChatEvent) -> &'static str {
+        match e {
+            ChatEvent::Delta(_) => "delta",
+            ChatEvent::Reasoning(_) => "reasoning",
+            ChatEvent::ToolCallArgsParsed { .. } => "toolCallArgsParsed",
+            ChatEvent::ToolCallCompleted { .. } => "toolCallCompleted",
+            ChatEvent::MessageFinished { .. } => "messageFinished",
+            ChatEvent::StateChanged(_) => "stateChanged",
+            ChatEvent::HistoryReplaced(_) => "historyReplaced",
+            ChatEvent::MetricsReplaced(_) => "metricsReplaced",
+            ChatEvent::SubAgentsChanged(_) => "subAgentsChanged",
+            ChatEvent::SubAgentTranscriptUpdated { .. } => "subAgentTranscriptUpdated",
+            ChatEvent::ReviewFrameOpened { .. } => "reviewFrameOpened",
+            ChatEvent::ReviewerStarted { .. } => "reviewerStarted",
+            ChatEvent::ReviewerCompleted { .. } => "reviewerCompleted",
+            ChatEvent::ReviewFrameProgress { .. } => "reviewFrameProgress",
+            ChatEvent::ReviewFrameResolved { .. } => "reviewFrameResolved",
+            ChatEvent::ToolCallStreaming { .. } => "toolCallStreaming",
+            ChatEvent::ToolCallArgsDelta { .. } => "toolCallArgsDelta",
+            ChatEvent::SummaryUpdated { .. } => "summaryUpdated",
+            ChatEvent::AttemptsSquashed { .. } => "attemptsSquashed",
+        }
+    }
+
+    fn historical_message_tag(h: &HistoricalMessage) -> &'static str {
+        match h {
+            HistoricalMessage::User(_) => "user",
+            HistoricalMessage::Assistant(_) => "assistant",
+            HistoricalMessage::Thinking(_) => "thinking",
+            HistoricalMessage::Tool { .. } => "tool",
+            HistoricalMessage::SubAgentReply { .. } => "subAgentReply",
+            HistoricalMessage::SubAgentFailure { .. } => "subAgentFailure",
+            HistoricalMessage::Summary { .. } => "summary",
+        }
+    }
+
+    fn message_meta_tag(m: &MessageMeta) -> &'static str {
+        match m {
+            MessageMeta::User { .. } => "user",
+            MessageMeta::Assistant { .. } => "assistant",
+            MessageMeta::Thinking { .. } => "thinking",
+            MessageMeta::Tool { .. } => "tool",
+            MessageMeta::SubAgentReply { .. } => "subAgentReply",
+            MessageMeta::SubAgentFailure { .. } => "subAgentFailure",
+            MessageMeta::Summary { .. } => "summary",
+        }
+    }
 }
