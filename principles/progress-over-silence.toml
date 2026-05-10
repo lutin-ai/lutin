@@ -1,0 +1,73 @@
+title = "Long operations report progress; don't go silent"
+description = '''
+Any tool call that can plausibly take more than a few seconds
+should either produce visible progress as it runs, or be bounded
+by a timeout that fails loudly when exceeded. Silent multi-minute
+operations are the worst-case UX: the user can't tell whether the
+agent is working, hung, or has wandered off, and can't intervene
+until it's too late.
+
+This applies to shell commands, HTTP requests, and sub-agent
+spawns. The principle is *visibility*, not chattiness — one line
+when something happens beats a heartbeat every second, and both
+beat ten minutes of nothing.
+
+## Why
+
+- Silence is indistinguishable from a hang. The user's only
+  recourse is to wait, kill, or babysit the terminal — all bad
+  options.
+- Long silent operations burn the user's attention budget twice:
+  once during the wait, again when they have to reconstruct what
+  was supposed to happen.
+- A bounded timeout converts an unknown-duration hang into a
+  known-duration failure, which is recoverable. An unbounded
+  operation can stall forever.
+- For sub-agent spawns, silence is even worse: the parent has no
+  insight into whether the child is making progress or burning
+  tokens on the wrong problem.
+
+## Apply
+
+Block when the proposed call is:
+- A shell command expected to run more than a few seconds with
+  no streaming output and no `--progress` / `-v` / equivalent
+  flag, when one is available (e.g. `curl` without `--progress-bar`
+  for a large download, `cargo build` is fine because it streams,
+  `npm install --silent` for a slow install is not).
+- A network fetch with no explicit timeout, in a context where
+  hanging forever would be a real failure mode (CI, agent loop,
+  user-blocking call).
+- A sub-agent spawn with a task description that suggests >5
+  minutes of work and no scoping ("research X thoroughly",
+  "refactor the whole module", "fix all the failing tests")
+  when the parent has no progress channel.
+- A `tail -f`, `watch`, `wait`, or polling loop with no exit
+  condition reachable from the inputs.
+
+Pass when:
+- The command streams output as it runs (compilers, test
+  runners, package managers in default-verbose mode).
+- An explicit timeout is set, and the failure on timeout is
+  meaningful (not a silent ignore).
+- The sub-agent prompt is scoped narrowly enough that "should be
+  done in a few minutes" is reasonable, or the parent has a way
+  to inspect progress.
+- The operation is genuinely instant (small queries, single-file
+  reads).
+
+## Verdict guidance
+
+- "rethink" — the call shape is unbounded silence by design
+  (e.g. a `wait` with no timeout, a sub-agent given an open-ended
+  research task). Pop the frame and add scoping or progress.
+- "fix" — call is fine but missing a flag or timeout. Re-issue
+  with `--progress`, `-v`, `--timeout`, or a narrower prompt.
+- "nit" — output is present but noisy or sparse; could be
+  better-tuned.
+'''
+
+persona = "reviewer"
+applies_to = ["shell", "http_request", "spawn_agent"]
+context = ["tool_call", "chat"]
+max_retries = 2

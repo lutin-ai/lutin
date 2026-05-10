@@ -1,0 +1,73 @@
+title = "Terse by default in written artifacts"
+description = '''
+Comments, docstrings, READMEs, commit messages, PR descriptions,
+and sub-agent prompts should be as short as the meaning allows.
+The default is *no* prose; prose earns its place by carrying
+information that the code, signature, or ticket doesn't already.
+Filler ("This function takes X and returns Y", "Added support
+for...", restating identifiers in English) is worse than nothing —
+it pushes the load-bearing words further from the reader's eye.
+
+This is the writing-craft sibling of `write-for-the-reader` and
+`name-things-for-what-they-are`. Those two argue about clarity;
+this one argues about *length*.
+
+## Why
+
+- Verbose comments rot. The code changes; the prose doesn't.
+  Future readers can't tell whether the comment is still true,
+  so they ignore it — at which point it's pure noise.
+- A long comment buries the WHY in a paragraph of WHAT. The WHY
+  is the only thing that's hard to recover from the code itself,
+  so it's the only thing worth writing down.
+- Verbose sub-agent prompts dilute the actual instruction. A
+  child agent given a five-paragraph brief tends to address the
+  whole brief evenly; the load-bearing sentence gets equal
+  weight with the throat-clearing.
+- Auto-generated section headers, banner comments, and
+  decorative dividers add visual weight without information;
+  they make small files feel ceremonial.
+
+## Apply
+
+Block when the proposed change introduces:
+- A comment that restates what the code does ("// Increment
+  counter" above `counter += 1`).
+- A docstring that paraphrases the function name and parameter
+  list, with no behavioral notes, no failure modes, no examples.
+- A multi-paragraph block comment where one line would do.
+- Banner comments / ASCII dividers / "BEGIN" + "END" markers
+  around code blocks that aren't unusually long or unusually
+  important.
+- A README/PR description that opens with throat-clearing
+  ("This PR makes some changes to...") instead of leading with
+  the actual change.
+- A sub-agent prompt that buries the task in surrounding
+  context, restates instructions multiple times, or includes
+  filler phrases ("please carefully and thoroughly...").
+
+Pass when:
+- Comments explain non-obvious WHY: a workaround for a specific
+  bug, a hidden invariant, a constraint the type system can't
+  capture, a deliberate departure from the obvious approach.
+- Docstrings document behavior the signature can't express:
+  failure modes, side effects, ordering guarantees, edge cases.
+- A short README/PR description leads with the change in one or
+  two sentences and stops.
+- A sub-agent prompt states the task once, gives the minimum
+  context the child needs to make judgment calls, and ends.
+
+## Verdict guidance
+
+- "rethink" — the artifact is fundamentally ceremonial (banner
+  comments, multi-paragraph what-not-why docs). Cut to nothing
+  or a single line.
+- "fix" — content is fine but bloated. Re-issue at half the
+  length with the load-bearing parts kept.
+- "nit" — minor padding worth trimming.
+'''
+
+persona = "reviewer"
+applies_to = ["edit", "edit_lines", "write", "spawn_agent"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2

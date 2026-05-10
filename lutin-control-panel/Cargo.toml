@@ -3,6 +3,8 @@ name = "lutin-control-panel"
 version.workspace = true
 edition.workspace = true
 
+build = "build.rs"
+
 [lib]
 path = "src/lib.rs"
 

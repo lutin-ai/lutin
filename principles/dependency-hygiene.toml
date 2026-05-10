@@ -1,0 +1,74 @@
+title = "Add dependencies deliberately"
+description = '''
+A new dependency is a long-term commitment: every package added is
+code the project must trust forever, monitor for vulnerabilities,
+keep building on every toolchain bump, and absorb breaking changes
+from. The bar for adding one is "I have a reason it's better than
+20 lines of local code", not "it exists on the registry".
+
+This principle complements the supply-chain rules in
+`shell-no-dangerous-commands` (which blocks unusual install
+sources). This one fires on the *content* of the dependency
+manifest itself — what's being added, why, and how it's pinned.
+
+## Why
+
+- Every dependency is a transitive supply-chain surface. The
+  package you add pulls in N more, each of which can ship a
+  malicious update or get taken over by an attacker.
+- Typosquatting and namespace confusion are routine attacks.
+  Adding `requets` instead of `requests`, or a fork named like
+  the original, costs the same number of keystrokes as adding
+  the real one.
+- Unpinned versions (`*`, `latest`, `^1`) make builds non-
+  reproducible and let an upstream compromise propagate the next
+  time the lockfile is regenerated.
+- Once a dependency is in, removing it is hard — it spreads
+  through the codebase, and the original "I needed one function"
+  justification is forgotten.
+
+## Apply
+
+Block when the proposed change:
+- Adds a dependency whose name is a near-miss of a well-known
+  package (`requets`, `colour` for `colors`, `python-jwt` vs
+  `pyjwt`), or a fork/clone of a popular package not maintained
+  by the original author or a known org.
+- Pins to `*`, `latest`, an unbounded `>=`, an open-ended `^0`
+  for a pre-1.0 package without a rev, or — for git deps — a
+  branch ref instead of a tag/rev, in a manifest meant to be
+  reproducible.
+- Adds a heavyweight dep (deep transitive tree, native build
+  step, megabytes of code) for a small task that local code or
+  an existing dep would handle.
+- Adds a dep with no recent maintenance, single-maintainer with
+  no audit trail, or known-deprecated status, when an
+  actively-maintained alternative exists.
+- Duplicates capability already available through a dep already
+  in the manifest or the standard library (`once_cell` alongside
+  `LazyLock` post-1.80; `axios` alongside `fetch`).
+
+Pass when:
+- The dep is widely used, actively maintained, and the
+  capability isn't reasonably available locally or through an
+  existing dep.
+- Pinning matches the project's existing convention (exact
+  version, semver caret, or rev/tag for git deps).
+- A lockfile is committed and the dep will end up in it.
+- The change *removes* a dep or replaces a heavier one with a
+  lighter equivalent.
+
+## Verdict guidance
+
+- "rethink" — the dep is a typosquat, a malicious fork, or a
+  heavyweight pull for a one-liner. Pop the frame.
+- "fix" — legitimate dep but pinning is too loose, or a smaller
+  alternative is available. Re-issue with the tighter form.
+- "nit" — fine to add but worth a comment explaining why,
+  especially if the dep is unusual or single-maintainer.
+'''
+
+persona = "reviewer"
+applies_to = ["edit", "edit_lines", "write"]
+context = ["tool_call", "tool_artifact", "chat"]
+max_retries = 2

@@ -1,0 +1,72 @@
+title = "Validate untrusted input at the boundary"
+description = '''
+Anything that crosses a trust boundary into the program — HTTP
+request bodies, query strings, headers, file contents, environment
+variables, subprocess output, message-queue payloads, LLM output —
+must be parsed into a typed shape before the rest of the code
+touches it. Raw untrusted strings should not flow into SQL, shell,
+filesystem paths, format strings, deserializers, HTML, or
+downstream services.
+
+This is the security-flavored sibling of `parse-dont-validate` and
+`validate-at-boundaries`. Those two argue from a correctness angle
+(don't carry a `String` when you could carry a `Url`); this one
+argues from an attacker angle (the `String` you carry might be a
+SQL fragment, a path traversal, a script tag, or a `${jndi:…}`).
+
+## Why
+
+- Every shell-injection, SQLi, SSRF, path traversal, XSS, and
+  deserialization-RCE in the OWASP top 10 starts as an unvalidated
+  string crossing a trust boundary.
+- LLM output is now an untrusted source. A model's reply that gets
+  fed into shell, `eval`, or a tool-arg without parsing is the same
+  threat shape as a user-submitted form field.
+- Once an untrusted string is mid-program, it becomes
+  indistinguishable from a trusted one. The only place to catch it
+  is at the entry point.
+
+## Apply
+
+Block when the proposed change:
+- Reads an HTTP body / query param / header / env var / file /
+  subprocess output / LLM response and uses the raw value in a
+  sensitive sink (SQL string, shell command, filesystem path,
+  redirect URL, HTML output, log format string, deserialization
+  target) without going through a parse step.
+- Defines a new endpoint / handler / message consumer with the
+  payload typed as `String` / `serde_json::Value` / `dict` /
+  `any`, instead of a typed schema (struct + `#[derive(Deserialize)]`,
+  Pydantic model, zod schema, Protobuf message).
+- Concatenates user-controlled segments into a path
+  (`format!("./uploads/{name}")`) without rejecting `..`, absolute
+  paths, or null bytes.
+- Passes LLM tool-call arguments straight through to a privileged
+  operation without validating against the tool's declared schema.
+
+Pass when:
+- The input is parsed into a typed shape (struct, dataclass,
+  schema-validated object) at the boundary, and only the typed
+  form is used downstream.
+- The sink is intrinsically safe for the value's shape (e.g. a
+  prepared-statement parameter, an argv array passed to a
+  process, an HTML library that escapes by default).
+- The code is reading values it just wrote itself in the same
+  process — that is not a trust boundary.
+
+## Verdict guidance
+
+- "rethink" — the architecture treats an untrusted source as
+  trusted (e.g. handler signature is `fn(body: String)` and the
+  string flows into `db.execute(&body)`). Pop the frame and add a
+  parsing layer.
+- "fix" — boundary exists but a specific path bypasses it (one
+  endpoint forgot to validate, one log message uses raw input).
+- "nit" — input is validated but the typed form is more
+  permissive than necessary (e.g. `String` where an enum would do).
+'''
+
+persona = "reviewer"
+applies_to = ["edit", "edit_lines", "write"]
+context = ["tool_call", "tool_artifact", "chat"]
+max_retries = 2

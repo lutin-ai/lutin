@@ -24,6 +24,7 @@ order = [
   # Style + readability — easy to fix, easy to defer.
   "write-for-the-reader",
   "name-things-for-what-they-are",
+  "terse-output-by-default",
 
   # Performance hints — usually right, occasionally wrong on purpose.
   "prefer-stack-over-heap",
@@ -56,20 +57,28 @@ order = [
   "newtype-domain-primitives",
   "parse-dont-validate",
   "validate-at-boundaries",
+  "validate-untrusted-input",
   "make-illegal-states-unrepresentable",
 
   # Error handling — explicit failure modes.
   "errors-as-values",
+  "clear-error-messages-for-humans",
   "dont-catch-what-you-cant-handle",
   "idempotency-for-retried-ops",
 
   # Hygiene + tests — last word, hardest to argue against.
   "delete-dead-code",
+  "dependency-hygiene",
   "test-behavior-not-implementation",
+
+  # UX — visibility into long-running agent actions.
+  "progress-over-silence",
 
   # Safety — most important, never deferred. A single dangerous shell
   # command can wipe a disk, leak credentials, or push to prod; goes
   # last so its verdict overrides everything else when it fires.
+  "reversible-by-default",
+  "no-secrets-in-code",
   "shell-no-dangerous-commands",
 
   # Alignment — last word above safety's mechanical guard. Catches

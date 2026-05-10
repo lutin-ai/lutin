@@ -1,0 +1,73 @@
+title = "Error messages are written for the human reading them"
+description = '''
+An error message is a UX surface, not a debug breadcrumb. The
+person reading it — operator, end user, future maintainer, or
+on-call at 3 AM — needs to know three things: what failed, why it
+failed, and what they can do about it. Anything that prints just
+"Error" / "Invalid" / "Failed" / a stringified enum / a stack
+trace with no narrative is a defect, not a message.
+
+This is the human-facing complement to `errors-as-values` and
+`dont-catch-what-you-cant-handle`. Those two argue about how
+errors propagate; this one argues about what they *say* when they
+arrive.
+
+## Why
+
+- The most common debugging session starts with an error message
+  and ends when someone figures out what it actually meant. Every
+  unclear message taxes that session.
+- Vague errors get blamed on the next layer down. "Database
+  error" gets reported as a DB bug when the real cause was a
+  validation miss two hops up.
+- Error messages flow into logs, alerts, support tickets, and
+  status pages. They are read out of context, often by people
+  with no access to the source code that produced them.
+- A good error message often makes the bug self-fixing: the user
+  sees it, sees what to change, and changes it without ever
+  filing a ticket.
+
+## Apply
+
+Block when the proposed change introduces an error message that:
+- Is empty, generic, or tautological: "Error", "Invalid input",
+  "Something went wrong", `format!("{e}")` where `e` is itself
+  generic, `panic!("unreachable")` without a reason, `unwrap()`
+  with no context.
+- Lacks the relevant identifier: complains about a missing file
+  without saying which path, a parse failure without saying which
+  field/line, a network failure without saying which host.
+- Names an internal symbol the reader can't act on:
+  "FooBarTransformerImpl returned None", "EINVAL at L312",
+  enum variants thrown raw without a human label.
+- Tells the reader what failed but not what to do, when a
+  next-step is obvious: "config missing" vs. "config missing —
+  run `lutin init` or set LUTIN_CONFIG".
+- Includes a secret or other sensitive value in the message body
+  (cross-reference: `no-secrets-in-code`).
+
+Pass when:
+- The message names the operation, the relevant input
+  identifier, the underlying cause, and (where possible) a
+  next-step or pointer to docs.
+- The message is wrapped with context as it propagates up
+  (e.g. `anyhow::Context`, `.context("loading workflow {name}")`)
+  rather than swallowed and rethrown opaquely.
+- The phrasing assumes the reader has *not* read the code that
+  produced it.
+
+## Verdict guidance
+
+- "rethink" — error type is genuinely unhelpful (e.g. a single
+  `Error::Generic(String)` variant used everywhere). The fix is
+  a richer error type, not a better string.
+- "fix" — message exists but is missing one of: the identifier,
+  the cause, or the next step. Re-issue with that filled in.
+- "nit" — fine but could be sharper (drop jargon, name the
+  field, etc.).
+'''
+
+persona = "reviewer"
+applies_to = ["edit", "edit_lines", "write"]
+context = ["tool_call", "tool_artifact"]
+max_retries = 2
