@@ -1665,6 +1665,16 @@ async fn run_turn(
                 ev = stream.next() => match ev {
                     Some(ev) => {
                         update_live_messages_len(&mut live_messages_len, &ev);
+                        // Any non-abort tool call counts as forward
+                        // progress and resets the consecutive-abort
+                        // tripwire below. Without this, an abort →
+                        // real work → abort sequence within one turn
+                        // would still trip the "twice in a row" bail.
+                        if let AgentEvent::ToolCallCompleted { call, .. } = &ev
+                            && call.name.as_str() != review::ABORT_STEP_TOOL_NAME
+                        {
+                            last_round_self_abort = false;
+                        }
                         if let Some(reason) = handle_agent_event(ev, &ctx.events, &mut tracker) {
                             finish = Some(reason);
                         }
@@ -1763,10 +1773,50 @@ async fn run_turn(
             &ctx.events,
             label,
         ) {
-            Ok(true) if restart_after_rewind => {
-                // Successful rewind: reset tracker for the new round
-                // so finalize_turn_meta gets clean stats for the
-                // post-rewind portion.
+            Ok(rewound) if restart_after_rewind => {
+                // Continue path: either a real rewind happened
+                // (`rewound == true`, prior frame reactivated and
+                // transcript truncated by perform_rewind) or we hit
+                // BottomOfStack on a self-abort (`rewound == false`,
+                // nothing to roll back). In the BottomOfStack case
+                // we still want to keep the turn alive — inject a
+                // synthetic prompt so the agent has context for why
+                // it's being re-prompted, then restart. The
+                // two-consecutive-self-abort guard above prevents
+                // an infinite loop of bottom-of-stack self-aborts.
+                if !rewound {
+                    let PendingRewind::Continue { feedback } = &pending else {
+                        unreachable!("restart_after_rewind implies Continue")
+                    };
+                    let synthetic = format!(
+                        "[self-abort] You called abort_step but there is no prior step to \
+                         rewind to. Reconsider from your current position. {feedback}"
+                    );
+                    let user_msg = lutin_llm::Message::User(synthetic);
+                    if let Err(e) = agent.push_message(user_msg.clone()) {
+                        finish = Some(FinishReason::Failed(format!(
+                            "push self-abort prompt: {e}"
+                        )));
+                        break 'rewind outcome;
+                    }
+                    entries.push(Entry {
+                        message: user_msg,
+                        metrics: MessageMetrics {
+                            timestamp: Some(now_rfc3339()),
+                            ..Default::default()
+                        },
+                    });
+                    live_messages_len = entries.len();
+                    let _ = ctx
+                        .events
+                        .send(ChatEvent::HistoryReplaced(project_history(entries)));
+                    let _ = ctx
+                        .events
+                        .send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+                    let _ = ctx.events.send(build_summary_updated(entries));
+                }
+                // Reset tracker for the new round so finalize_turn_meta
+                // gets clean stats for the post-rewind portion.
                 tracker = TurnTracker::new(sdk_summary::aggregate(entry_tokens(entries)));
                 stream = match agent.start() {
                     Ok(s) => s,
@@ -1780,18 +1830,15 @@ async fn run_turn(
                 };
             }
             Ok(_) => {
-                // Either an Abort (review system failure: do not
-                // restart, surface the error) or a Continue with
-                // nothing to rewind to (no prior step) → both end
-                // the turn with Failed.
-                finish = Some(FinishReason::Failed(match pending {
-                    PendingRewind::Abort { reason } => {
-                        format!("review system failure: {reason}")
-                    }
-                    PendingRewind::Continue { feedback } => {
-                        format!("review escalated (no prior step to rewind to): {feedback}")
-                    }
-                }));
+                // Abort path (review system failure): end the turn
+                // and surface the error. Continue is handled above
+                // — including the BottomOfStack case.
+                let PendingRewind::Abort { reason } = pending else {
+                    unreachable!("non-restart path implies Abort")
+                };
+                finish = Some(FinishReason::Failed(format!(
+                    "review system failure: {reason}"
+                )));
                 break 'rewind outcome;
             }
             Err(e) => {
