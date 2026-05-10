@@ -11,10 +11,25 @@
 
 use lutin_entities::Persona;
 use lutin_llm::{
-    CompletionRequest, LlmError, LlmProvider, Message as LlmMessage, ModelId, ToolCall,
-    ToolDefinition, ToolName, ToolParameter,
+    CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message as LlmMessage, ModelId,
+    ToolCall, ToolDefinition, ToolName, ToolParameter,
 };
 use serde::Deserialize;
+
+/// Max number of retries when the reviewer model finishes without
+/// calling `submit_verdict` and without emitting parseable verdict
+/// text. One initial call + this many retries = up to 3 attempts.
+/// Reasoning models occasionally burn their first response on
+/// chain-of-thought without producing the tool call; a nudge usually
+/// shakes the verdict loose. Beyond two nudges the model is unlikely
+/// to comply at all and we'd rather surface the failure than loop.
+const MAX_TOOL_CALL_RETRIES: u32 = 2;
+
+/// Reviewer's `max_tokens` budget. ~100x normal verdict size, generous
+/// headroom for any reasoning-model preamble while still bounded so a
+/// misbehaving reviewer can't burn through the context window. Hitting
+/// the cap surfaces in the diagnostic error.
+const REVIEWER_MAX_TOKENS: u32 = 10240;
 
 /// Name the reviewer LLM uses to submit its verdict. Stable string —
 /// matches what we register in the tool definition and what we look
@@ -52,40 +67,111 @@ pub async fn review(
 ) -> Result<Verdict, ReviewerError> {
     let system = build_system_prompt(persona, inputs.principle);
     let user = build_user_prompt(&inputs);
-    let request = CompletionRequest {
-        model: model.clone(),
-        messages: vec![LlmMessage::System(system), LlmMessage::User(user)],
-        // Hardcoded reviewer-only tool. Never registered in the agent
-        // SDK toolbox — exists solely on this CompletionRequest so the
-        // reviewer model emits its verdict as structured args instead
-        // of JSON in `content`. Keeps reasoning models from leaking
-        // chain-of-thought into the parser.
-        tools: vec![submit_verdict_tool()],
-        temperature: persona.temperature.or(Some(0.0)),
-        presence_penalty: persona.presence_penalty,
-        // 10k = ~100x normal verdict size. Generous headroom in case
-        // a model leaks any reasoning before the tool call, but still
-        // bounded so a misbehaving reviewer can't burn through the
-        // whole context window. Hitting the cap returns
-        // `finish_reason=length` cleanly — no crash, just a parse
-        // failure that propagates as a review system failure.
-        max_tokens: Some(10240),
-        thinking_enabled: false,
-        extensions: Default::default(),
-    };
-    let response = provider.complete(request).await.map_err(ReviewerError::Llm)?;
-    // Prefer the tool call. Models that honor the tool emit one
-    // `submit_verdict` call with the verdict in args; we parse those
-    // directly. Providers that ignore tools (or models that do their
-    // own thing) fall through to the lenient text parser, which
-    // handles raw JSON, code-fenced JSON, and JSON buried in a
-    // chain-of-thought monologue.
-    if let Some(call) = response.tool_calls.first() {
-        if call.name.as_str() == VERDICT_TOOL {
+    let mut messages = vec![LlmMessage::System(system), LlmMessage::User(user)];
+
+    let mut attempt: u32 = 0;
+    loop {
+        let request = CompletionRequest {
+            model: model.clone(),
+            messages: messages.clone(),
+            // Hardcoded reviewer-only tool. Never registered in the
+            // agent SDK toolbox — exists solely on this
+            // CompletionRequest so the reviewer model emits its
+            // verdict as structured args instead of JSON in `content`.
+            tools: vec![submit_verdict_tool()],
+            temperature: persona.temperature.or(Some(0.0)),
+            presence_penalty: persona.presence_penalty,
+            max_tokens: Some(REVIEWER_MAX_TOKENS),
+            thinking_enabled: false,
+            extensions: Default::default(),
+        };
+        let response = provider.complete(request).await.map_err(ReviewerError::Llm)?;
+
+        // Prefer the tool call. Models that honor the tool emit one
+        // `submit_verdict` call with the verdict in args; parse those
+        // directly. A wrong-named tool call falls through.
+        if let Some(call) = response.tool_calls.first()
+            && call.name.as_str() == VERDICT_TOOL
+        {
             return parse_verdict_from_args(&inputs.principle.name, &call.arguments);
         }
+        // Providers that ignore tools (or models that do their own
+        // thing) emit verdict JSON in `content`. Lenient parser
+        // handles raw JSON, code-fenced JSON, and JSON buried in a
+        // chain-of-thought monologue.
+        if let Ok(v) = parse_verdict(&inputs.principle.name, &response.text) {
+            return Ok(v);
+        }
+
+        // Neither path produced a verdict. Reasoning models sometimes
+        // burn the response on thinking and emit nothing actionable;
+        // a follow-up user turn that names the tool usually shakes
+        // the verdict loose. Cap retries so a model that simply will
+        // not comply fails loudly instead of looping.
+        if attempt >= MAX_TOOL_CALL_RETRIES {
+            return Err(missing_verdict_error(attempt + 1, &response));
+        }
+        attempt += 1;
+        messages.push(LlmMessage::Assistant {
+            text: response.text.clone(),
+            tool_calls: response.tool_calls.clone(),
+            thinking: response.thinking.clone(),
+        });
+        messages.push(LlmMessage::User(
+            "You did not call the `submit_verdict` tool. You must call it exactly once, \
+             now, with your verdict on the principle above. Do not reply with text — \
+             call the tool."
+                .into(),
+        ));
     }
-    parse_verdict(&inputs.principle.name, &response.text)
+}
+
+/// Build the parse-failure message returned after the retry budget is
+/// exhausted. Surfaces what we *did* receive — text, thinking,
+/// tool-call names, and token usage — so the failure is diagnosable
+/// from a single log line instead of "no JSON found in: <empty>".
+fn missing_verdict_error(attempts: u32, response: &CompletionResponse) -> ReviewerError {
+    let text = display_or_empty(&response.text, 400);
+    let thinking = response
+        .thinking
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!(" thinking={}", display_or_empty(t, 400)))
+        .unwrap_or_default();
+    let tools = if response.tool_calls.is_empty() {
+        " tool_calls=[]".to_string()
+    } else {
+        let names: Vec<&str> = response.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        format!(" tool_calls={names:?}")
+    };
+    let length_hint = if response.usage.completion_tokens >= REVIEWER_MAX_TOKENS {
+        " (hit max_tokens — likely cut off mid-output)"
+    } else {
+        ""
+    };
+    let usage = format!(
+        " usage(completion={}/max={}){length_hint}",
+        response.usage.completion_tokens, REVIEWER_MAX_TOKENS,
+    );
+    ReviewerError::Parse(format!(
+        "reviewer produced no parseable verdict after {attempts} attempt(s); \
+         text={text}{thinking}{tools}{usage}"
+    ))
+}
+
+/// Trim and char-bounded-truncate a string for inclusion in an error
+/// message. Returns `"<empty>"` for blank input so the placeholder is
+/// visible in logs.
+fn display_or_empty(s: &str, max_chars: usize) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return "<empty>".to_string();
+    }
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    format!("{head}…[truncated]")
 }
 
 /// Tool the reviewer LLM is asked to call. Args mirror `RawVerdict`.
