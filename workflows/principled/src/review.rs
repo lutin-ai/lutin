@@ -1013,14 +1013,36 @@ async fn run_reviewers_parallel(
     }))
     .buffer_unordered(concurrency.max(1));
 
-    // Short-circuit on the first principle that exhausts its retries:
-    // dropping `stream` cancels the still-running reviewer futures
-    // (their SSE streams get torn down on drop), which is what we want
-    // when the backend is wedged.
+    // Short-circuit on:
+    //   1. the first principle that exhausts its retries — backend
+    //      is wedged, abort the turn; or
+    //   2. the first blocking verdict (Fix or Rethink) — `apply_verdicts`
+    //      only ever forwards ONE failure to the agent (rethink-over-fix
+    //      among those collected, then budget-aware pick among fixes),
+    //      so finishing every reviewer just to pick one is wasted LLM
+    //      spend. The agent fixes the first failure and we re-review on
+    //      the next iteration; principles that hadn't reported yet get
+    //      their next chance then.
+    //
+    // Trade-off: with concurrency > 1, a Fix that lands before a slower
+    // Rethink wins, so the "Rethink outranks Fix" priority within one
+    // attempt is best-effort rather than guaranteed. Acceptable —
+    // Rethink would surface on the next cycle if the agent's fix didn't
+    // address the deeper issue.
+    //
+    // Dropping `stream` on either short-circuit cancels the still-running
+    // reviewer futures; their SSE streams get torn down on drop, so no
+    // tokens keep flowing for cancelled principles.
     let mut verdicts = Vec::with_capacity(bundles.len());
     while let Some(result) = stream.next().await {
         match result {
-            Ok(v) => verdicts.push(v),
+            Ok(v) => {
+                let blocking = v.is_blocking();
+                verdicts.push(v);
+                if blocking {
+                    return Ok(verdicts);
+                }
+            }
             Err(failure) => return Err(failure),
         }
     }
