@@ -536,6 +536,17 @@ struct TurnTracker {
     /// resolve to the latest round's prompt size.
     intra_turn_prompt: u64,
     intra_turn_completion: u64,
+    /// Wall-time spent inside the model's generation phase, summed
+    /// across rounds. `RoundStarted` opens the window; `AssistantMessage`
+    /// closes it (the SDK emits that the moment the model stream ends,
+    /// before tool dispatch). Dividing `intra_turn_completion` by this
+    /// gives the real generation rate; using total turn wall-time would
+    /// blend in tool execution and produce a misleadingly low tok/s.
+    model_active_ms: u64,
+    /// Open-window marker for `model_active_ms`. `Some` between
+    /// `RoundStarted` and `AssistantMessage`; `None` while tools run or
+    /// before the first round.
+    current_round_started: Option<Instant>,
     /// Tool-call lifecycles for this turn. `Vec` rather than `HashMap`
     /// because per-turn tool counts are typically <10; linear scan is
     /// cheaper than hashing on every event.
@@ -567,6 +578,8 @@ impl TurnTracker {
             total_completion_pre_turn: pre_turn.total_completion_tokens,
             intra_turn_prompt: 0,
             intra_turn_completion: 0,
+            model_active_ms: 0,
+            current_round_started: None,
             tools: Vec::new(),
         }
     }
@@ -1663,16 +1676,31 @@ fn append_compaction_archive(
 /// `tool_calls`.
 fn finalize_turn_meta(entries: &mut Vec<Entry>, pre_turn_len: usize, tracker: &TurnTracker) {
     let now = Instant::now();
-    let duration_ms = now.saturating_duration_since(tracker.started_at).as_millis() as u64;
+    let total_ms = now.saturating_duration_since(tracker.started_at).as_millis() as u64;
+    // Prefer model-only time so tps reflects actual generation. Fall
+    // back to wall-time only when no `RoundStarted/AssistantMessage`
+    // pair was seen — covers tests that finalize without driving a
+    // real round.
+    let duration_ms = if tracker.model_active_ms > 0 {
+        tracker.model_active_ms
+    } else {
+        total_ms
+    };
     let ttft_ms = tracker
         .first_text_at
         .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
     let thinking_ttft_ms = tracker
         .first_thinking_at
         .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
-    let (prompt_tokens, completion_tokens) = match &tracker.last_usage {
-        Some(u) => (Some(u.prompt_tokens), Some(u.completion_tokens)),
-        None => (None, None),
+    // Use cumulative completion across rounds — `last_usage` only holds
+    // the final round's count, so a multi-round turn (model → tool →
+    // model …) would otherwise divide last-round tokens by full-turn
+    // time and report a tps value an order of magnitude too low.
+    let prompt_tokens = tracker.last_usage.as_ref().map(|u| u.prompt_tokens);
+    let completion_tokens = if tracker.intra_turn_completion > 0 {
+        Some(u32::try_from(tracker.intra_turn_completion).unwrap_or(u32::MAX))
+    } else {
+        tracker.last_usage.as_ref().map(|u| u.completion_tokens)
     };
 
     // Tool lifecycles: write each into the assistant entry that owns
@@ -2068,9 +2096,23 @@ fn handle_agent_event(
         }
         AgentEvent::Finished(reason) => Some(map_finish_reason(reason)),
         AgentEvent::Error(e) => Some(FinishReason::Failed(format!("{e}"))),
-        AgentEvent::RoundStarted { .. }
-        | AgentEvent::RoundEnded { .. }
-        | AgentEvent::AssistantMessage(_) => None,
+        AgentEvent::RoundStarted { .. } => {
+            tracker.current_round_started = Some(Instant::now());
+            None
+        }
+        AgentEvent::AssistantMessage(_) => {
+            // Model stream ended for this round — close the gen window
+            // before tool dispatch begins so tool wall-time stays out of
+            // `model_active_ms`.
+            if let Some(start) = tracker.current_round_started.take() {
+                let elapsed = Instant::now()
+                    .saturating_duration_since(start)
+                    .as_millis() as u64;
+                tracker.model_active_ms = tracker.model_active_ms.saturating_add(elapsed);
+            }
+            None
+        }
+        AgentEvent::RoundEnded { .. } => None,
         other => {
             warn!(?other, "unrecognized AgentEvent variant");
             None
@@ -2182,6 +2224,7 @@ impl ResolvedArgs {
                 owner_id,
             ),
             prompt_extras,
+            disable_streaming: false,
         }
     }
 }

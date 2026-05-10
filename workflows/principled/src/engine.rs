@@ -587,6 +587,15 @@ struct TurnTracker {
     /// prompt size.
     intra_turn_prompt: u64,
     intra_turn_completion: u64,
+    /// Wall-time spent inside the model's generation phase, summed
+    /// across rounds. `RoundStarted` opens the window; `AssistantMessage`
+    /// closes it before tool dispatch. Dividing `intra_turn_completion`
+    /// by this gives the real generation rate; using total turn wall-
+    /// time would blend in tool execution and produce a misleadingly
+    /// low tok/s.
+    model_active_ms: u64,
+    /// Open-window marker for `model_active_ms`.
+    current_round_started: Option<Instant>,
     /// Tool-call lifecycles for this turn. `Vec` rather than `HashMap`
     /// because per-turn tool counts are typically <10; linear scan is
     /// cheaper than hashing on every event.
@@ -618,6 +627,8 @@ impl TurnTracker {
             total_completion_pre_turn: pre_turn.total_completion_tokens,
             intra_turn_prompt: 0,
             intra_turn_completion: 0,
+            model_active_ms: 0,
+            current_round_started: None,
             tools: Vec::new(),
         }
     }
@@ -1405,7 +1416,7 @@ fn build_subagent(
     let resolved = resolve_args(ctx, Some(persona))
         .map_err(|e| format!("resolve args: {e}"))?;
     let build_args =
-        resolved.as_build_args_with(ctx, PromptExtras::default(), Some(owner_id));
+        resolved.as_build_args_with(ctx, PromptExtras::default(), Some(owner_id), None);
     let mut agent = sdk_build_agent(build_args)
         .map_err(|e| format!("build agent: {}", map_build_error(e)))?;
     agent
@@ -1451,7 +1462,25 @@ async fn run_turn(
         }
     };
     let extras = build_prompt_extras(ctx, entries, &resolved.persona).await;
-    if let Err(e) = sdk_refresh_agent(agent, resolved.as_build_args_with(ctx, extras, None)) {
+    // Channels for this turn:
+    //  - rewind_rx:  Rethink verdict → cancel + restore prior frame.
+    //  - review_req_rx: BeginFrame / ApplyVerdicts / CheckLock requests
+    //    from `ApprovalPolicy::decide`. The session is the single writer
+    //    of its step stack — `decide` only sends requests and awaits
+    //    replies on per-call oneshots.
+    //
+    // Constructed *before* the agent refresh so the agent-side
+    // `abort_step` tool can capture a clone of `rewind_tx` when the
+    // toolbox is built. Each turn produces a fresh pair, so the
+    // captured sender is rebound every time tools are refreshed —
+    // there's no stale-handle hazard across turns.
+    let (rewind_tx, mut rewind_rx) = mpsc::unbounded_channel::<review::RewindSignal>();
+    let (review_req_tx, mut review_req_rx) =
+        mpsc::unbounded_channel::<review::ReviewRequest>();
+    if let Err(e) = sdk_refresh_agent(
+        agent,
+        resolved.as_build_args_with(ctx, extras, None, Some(rewind_tx.clone())),
+    ) {
         let _ = ctx.events.send(ChatEvent::MessageFinished {
             turn_id: turn,
             reason: FinishReason::Failed(format!("{}", map_build_error(e))),
@@ -1504,15 +1533,6 @@ async fn run_turn(
             Vec::new()
         }
     };
-    // Channels for this turn:
-    //  - rewind_rx:  Rethink verdict → cancel + restore prior frame.
-    //  - review_req_rx: BeginFrame / ApplyVerdicts requests from
-    //    `ApprovalPolicy::decide`. The session is the single writer of
-    //    its step stack — `decide` only sends requests and awaits
-    //    replies on per-call oneshots.
-    let (rewind_tx, mut rewind_rx) = mpsc::unbounded_channel::<review::RewindSignal>();
-    let (review_req_tx, mut review_req_rx) =
-        mpsc::unbounded_channel::<review::ReviewRequest>();
     if !principle_names.is_empty() {
         // Install the review policy. Failure here means the user's
         // configured principles wouldn't gate tool calls — the turn
@@ -1631,6 +1651,14 @@ async fn run_turn(
     // rewound transcript. Bottom-of-stack ends the turn with a Failed
     // reason.
     let mut pending_feedback: Option<PendingRewind> = None;
+    // User cancel must short-circuit the rewind loop — otherwise a
+    // concurrent rewind signal (or one that arrives mid-cancel) will
+    // restart the agent and the cancel button silently does nothing.
+    let mut user_cancelled = false;
+    // Detect consecutive agent self-aborts. Two in a row with no
+    // intervening forward progress means the agent is looping on the
+    // synthetic "reconsider" prompt; bail out so the user can intervene.
+    let mut last_round_self_abort = false;
     let outcome = 'rewind: loop {
         'round: loop {
             tokio::select! {
@@ -1644,7 +1672,11 @@ async fn run_turn(
                     None => break 'round,
                 },
                 cmd = rx.recv() => match cmd {
-                    Some(AgentCmd::Cancel) => agent.cancel(),
+                    Some(AgentCmd::Cancel) => {
+                        user_cancelled = true;
+                        pending_feedback = None;
+                        agent.cancel();
+                    }
                     Some(AgentCmd::Send { turn: dropped_turn, .. })
                     | Some(AgentCmd::Rerun { turn: dropped_turn }) => {
                         warn!("send/rerun received during in-flight turn — dropping; client should wait");
@@ -1667,7 +1699,7 @@ async fn run_turn(
                         debug_assert!(false, "review request without an active session");
                     }
                 }
-                Some(signal) = rewind_rx.recv() => {
+                Some(signal) = rewind_rx.recv(), if !user_cancelled => {
                     // Coalesce: if multiple signals fire before we can
                     // cancel, the most recent one wins. Abort
                     // outranks Continue — once the review system has
@@ -1690,9 +1722,31 @@ async fn run_turn(
             }
         }
         let outcome = agent.join().await;
+        if user_cancelled {
+            finish = Some(FinishReason::Cancelled);
+            break 'rewind outcome;
+        }
         let Some(pending) = pending_feedback.take() else {
             break 'rewind outcome;
         };
+        // Stop the agent from popping the entire stack via repeated
+        // self-aborts. Two consecutive `abort_step` calls with no
+        // forward progress between them means the synthetic
+        // "reconsider" prompt is feeding the agent's own reasoning back
+        // to it; end the turn so the user can add context manually.
+        if let PendingRewind::Continue { feedback } = &pending
+            && feedback.starts_with(review::SELF_ABORT_FEEDBACK_PREFIX)
+        {
+            if last_round_self_abort {
+                finish = Some(FinishReason::Failed(format!(
+                    "agent self-aborted twice in a row — stopping so you can add context: {feedback}"
+                )));
+                break 'rewind outcome;
+            }
+            last_round_self_abort = true;
+        } else {
+            last_round_self_abort = false;
+        }
         // Both branches restore file snapshots first; the difference
         // is what happens after — Continue restarts the agent against
         // the rewound transcript, Abort halts the turn with a Failed
@@ -2089,16 +2143,27 @@ fn append_compaction_archive(
 /// `tool_calls`.
 fn finalize_turn_meta(entries: &mut Vec<Entry>, pre_turn_len: usize, tracker: &TurnTracker) {
     let now = Instant::now();
-    let duration_ms = now.saturating_duration_since(tracker.started_at).as_millis() as u64;
+    let total_ms = now.saturating_duration_since(tracker.started_at).as_millis() as u64;
+    // Prefer model-only time so tps reflects actual generation; fall
+    // back to wall-time only when no round events were observed.
+    let duration_ms = if tracker.model_active_ms > 0 {
+        tracker.model_active_ms
+    } else {
+        total_ms
+    };
     let ttft_ms = tracker
         .first_text_at
         .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
     let thinking_ttft_ms = tracker
         .first_thinking_at
         .map(|t1| t1.saturating_duration_since(tracker.started_at).as_millis() as u64);
-    let (prompt_tokens, completion_tokens) = match &tracker.last_usage {
-        Some(u) => (Some(u.prompt_tokens), Some(u.completion_tokens)),
-        None => (None, None),
+    // Use cumulative completion across rounds so tps isn't computed
+    // against just the final round's tokens.
+    let prompt_tokens = tracker.last_usage.as_ref().map(|u| u.prompt_tokens);
+    let completion_tokens = if tracker.intra_turn_completion > 0 {
+        Some(u32::try_from(tracker.intra_turn_completion).unwrap_or(u32::MAX))
+    } else {
+        tracker.last_usage.as_ref().map(|u| u.completion_tokens)
     };
 
     // Tool lifecycles: write each into the assistant entry that owns
@@ -2494,9 +2559,22 @@ fn handle_agent_event(
         }
         AgentEvent::Finished(reason) => Some(map_finish_reason(reason)),
         AgentEvent::Error(e) => Some(FinishReason::Failed(format!("{e}"))),
-        AgentEvent::RoundStarted { .. }
-        | AgentEvent::RoundEnded { .. }
-        | AgentEvent::AssistantMessage(_) => None,
+        AgentEvent::RoundStarted { .. } => {
+            tracker.current_round_started = Some(Instant::now());
+            None
+        }
+        AgentEvent::AssistantMessage(_) => {
+            // Close the model gen window before tools start; keeps tool
+            // wall-time out of `model_active_ms`.
+            if let Some(start) = tracker.current_round_started.take() {
+                let elapsed = Instant::now()
+                    .saturating_duration_since(start)
+                    .as_millis() as u64;
+                tracker.model_active_ms = tracker.model_active_ms.saturating_add(elapsed);
+            }
+            None
+        }
+        AgentEvent::RoundEnded { .. } => None,
         other => {
             warn!(?other, "unrecognized AgentEvent variant");
             None
@@ -2592,26 +2670,37 @@ impl ResolvedArgs {
     /// then drops them for non-orchestrator personas — see
     /// `tools::agent` for the gating story.
     fn as_build_args(&self, ctx: &RunnerCtx) -> BuildArgs<'_> {
-        self.as_build_args_with(ctx, PromptExtras::default(), None)
+        self.as_build_args_with(ctx, PromptExtras::default(), None, None)
     }
 
+    /// `rewind_tx` is `Some` only when the caller is the principled
+    /// review path that owns the channel — currently `run_turn`. When
+    /// `None` (sub-agent builds, startup pre-turn refresh) the
+    /// `abort_step` tool is omitted: there's nothing to rewind into,
+    /// so exposing the tool would be a footgun for the model.
     fn as_build_args_with(
         &self,
         ctx: &RunnerCtx,
         prompt_extras: PromptExtras,
         owner_id: Option<agents::AgentId>,
+        rewind_tx: Option<mpsc::UnboundedSender<review::RewindSignal>>,
     ) -> BuildArgs<'_> {
+        let mut extra_tools = tools::make_subagent_tools(
+            ctx.agent_registry.clone(),
+            ctx.resolver.clone(),
+            owner_id,
+        );
+        if let Some(tx) = rewind_tx {
+            extra_tools.push(tools::make_abort_step_tool(tx));
+        }
         BuildArgs {
             persona: &self.persona,
             settings: &self.settings,
             sandbox_root: self.sandbox_root.clone(),
             model_override: self.model_override.clone(),
-            extra_tools: tools::make_subagent_tools(
-                ctx.agent_registry.clone(),
-                ctx.resolver.clone(),
-                owner_id,
-            ),
+            extra_tools,
             prompt_extras,
+            disable_streaming: true,
         }
     }
 }

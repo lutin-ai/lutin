@@ -3,8 +3,8 @@
 // `<ChatView>` via `slots.Composer`.
 
 import { useEffect, useRef, useState } from "react";
-import type { ComposerProps } from "@lutin/chat-widgets";
-import { SummaryFooter } from "@lutin/chat-widgets";
+import type { ComposerProps, ComposerAppendDetail } from "@lutin/chat-widgets";
+import { COMPOSER_APPEND_EVENT, SummaryFooter } from "@lutin/chat-widgets";
 import type { PersonaInfo } from "@lutin/principled-protocol";
 import styles from "./PersonaComposer.module.css";
 
@@ -65,14 +65,26 @@ function Inner({
   onChangeTtsSpeed,
   summary,
 }: InnerProps) {
-  const ref = useRef<HTMLTextAreaElement>(null);
+  // Auto-grow handled by CSS `field-sizing: content` on `.input`. The
+  // previous JS implementation (write `height = "auto"`, read
+  // `scrollHeight`) forced a synchronous document-wide reflow on every
+  // keystroke and stuttered typing on long transcripts.
 
+  // Out-of-band append channel for PTT / transcription. Read the
+  // current value through a ref so the listener doesn't churn on every
+  // keystroke; the workflow dispatches the event on `window`.
+  const valueRef = useRef(value);
+  valueRef.current = value;
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
-  }, [value]);
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<ComposerAppendDetail>).detail;
+      if (!detail?.text) return;
+      const prev = valueRef.current;
+      onChange(prev.length === 0 ? detail.text : `${prev} ${detail.text}`);
+    };
+    window.addEventListener(COMPOSER_APPEND_EVENT, handler);
+    return () => window.removeEventListener(COMPOSER_APPEND_EVENT, handler);
+  }, [onChange]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Ctrl/Cmd+Enter submits; bare Enter inserts a newline. Matches
@@ -93,7 +105,6 @@ function Inner({
     <div className={styles.outer}>
       <div className={styles.shell} data-disabled={disabled || undefined}>
         <textarea
-          ref={ref}
           className={styles.input}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -101,6 +112,15 @@ function Inner({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
+          // WebKitGTK runs each keystroke through enchant/aspell when
+          // spellcheck is on. Without a configured dictionary that path
+          // can stall the input event for seconds at a time on Linux —
+          // chat input doesn't need spellcheck, so we turn it off
+          // alongside autocorrect/autocapitalize for completeness.
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="off"
+          autoComplete="off"
         />
         <div className={styles.toolbar}>
           <PersonaPicker
@@ -222,23 +242,9 @@ interface PickerProps {
 }
 
 function PersonaPicker({ personas, activePersona, onChange }: PickerProps) {
-  if (!personas) {
-    return (
-      <span className={styles.persona} data-state="loading">
-        <PersonaIcon />
-        loading…
-      </span>
-    );
-  }
-  if (personas.length === 0) {
-    return (
-      <span className={styles.persona} data-state="empty">
-        <PersonaIcon />
-        no personas
-      </span>
-    );
-  }
-  const active = personas.find((p) => p.name === activePersona);
+  // Hooks must run unconditionally — `personas` flips from `null` to a
+  // list once `ListPersonas` lands, and skipping these hooks on the
+  // null/empty paths corrupts hook ordering across renders.
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -256,6 +262,24 @@ function PersonaPicker({ personas, activePersona, onChange }: PickerProps) {
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  if (!personas) {
+    return (
+      <span className={styles.persona} data-state="loading">
+        <PersonaIcon />
+        loading…
+      </span>
+    );
+  }
+  if (personas.length === 0) {
+    return (
+      <span className={styles.persona} data-state="empty">
+        <PersonaIcon />
+        no personas
+      </span>
+    );
+  }
+  const active = personas.find((p) => p.name === activePersona);
   const items: { value: string; label: string }[] = [
     { value: "", label: "No persona" },
     ...personas.map((p) => ({ value: p.name, label: p.displayName })),

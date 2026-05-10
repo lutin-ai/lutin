@@ -32,15 +32,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--s-2) var(--s-2) var(--s-1);
+  padding: var(--s-3) var(--s-2) var(--s-2);
 }
 
 .sectionLabel {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .addBtn {
@@ -78,10 +78,10 @@
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: var(--s-2);
-  padding: 6px var(--s-2);
+  padding: 7px var(--s-2);
   border-radius: var(--r-md);
   cursor: pointer;
-  color: var(--text-2);
+  color: var(--text-1);
   transition: background 0.1s, color 0.1s;
 }
 .list li:hover { background: var(--bg-2); color: var(--text-1); }
@@ -175,23 +175,23 @@
 .chatHeader,
 .chatRow {
   display: grid;
-  grid-template-columns: 10px minmax(0, 1fr) 70px 44px 16px;
+  grid-template-columns: 10px minmax(0, 1fr) 80px 48px 16px;
   align-items: center;
   gap: var(--s-2);
-  padding: 4px var(--s-2);
+  padding: 6px var(--s-2);
   border-radius: var(--r-md);
-  font-size: var(--fs-md);
+  font-size: var(--fs-lg);
 }
 
 .chatHeader {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-sm);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-4);
-  border-bottom: 1px solid var(--border-1);
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border-2);
   border-radius: 0;
-  padding: 4px var(--s-2) 5px;
+  padding: 6px var(--s-2) 7px;
   cursor: default;
 }
 
@@ -199,18 +199,18 @@
 
 .chatRow {
   cursor: pointer;
-  color: var(--text-2);
+  color: var(--text-1);
   transition: background 0.1s, color 0.1s;
 }
-.chatRow:hover { background: var(--bg-2); color: var(--text-1); }
+.chatRow:hover { background: var(--bg-2); color: var(--text-1-strong); }
 .chatRow.active {
   background: var(--bg-3);
   color: var(--text-1-strong);
 }
 
 .emptyRow {
-  font-size: var(--fs-sm);
-  color: var(--text-4);
+  font-size: var(--fs-md);
+  color: var(--text-3);
   padding: 6px var(--s-2);
 }
 
@@ -235,13 +235,13 @@
 .chatPersona,
 .chatCtx {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--text-3);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chatCtx { color: var(--text-4); }
+.chatCtx { color: var(--text-3); }
 
 /* Color-coded ctx readout matching `SummaryFooter`. Bands:
  *   low  ≤ 50k tokens  — green  (comfortable)
@@ -272,10 +272,10 @@
   display: flex;
   align-items: center;
   gap: var(--s-1);
-  padding: 3px var(--s-2);
+  padding: 4px var(--s-2);
   border-radius: var(--r-md);
-  font-size: var(--fs-sm);
-  color: var(--text-3);
+  font-size: var(--fs-md);
+  color: var(--text-2);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
   white-space: nowrap;
@@ -289,7 +289,7 @@
 
 .subAgentConnector {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--text-4);
   flex-shrink: 0;
 }
@@ -311,13 +311,13 @@
 
 .subAgentId {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--text-2);
   flex-shrink: 0;
 }
 
 .subAgentPersona {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;

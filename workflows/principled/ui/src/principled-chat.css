@@ -1,0 +1,119 @@
+/* Principled-specific tool-call chrome: iteration outline + inline
+ * reviewer panel. Tokens reused from @lutin/chat-widgets/theme.css.
+ *
+ * Wrapping div sits inside the same row as the default tool bubble.
+ * `--active` adds a subtle accent outline that goes away when the
+ * step resolves; the panel below shows verdicts scored against this
+ * specific attempt's call_id. */
+
+.lutin-principled__iteration {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lutin-principled__iteration--active {
+  /* Box outline keyed off the active step. Padding compensates so the
+   * tool bubble inside doesn't shift when the outline appears /
+   * disappears between renders. */
+  border: 1px solid var(--chat-accent-soft);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--chat-accent-soft);
+}
+
+.lutin-principled__review {
+  border-top: 1px solid var(--chat-border);
+  padding-top: 6px;
+  margin-top: 2px;
+  font-size: 0.85rem;
+  color: var(--chat-text-faint);
+}
+
+.lutin-principled__review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.lutin-principled__review-summary {
+  color: var(--chat-text-muted);
+}
+
+.lutin-principled__review-toggle {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--chat-text-dim);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.lutin-principled__review-toggle:hover {
+  color: var(--chat-text-muted);
+}
+
+.lutin-principled__review-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lutin-principled__review-row {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--chat-surface);
+}
+
+.lutin-principled__review-row[data-kind="fail"] {
+  background: var(--chat-err-soft);
+}
+
+.lutin-principled__review-principle {
+  color: var(--chat-text-muted);
+  font-weight: 500;
+}
+
+.lutin-principled__review-reason {
+  color: var(--chat-text-faint);
+  white-space: pre-wrap;
+}
+
+.lutin-principled__verdict {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chat-surface-2);
+  color: var(--chat-text-muted);
+}
+
+.lutin-principled__verdict--pass {
+  color: var(--chat-ok);
+}
+
+.lutin-principled__verdict--nit {
+  color: var(--chat-warn);
+}
+
+.lutin-principled__verdict--fail {
+  color: var(--chat-err);
+}
+
+.lutin-principled__verdict--fail[data-severity="rethink"] {
+  /* Rethink reads more severe than fix; brighten the badge. */
+  color: var(--chat-err);
+  background: var(--chat-err-border);
+}

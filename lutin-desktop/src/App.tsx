@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { cpSendOk, cpStatus, settingsGet, subscribeCp } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { SessionPane } from "./components/SessionPane";
@@ -8,11 +9,58 @@ import { TtsDownloadToast } from "./components/TtsDownloadToast";
 import { useApp } from "./store";
 import styles from "./App.module.css";
 
+const ZOOM_KEY = "lutin.zoom";
+const ZOOM_MIN = 0.6;
+const ZOOM_MAX = 2.5;
+const ZOOM_STEP = 0.1;
+
+function applyZoom(z: number) {
+  // Use the webview's native zoom factor instead of CSS `zoom`. CSS
+  // `zoom` on Linux WebKitGTK pushes every layout/paint through a
+  // software scaling path that wedges input handling — typing in a
+  // textarea would freeze for seconds per character at non-1 scales.
+  // The native path goes through `webkit_web_view_set_zoom_level`,
+  // propagates to iframes for free, and is what the engine optimizes.
+  getCurrentWebview()
+    .setZoom(z)
+    .catch(() => { /* non-fatal; persisted value still drives next run */ });
+  localStorage.setItem(ZOOM_KEY, String(z));
+}
+
+function loadZoom(): number {
+  const raw = localStorage.getItem(ZOOM_KEY);
+  const n = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, n));
+}
+
 function App() {
   const view = useApp((s) => s.view);
   const conn = useApp((s) => s.conn);
   const projects = useApp((s) => s.projects);
   const selected = useApp((s) => s.selectedProject);
+
+  useEffect(() => {
+    let zoom = loadZoom();
+    applyZoom(zoom);
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      if (e.key === "=" || e.key === "+") {
+        zoom = Math.min(ZOOM_MAX, +(zoom + ZOOM_STEP).toFixed(2));
+      } else if (e.key === "-" || e.key === "_") {
+        zoom = Math.max(ZOOM_MIN, +(zoom - ZOOM_STEP).toFixed(2));
+      } else if (e.key === "0") {
+        zoom = 1;
+      } else {
+        return;
+      }
+      e.preventDefault();
+      applyZoom(zoom);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     const setConn = useApp.getState().setConn;

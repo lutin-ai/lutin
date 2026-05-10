@@ -1,0 +1,616 @@
+/* Image workflow shell. Borrows the chat-widgets `--chat-*` tokens
+ * (set by the `lutin-chat` class on `.root`) so the surface, borders
+ * and accents match the chat workflow. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--chat-bg);
+  color: var(--chat-text);
+  font-family: var(--chat-font);
+  font-size: var(--chat-fs-lg);
+  min-height: 0;
+}
+
+.scrollback {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px 24px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.empty {
+  align-self: center;
+  margin-top: 2rem;
+  color: var(--chat-text-faint);
+  font-size: var(--chat-fs-md);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: min(920px, 100%);
+  margin: 0 auto;
+}
+
+.prompt {
+  align-self: flex-end;
+  max-width: 80%;
+  padding: var(--chat-s-2) var(--chat-s-3);
+  background: var(--chat-user-bg);
+  border: 1px solid var(--chat-user-border);
+  border-radius: var(--chat-r-md);
+  color: var(--chat-text);
+  font-size: var(--chat-fs-lg);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.status {
+  color: var(--chat-text-dim);
+  font-size: var(--chat-fs-md);
+  font-style: italic;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: var(--chat-s-3);
+}
+.progressTrack {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--chat-surface-2);
+  overflow: hidden;
+}
+.progressFill {
+  height: 100%;
+  background: var(--chat-accent);
+  transition: width 0.12s linear;
+}
+.progressLabel {
+  font-family: var(--chat-font-mono);
+  font-size: 11px;
+  color: var(--chat-text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 80px;
+  text-align: right;
+}
+
+.error {
+  color: var(--chat-err);
+  font-size: var(--chat-fs-md);
+  background: var(--chat-err-soft);
+  border: 1px solid var(--chat-err-border);
+  border-radius: var(--chat-r-sm);
+  padding: var(--chat-s-2) var(--chat-s-3);
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  border-radius: var(--chat-r-md);
+  border: 1px solid var(--chat-border);
+}
+
+/* Shown while a restored image is fetching its bytes. Roughly square
+   so the grid doesn't reflow once the real <img> swaps in. */
+.imagePlaceholder {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--chat-r-md);
+  border: 1px dashed var(--chat-border);
+  background: var(--chat-bg-elev);
+}
+
+.imageMeta {
+  margin-top: 6px;
+  font-family: var(--chat-font-mono);
+  font-size: 11px;
+  color: var(--chat-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Composer — mirrors the chat persona-composer pill shell. */
+.composer {
+  padding: var(--chat-s-3) var(--chat-s-5) var(--chat-s-4);
+  background: var(--chat-bg);
+}
+.shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 12px;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.shell:focus-within {
+  border-color: var(--chat-accent);
+  box-shadow: 0 0 0 3px var(--chat-focus-ring);
+}
+.shell[data-disabled] { opacity: 0.6; }
+.input {
+  width: 100%;
+  resize: none;
+  font-family: inherit;
+  font-size: var(--chat-fs-xl);
+  line-height: 1.55;
+  color: var(--chat-text);
+  background: transparent;
+  border: 0;
+  outline: none;
+  padding: 12px 14px 4px;
+  min-height: 36px;
+  max-height: 240px;
+  /* See chat-widgets theme.css — CSS auto-grow replaces a
+   * reflow-thrashing JS effect. */
+  field-sizing: content;
+  overflow-y: auto;
+  /* Long unbroken tokens (URLs, hashes) would otherwise push past
+   * the shell horizontally. */
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+}
+.input::placeholder { color: var(--chat-text-faint); }
+.input:disabled { cursor: not-allowed; }
+
+/* Inlined toolbar inside the shell — model picker on the left, hint
+ * + send on the right. Mirrors the chat persona-composer toolbar. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--chat-s-2);
+  padding: 6px 8px 8px 10px;
+  font-size: var(--chat-fs-md);
+  color: var(--chat-text-muted);
+}
+.spacer { flex: 1; }
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--chat-fs-sm);
+  color: var(--chat-text-faint);
+}
+.hint kbd {
+  font-family: var(--chat-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  background: var(--chat-surface-2);
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--chat-text-muted);
+  line-height: 1;
+}
+.streaming {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--chat-accent);
+  font-weight: 500;
+}
+.streamingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+  animation: image-pulse 1.2s ease-in-out infinite;
+}
+@keyframes image-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.send {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 0;
+  cursor: pointer;
+  background: var(--chat-accent);
+  color: var(--chat-accent-on);
+  box-shadow: 0 0 0 1px rgba(232, 116, 59, 0.30), 0 4px 14px -6px var(--chat-accent);
+  transition: background 0.12s, transform 0.06s;
+}
+.send:hover:not(:disabled) { background: var(--chat-accent-hover); }
+.send:active:not(:disabled) { transform: scale(0.94); }
+.send:disabled {
+  background: var(--chat-surface-2);
+  color: var(--chat-text-faint);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* Custom Select (used for the model picker in the composer toolbar
+ * and the default-model picker in the settings modal). Native
+ * <select> opens an OS-driven popup that misbehaves under tiling WMs
+ * (i3) — this listbox is rendered in-document and dismissed on
+ * outside click / Escape. */
+.selectWrap {
+  position: relative;
+  display: inline-block;
+}
+.selectBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  background: var(--chat-surface-2);
+  color: var(--chat-text-muted);
+  font-family: inherit;
+  font-size: var(--chat-fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.selectBtn:hover:not(:disabled) {
+  background: var(--chat-surface);
+  color: var(--chat-text);
+  border-color: var(--chat-border-strong);
+}
+.selectBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.selectBtn[aria-expanded="true"] {
+  border-color: var(--chat-accent);
+  color: var(--chat-text);
+}
+.selectLabel { padding: 0 2px; }
+.selectMenu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  min-width: 160px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.selectOption {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: var(--chat-fs-md);
+  color: var(--chat-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.selectOption:hover { background: var(--chat-surface-2); }
+.selectOption[data-selected="true"] { color: var(--chat-accent); }
+
+/* ----- Header / settings button ----- */
+.header {
+  display: flex;
+  align-items: center;
+  padding: var(--chat-s-2) var(--chat-s-4);
+  border-bottom: 1px solid var(--chat-border);
+  min-height: 32px;
+}
+.headerSpacer { flex: 1; }
+.headerBtn {
+  background: transparent;
+  border: 1px solid var(--chat-border-strong);
+  color: var(--chat-text-muted);
+  padding: 3px 8px;
+  border-radius: var(--chat-r-sm);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+.headerBtn:hover {
+  color: var(--chat-text);
+  border-color: var(--chat-text-faint);
+}
+
+/* ----- Multi-image grid ----- */
+.grid {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+.gridItem {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--chat-r-md);
+  border: 1px solid var(--chat-border);
+  background: var(--chat-surface);
+}
+.gridItem .image {
+  width: 100%;
+  height: auto;
+  display: block;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Per-image action pill, top-right. Hidden until grid item is hovered
+   so the artwork dominates the layout at rest. */
+.imageActions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--chat-r-md);
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.gridItem:hover .imageActions,
+.gridItem:focus-within .imageActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.imageAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--chat-r-sm, 4px);
+  background: transparent;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+}
+.imageAction:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* Lightbox: a centered preview of one image at near-viewport size. */
+.lightboxScrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+.lightboxBody {
+  position: relative;
+  max-width: 92vw;
+  max-height: 92vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightboxImage {
+  max-width: 92vw;
+  max-height: 92vh;
+  display: block;
+  border-radius: var(--chat-r-md);
+  background: var(--chat-surface);
+}
+.lightboxClose {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--chat-surface);
+  color: var(--chat-text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* ----- Composer column (advanced disclosure) ----- */
+.composerColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-s-2);
+  width: 100%;
+  max-width: min(920px, 100%);
+  margin: 0 auto;
+}
+.advancedToggle {
+  background: transparent;
+  border: 0;
+  color: var(--chat-text-faint);
+  font-size: var(--chat-fs-sm);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--chat-r-sm);
+}
+.advancedToggle:hover { color: var(--chat-text); background: var(--chat-surface-2); }
+
+.advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-s-2);
+  padding: var(--chat-s-3);
+  background: var(--chat-bg-1);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-r-md);
+}
+.advancedGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--chat-s-2);
+}
+.advancedField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.advancedLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--chat-text-faint);
+  font-weight: 600;
+}
+.advancedInput {
+  width: 100%;
+  background: var(--chat-surface);
+  color: var(--chat-text);
+  border: 1px solid var(--chat-border-strong);
+  border-radius: var(--chat-r-sm);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: var(--chat-fs-md);
+  outline: none;
+  box-sizing: border-box;
+}
+.advancedInput:focus {
+  border-color: var(--chat-accent);
+  box-shadow: 0 0 0 2px var(--chat-focus-ring);
+}
+
+/* ----- Settings modal ----- */
+.modalScrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+.modal {
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong);
+  border-radius: var(--chat-r-lg);
+  width: 100%;
+  max-width: 520px;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modalHeader {
+  display: flex;
+  align-items: center;
+  padding: var(--chat-s-3) var(--chat-s-4);
+  border-bottom: 1px solid var(--chat-border);
+}
+.modalTitle {
+  flex: 1;
+  font-size: var(--chat-fs-lg);
+  font-weight: 600;
+  color: var(--chat-text);
+}
+.modalClose {
+  background: transparent;
+  border: 0;
+  color: var(--chat-text-faint);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--chat-r-sm);
+  line-height: 1;
+}
+.modalClose:hover { color: var(--chat-text); background: var(--chat-surface-2); }
+.modalBody {
+  padding: var(--chat-s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-s-3);
+  overflow-y: auto;
+}
+.modalFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--chat-s-2);
+  padding: var(--chat-s-3) var(--chat-s-4);
+  border-top: 1px solid var(--chat-border);
+}
+.modalCancel,
+.modalSave {
+  padding: 6px 14px;
+  border-radius: var(--chat-r-md);
+  font: inherit;
+  font-size: var(--chat-fs-md);
+  cursor: pointer;
+  border: 1px solid var(--chat-border-strong);
+}
+.modalCancel {
+  background: transparent;
+  color: var(--chat-text);
+}
+.modalCancel:hover { border-color: var(--chat-text-faint); }
+.modalSave {
+  background: var(--chat-accent);
+  color: var(--chat-accent-on);
+  border-color: var(--chat-accent);
+  font-weight: 600;
+}
+.modalSave:hover:not(:disabled) { background: var(--chat-accent-hover); }
+.modalSave:disabled,
+.modalCancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ----- Unreachable empty state ----- */
+.unreachable {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--chat-s-3);
+  padding: var(--chat-s-5);
+  text-align: center;
+  color: var(--chat-text-muted);
+}
+.unreachableTitle {
+  font-size: var(--chat-fs-xl);
+  font-weight: 600;
+  color: var(--chat-text);
+}
+.unreachableUrl code {
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-fs-md);
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-r-sm);
+  padding: 2px 8px;
+  color: var(--chat-text);
+}
+.unreachableMsg {
+  font-size: var(--chat-fs-md);
+  color: var(--chat-err);
+  max-width: 480px;
+  word-break: break-word;
+}
+.unreachableButton {
+  background: var(--chat-accent);
+  color: var(--chat-accent-on);
+  border: 0;
+  padding: 8px 18px;
+  border-radius: var(--chat-r-md);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.unreachableButton:hover { background: var(--chat-accent-hover); }

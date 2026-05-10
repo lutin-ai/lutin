@@ -71,4 +71,11 @@ order = [
   # command can wipe a disk, leak credentials, or push to prod; goes
   # last so its verdict overrides everything else when it fires.
   "shell-no-dangerous-commands",
+
+  # Alignment — last word above safety's mechanical guard. Catches
+  # "this whole action shouldn't be happening" (scope drift, tangents,
+  # speculative work) which the cheaper principles can't see. Pauses
+  # the session on max retries so the user can re-aim, rather than
+  # letting the agent retry its way out of a misalignment.
+  "stay-on-track",
 ]

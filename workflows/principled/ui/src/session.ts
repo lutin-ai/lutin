@@ -120,6 +120,19 @@ export interface SessionSnapshot {
     totalPromptTokens: number;
     totalCompletionTokens: number;
   } | null;
+  /** Per-tool-bubble verdict history, keyed by the attempt's `callId`.
+   *  Populated from `reviewerCompleted` events; the inline panel under
+   *  each tool bubble reads this list to render filtered reviewer rows
+   *  (default: hide pure pass, show fail / pass-with-nit). Survives
+   *  squashes — the engine drops the matching tool entry and the UI
+   *  no longer renders the panel, so the lingering verdicts in the
+   *  map are harmless and avoid a coupled cleanup pass. */
+  verdictsByCallId: Record<string, ReviewLogEntry[]>;
+  /** `callId` → `stepId.toString()`. Populated when a `reviewFrameOpened`
+   *  / `reviewerStarted` lands, so the iteration-box outline can group
+   *  every tool bubble that belongs to the active step (multiple Fix
+   *  retries within one step share a stepId but get distinct callIds). */
+  stepIdByCallId: Record<string, string>;
   turn: Turn;
 }
 
@@ -132,6 +145,8 @@ export const initialSnapshot: SessionSnapshot = {
   subAgents: [],
   subAgentTranscripts: {},
   summary: null,
+  verdictsByCallId: {},
+  stepIdByCallId: {},
   turn: { kind: "idle" },
 };
 
@@ -198,6 +213,22 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
       };
     case "historyReplaced": {
       const completed: Message[] = ev.history.map(fromHistorical);
+      // A historyReplaced mid-stream means the engine rewrote the
+      // canonical transcript out from under us — most commonly a
+      // reviewer-driven rewind, which cancels the agent without
+      // emitting `toolCallCompleted` for the in-flight tool. Anything
+      // accumulated in `turn.flushed` / `turn.buf` predates the
+      // rewrite: pre-rewind tool entries would otherwise stay stuck
+      // on `running` forever, and pre-rewind text would be re-glued
+      // into `completed` on the next `messageFinished`. Drop both —
+      // post-rewind stream events repopulate `flushed` cleanly.
+      if (state.turn.kind === "streaming") {
+        return {
+          ...state,
+          completed,
+          turn: { kind: "streaming", stream: state.turn.stream, buf: "", flushed: [] },
+        };
+      }
       return { ...state, completed };
     }
     case "metricsReplaced":
@@ -222,13 +253,24 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
         blocking: [],
         verdicts: {},
       };
-      return { ...state, activeReviews: [...state.activeReviews, frame] };
+      return {
+        ...state,
+        activeReviews: [...state.activeReviews, frame],
+        stepIdByCallId: { ...state.stepIdByCallId, [ev.callId]: stepId },
+      };
     }
     case "reviewerStarted":
-      // Per-reviewer "in flight" indicator is not surfaced in v1 —
-      // verdicts land fast enough that an interim spinner just
-      // flickers. Skip without altering state.
-      return state;
+      // Tag the in-flight attempt's bubble with its stepId so the
+      // iteration-box outline picks it up immediately — even on the
+      // first reviewer's started event, before any verdict has landed.
+      // No verdicts yet, no `verdictsByCallId` write here.
+      return {
+        ...state,
+        stepIdByCallId: {
+          ...state.stepIdByCallId,
+          [ev.callId]: ev.stepId.toString(),
+        },
+      };
     case "reviewerCompleted": {
       const stepId = ev.stepId.toString();
       const frame = state.activeReviews.find((f) => f.stepId === stepId);
@@ -245,15 +287,23 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
         toolName: frame?.toolName ?? "",
         argsSummary: frame?.argsSummary ?? "",
         verdict: ev.verdict,
+        callId: ev.callId,
       };
       const reviewLog = [...state.reviewLog, logEntry];
-      if (!frame) return { ...state, reviewLog };
+      const priorForCall = state.verdictsByCallId[ev.callId] ?? [];
+      const verdictsByCallId = {
+        ...state.verdictsByCallId,
+        [ev.callId]: [...priorForCall, logEntry],
+      };
+      if (!frame) {
+        return { ...state, reviewLog, verdictsByCallId };
+      }
       const activeReviews = state.activeReviews.map((f) =>
         f.stepId === stepId
           ? { ...f, verdicts: { ...f.verdicts, [ev.principle]: ev.verdict } }
           : f,
       );
-      return { ...state, activeReviews, reviewLog };
+      return { ...state, activeReviews, reviewLog, verdictsByCallId };
     }
     case "reviewFrameProgress": {
       const stepId = ev.stepId.toString();
@@ -289,6 +339,25 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
           totalCompletionTokens: ev.totalCompletionTokens,
         },
       };
+    case "attemptsSquashed": {
+      // Live mirror of `engine::squash_denied_attempts`. The engine
+      // emits this when a step transitions to a terminal status, so
+      // the UI sheds the failed-attempt bubbles immediately rather
+      // than waiting for end-of-turn `historyReplaced`. The accepted
+      // (or rewound-into) attempt's callId is intentionally excluded
+      // by the engine — only `DeniedRetry`/`Rewound` outcomes get
+      // squashed, matching the projection in `project_messages`.
+      const drop = new Set(ev.callIds);
+      if (drop.size === 0) return state;
+      const filterFn = (m: Message) =>
+        m.role !== "tool" || !drop.has(m.callId);
+      const completed = state.completed.filter(filterFn);
+      if (state.turn.kind === "streaming") {
+        const flushed = state.turn.flushed.filter(filterFn);
+        return { ...state, completed, turn: { ...state.turn, flushed } };
+      }
+      return { ...state, completed };
+    }
   }
 }
 

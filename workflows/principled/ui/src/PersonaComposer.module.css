@@ -36,6 +36,13 @@
   padding: 12px 14px 4px;
   min-height: 36px;
   max-height: 240px;
+  /* See chat-widgets theme.css — CSS auto-grow replaces a
+   * reflow-thrashing JS effect that slowed typing on long transcripts. */
+  field-sizing: content;
+  overflow-y: auto;
+  /* Long unbroken tokens (URLs, hashes) would otherwise push past
+   * the shell horizontally. */
+  overflow-wrap: anywhere;
 }
 .input::placeholder { color: var(--chat-text-faint); }
 .input:disabled { cursor: not-allowed; }

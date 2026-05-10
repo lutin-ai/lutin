@@ -139,6 +139,10 @@ export interface ReviewLogEntry {
   toolName: string;
   argsSummary: string;
   verdict: ReviewVerdict;
+  /** Tool-call id of the attempt this verdict was scored against —
+   *  the UI groups inline verdicts under each tool bubble by this id.
+   *  `null` on rows persisted before this field existed. */
+  callId: string | null;
 }
 
 export type ChatError =
@@ -188,18 +192,25 @@ export type ChatEvent =
   | {
       kind: "reviewFrameOpened";
       stepId: bigint;
+      /** Tool-call id of the first attempt — the bubble the iteration
+       *  outline anchors to. */
+      callId: string;
       toolName: string;
       argsSummary: string;
     }
   | {
       kind: "reviewerStarted";
       stepId: bigint;
+      /** Tool-call id of the attempt this reviewer is scoring. */
+      callId: string;
       reviewerCallId: bigint;
       principle: string;
     }
   | {
       kind: "reviewerCompleted";
       stepId: bigint;
+      /** Tool-call id of the attempt this verdict scores. */
+      callId: string;
       reviewerCallId: bigint;
       principle: string;
       verdict: ReviewVerdict;
@@ -208,11 +219,21 @@ export type ChatEvent =
   | {
       kind: "reviewFrameProgress";
       stepId: bigint;
+      /** Tool-call id of the just-denied attempt. */
+      callId: string;
       attempt: number;
       maxAttempts: number;
       blocking: string[];
     }
-  | { kind: "reviewFrameResolved"; stepId: bigint; outcome: ReviewResolution }
+  | {
+      kind: "reviewFrameResolved";
+      stepId: bigint;
+      /** Tool-call id of the resolving attempt — accepted, escalated,
+       *  rewound, or the call the failing reviewer was scoring. Always
+       *  a real id; never empty. */
+      callId: string;
+      outcome: ReviewResolution;
+    }
   | { kind: "toolCallStreaming"; id: string; name: string }
   | { kind: "toolCallArgsDelta"; id: string; args: string }
   | {
@@ -223,6 +244,14 @@ export type ChatEvent =
       totalPromptTokens: number;
       /** Cumulative provider output tokens across the lifetime of the session. */
       totalCompletionTokens: number;
+    }
+  | {
+      /** Denied attempts in a now-resolved step. UI drops every tool
+       *  entry whose `callId` appears in `callIds`. Emitted before the
+       *  matching `reviewFrameResolved` so the iteration-box outline
+       *  is still in place when the squash lands. */
+      kind: "attemptsSquashed";
+      callIds: string[];
     };
 
 // ─── SessionState / HistoricalMessage ────────────────────────────────
@@ -509,6 +538,7 @@ function readReviewLogEntry(r: pc.Reader): ReviewLogEntry {
     toolName: pc.readString(r),
     argsSummary: pc.readString(r),
     verdict: readReviewVerdict(r),
+    callId: pc.readOption(r, pc.readString),
   };
 }
 
@@ -630,6 +660,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return {
         kind: "reviewFrameOpened",
         stepId: pc.readU64(r),
+        callId: pc.readString(r),
         toolName: pc.readString(r),
         argsSummary: pc.readString(r),
       };
@@ -637,6 +668,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return {
         kind: "reviewerStarted",
         stepId: pc.readU64(r),
+        callId: pc.readString(r),
         reviewerCallId: pc.readU64(r),
         principle: pc.readString(r),
       };
@@ -644,6 +676,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return {
         kind: "reviewerCompleted",
         stepId: pc.readU64(r),
+        callId: pc.readString(r),
         reviewerCallId: pc.readU64(r),
         principle: pc.readString(r),
         verdict: readReviewVerdict(r),
@@ -653,6 +686,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return {
         kind: "reviewFrameProgress",
         stepId: pc.readU64(r),
+        callId: pc.readString(r),
         attempt: pc.readU32(r),
         maxAttempts: pc.readU32(r),
         blocking: pc.readVec(r, pc.readString),
@@ -661,6 +695,7 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return {
         kind: "reviewFrameResolved",
         stepId: pc.readU64(r),
+        callId: pc.readString(r),
         outcome: readReviewResolution(r),
       };
     case 15:
@@ -681,6 +716,11 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
         contextTokens: pc.readOption(r, pc.readU32),
         totalPromptTokens: readU64Safe(r),
         totalCompletionTokens: readU64Safe(r),
+      };
+    case 18:
+      return {
+        kind: "attemptsSquashed",
+        callIds: pc.readVec(r, pc.readString),
       };
     default:
       throw new Error(`postcard: invalid ChatEvent ${v}`);

@@ -952,6 +952,16 @@
   outline: none;
   max-height: 240px;
   min-height: 38px;
+  /* Native auto-grow with no JS. Replaces a write-then-read on
+   * `scrollHeight` per keystroke, which forced a document-wide reflow
+   * and froze typing on long transcripts. WebViews that don't support
+   * field-sizing (older WebKitGTK, etc.) fall back to a fixed-height
+   * single-line textarea with internal scroll — typing stays fast. */
+  field-sizing: content;
+  overflow-y: auto;
+  /* Long unbroken tokens (URLs, hashes, model ids) would otherwise
+   * push past the shell on the right. */
+  overflow-wrap: anywhere;
 }
 .lutin-chat__composer-input:focus {
   border-color: var(--chat-accent);

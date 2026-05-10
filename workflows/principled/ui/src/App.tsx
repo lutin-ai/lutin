@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ChatView, type MessageActions } from "@lutin/chat-widgets";
+import { ChatView, appendComposerText, type MessageActions } from "@lutin/chat-widgets";
 import "@lutin/chat-widgets/theme.css";
 import type { Lutin } from "./lutin";
 import {
@@ -37,6 +37,8 @@ function deriveTitle(completed: Message[]): string | null {
 import { subAgentViewModel, toViewModel } from "./adapter";
 import { makePersonaComposer } from "./PersonaComposer";
 import { ReviewerSidebar } from "./ReviewerSidebar";
+import "./principled-chat.css";
+import { makeToolCallWithReview } from "./ToolCallWithReview";
 import { useChatTts } from "./tts";
 
 interface Props {
@@ -46,7 +48,6 @@ interface Props {
 export function App({ lutin }: Props) {
   const [snap, dispatch] = useReducer(reduce, initialSnapshot);
   const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
-  const [draft, setDraft] = useState("");
   // `null` = parent session view; `agent#N` = read-only child transcript.
   // The desktop sidebar drives this — chat doesn't render its own
   // sub-agent picker anymore. We mirror the chrome's selection in
@@ -57,14 +58,14 @@ export function App({ lutin }: Props) {
   const tts = useChatTts(lutin, ttsOn, ttsSpeed);
 
   // Wire PTT / open-mic transcription deliveries into the composer.
-  // We append rather than replace so the user can stack voice input
-  // on top of already-typed text. The plan calls for "don't auto-send"
-  // — the user reviews the result before hitting send.
+  // The composer owns its own draft state — going through a window
+  // CustomEvent keeps re-renders local to the composer subtree instead
+  // of re-rendering the entire transcript on every voice-input append
+  // (which is the same reason the composer doesn't lift `draft` up).
   useEffect(() => {
     if (!lutin.onTranscription) return;
     const off = lutin.onTranscription(({ text }) => {
-      if (!text) return;
-      setDraft((prev) => (prev.length === 0 ? text : `${prev} ${text}`));
+      appendComposerText(text);
     });
     return off;
   }, [lutin]);
@@ -420,11 +421,38 @@ export function App({ lutin }: Props) {
   const HiddenComposer = useMemo(() => () => null, []);
 
   const viewing = selectedAgent;
-  const vm =
-    viewing === null
-      ? toViewModel(snap)
-      : subAgentViewModel(snap.subAgentTranscripts[viewing] ?? []);
+  // Memoize the projected view model so re-renders that don't touch
+  // the snapshot don't allocate a fresh `messages` array and `turn`
+  // object. Without this, ChatView's `useScrollStick` deps trip on
+  // every render and force a `scrollTop = scrollHeight` reflow.
+  const vm = useMemo(
+    () =>
+      viewing === null
+        ? toViewModel(snap)
+        : subAgentViewModel(snap.subAgentTranscripts[viewing] ?? []),
+    [viewing, snap],
+  );
   const composerSlot = viewing === null ? Composer : HiddenComposer;
+
+  // Bind a principled-aware ToolCall slot to the current review state.
+  // Memoized off the snapshot fields it closes over so ChatView's slot
+  // identity is stable when those fields don't change — otherwise every
+  // unrelated render would re-instantiate the slot and force a remount.
+  // Sub-agent views skip the wrapper — they don't have reviewer state.
+  const ToolCallSlot = useMemo(() => {
+    if (viewing !== null) return undefined;
+    const activeStepIds = new Set(snap.activeReviews.map((r) => r.stepId));
+    return makeToolCallWithReview({
+      verdictsByCallId: snap.verdictsByCallId,
+      stepIdByCallId: snap.stepIdByCallId,
+      activeStepIds,
+    });
+  }, [
+    viewing,
+    snap.verdictsByCallId,
+    snap.stepIdByCallId,
+    snap.activeReviews,
+  ]);
 
   return (
     <div style={appShellStyle}>
@@ -434,10 +462,8 @@ export function App({ lutin }: Props) {
           turn={vm.turn}
           onSend={send}
           onCancel={cancel}
-          draft={draft}
-          onDraftChange={setDraft}
           messageActions={messageActions}
-          slots={{ Composer: composerSlot }}
+          slots={{ Composer: composerSlot, ToolCall: ToolCallSlot }}
         />
       </div>
       <ReviewerSidebar log={snap.reviewLog} />

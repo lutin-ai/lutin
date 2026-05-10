@@ -111,6 +111,7 @@
       "name": "lutin-image-ui",
       "version": "0.1.0",
       "dependencies": {
+        "@lutin/chat-widgets": "workspace:*",
         "@lutin/image-protocol": "workspace:*",
         "@lutin/shim-types": "workspace:*",
         "react": "^19.1.0",

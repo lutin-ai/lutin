@@ -88,30 +88,33 @@ describe("ChatEvent decode goldens", () => {
     ],
     [
       "ReviewFrameOpened",
-      hex(0x0a, 0x07, 0x04, 0x65, 0x64, 0x69, 0x74, 0x00),
+      hex(0x0a, 0x07, 0x01, 0x63, 0x04, 0x65, 0x64, 0x69, 0x74, 0x00),
       {
         kind: "reviewFrameOpened",
         stepId: 7n,
+        callId: "c",
         toolName: "edit",
         argsSummary: "",
       },
     ],
     [
       "ReviewerStarted",
-      hex(0x0b, 0x07, 0x01, 0x01, 0x70),
+      hex(0x0b, 0x07, 0x01, 0x63, 0x01, 0x01, 0x70),
       {
         kind: "reviewerStarted",
         stepId: 7n,
+        callId: "c",
         reviewerCallId: 1n,
         principle: "p",
       },
     ],
     [
       "ReviewerCompleted(Pass)",
-      hex(0x0c, 0x07, 0x01, 0x01, 0x70, 0x00, 0x01, 0x54),
+      hex(0x0c, 0x07, 0x01, 0x63, 0x01, 0x01, 0x70, 0x00, 0x01, 0x54),
       {
         kind: "reviewerCompleted",
         stepId: 7n,
+        callId: "c",
         reviewerCallId: 1n,
         principle: "p",
         verdict: { kind: "pass" },
@@ -122,7 +125,9 @@ describe("ChatEvent decode goldens", () => {
       "ReviewerCompleted(Fail{Fix})",
       hex(
         0x0c,
-        0x07, 0x02,
+        0x07,
+        0x01, 0x63, // call_id "c"
+        0x02,
         0x01, 0x70,
         0x02,
         0x00,
@@ -133,6 +138,7 @@ describe("ChatEvent decode goldens", () => {
       {
         kind: "reviewerCompleted",
         stepId: 7n,
+        callId: "c",
         reviewerCallId: 2n,
         principle: "p",
         verdict: {
@@ -146,10 +152,11 @@ describe("ChatEvent decode goldens", () => {
     ],
     [
       "ReviewFrameProgress",
-      hex(0x0d, 0x07, 0x01, 0x03, 0x01, 0x01, 0x70),
+      hex(0x0d, 0x07, 0x01, 0x63, 0x01, 0x03, 0x01, 0x01, 0x70),
       {
         kind: "reviewFrameProgress",
         stepId: 7n,
+        callId: "c",
         attempt: 1,
         maxAttempts: 3,
         blocking: ["p"],
@@ -157,19 +164,21 @@ describe("ChatEvent decode goldens", () => {
     ],
     [
       "ReviewFrameResolved(Accepted)",
-      hex(0x0e, 0x07, 0x00),
+      hex(0x0e, 0x07, 0x01, 0x63, 0x00),
       {
         kind: "reviewFrameResolved",
         stepId: 7n,
+        callId: "c",
         outcome: { kind: "accepted" },
       },
     ],
     [
       "ReviewFrameResolved(Rewound)",
-      hex(0x0e, 0x07, 0x01, 0x02, 0x66, 0x62),
+      hex(0x0e, 0x07, 0x01, 0x63, 0x01, 0x02, 0x66, 0x62),
       {
         kind: "reviewFrameResolved",
         stepId: 7n,
+        callId: "c",
         outcome: { kind: "rewound", feedback: "fb" },
       },
     ],
@@ -255,6 +264,8 @@ describe("ChatResponse decode goldens", () => {
         0x04, 0x65, 0x64, 0x69, 0x74,
         0x00,
         0x00,
+        0x01, // call_id Option tag = Some
+        0x01, 0x63, // call_id "c"
       ),
       {
         ok: true,
@@ -270,6 +281,7 @@ describe("ChatResponse decode goldens", () => {
               toolName: "edit",
               argsSummary: "",
               verdict: { kind: "pass" },
+              callId: "c",
             },
           ],
         },

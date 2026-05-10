@@ -120,3 +120,33 @@ pub trait LlmProvider: Send + Sync {
     /// List available models.
     async fn models(&self) -> Result<Vec<ModelInfo>, LlmError>;
 }
+
+/// Wrap a provider so its `stream()` call routes through `complete()` and
+/// synthesizes a single-batch event stream from the response. Used by
+/// workflows whose loops are completion-only (no incremental deltas) but
+/// run on top of the agent SDK, which always opens a stream.
+pub struct NonStreamingProvider {
+    inner: std::sync::Arc<dyn LlmProvider>,
+}
+
+impl NonStreamingProvider {
+    pub fn new(inner: std::sync::Arc<dyn LlmProvider>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for NonStreamingProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.inner.complete(request).await
+    }
+
+    async fn stream(&self, request: CompletionRequest) -> Result<EventStream, LlmError> {
+        let resp = self.inner.complete(request).await?;
+        Ok(completion_as_event_stream(resp))
+    }
+
+    async fn models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        self.inner.models().await
+    }
+}

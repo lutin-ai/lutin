@@ -83,6 +83,19 @@ use principled::{
 /// errors aren't squashed.
 pub(crate) const REVIEW_DENY_TAG: &str = "<review-deny>";
 
+/// Name of the agent-self-issued rewind tool. Defined here (rather
+/// than next to the tool implementation) because the approval policy
+/// also needs the literal — exempting `abort_step` from the iteration
+/// gate and naming it in the deny message that nudges the agent
+/// toward the escape hatch.
+pub const ABORT_STEP_TOOL_NAME: &str = "abort_step";
+
+/// Prefix prepended to the agent's `reason` when `abort_step` ships it
+/// as `RewindSignal::Continue` feedback. The runner detects this prefix
+/// to distinguish self-aborts from reviewer-issued rewinds and to break
+/// the consecutive-self-abort loop.
+pub const SELF_ABORT_FEEDBACK_PREFIX: &str = "agent self-aborted: ";
+
 fn deny_reason(message: impl Into<String>) -> String {
     format!("{REVIEW_DENY_TAG} {}", message.into())
 }
@@ -112,8 +125,11 @@ pub struct ReviewerBundle {
 pub enum ReviewRequest {
     /// Push a new step frame (or note that one is already active) for
     /// this tool call. Captures the file snapshot in the runner so
-    /// the writer of `StepStack` is one-and-only-one.
+    /// the writer of `StepStack` is one-and-only-one. The first
+    /// `BeginFrame` of a step locks its `tool_name` as that step's
+    /// iterated tool — see `StepFrame::iterated_tool`.
     BeginFrame {
+        tool_name: String,
         principle_names: Vec<String>,
         snapshot_paths: Vec<PathBuf>,
         reply: oneshot::Sender<BeginOutcome>,
@@ -123,10 +139,19 @@ pub enum ReviewRequest {
     /// the per-principle retry budgets.
     ApplyVerdicts {
         frame_id: StepId,
+        call_id: String,
         tool_name: String,
         arguments_json: String,
         verdicts: Vec<Verdict>,
         reply: oneshot::Sender<Approval>,
+    },
+    /// Read the active step's locked tool name (if any). The agent
+    /// side queries this *before* the principle filter so it can
+    /// short-circuit non-iterated tool calls with a clear deny —
+    /// keeping the agent on-iteration even when compaction has
+    /// summarized the prior context away.
+    CheckLock {
+        reply: oneshot::Sender<Option<String>>,
     },
 }
 
@@ -173,28 +198,52 @@ impl ReviewSession {
     pub fn handle(&mut self, req: ReviewRequest, live_messages_len: usize) {
         match req {
             ReviewRequest::BeginFrame {
+                tool_name,
                 principle_names,
                 snapshot_paths,
                 reply,
             } => {
-                let outcome = self.begin_frame(principle_names, snapshot_paths, live_messages_len);
+                let outcome = self.begin_frame(
+                    tool_name,
+                    principle_names,
+                    snapshot_paths,
+                    live_messages_len,
+                );
                 let _ = reply.send(outcome);
             }
             ReviewRequest::ApplyVerdicts {
                 frame_id,
+                call_id,
                 tool_name,
                 arguments_json,
                 verdicts,
                 reply,
             } => {
-                let approval = self.apply_verdicts(frame_id, &tool_name, &arguments_json, verdicts);
+                let approval = self.apply_verdicts(
+                    frame_id,
+                    &call_id,
+                    &tool_name,
+                    &arguments_json,
+                    verdicts,
+                );
                 let _ = reply.send(approval);
+            }
+            ReviewRequest::CheckLock { reply } => {
+                let lock = self
+                    .stack
+                    .frames()
+                    .iter()
+                    .rev()
+                    .find(|f| matches!(f.status, StepStatus::Active))
+                    .map(|f| f.iterated_tool.clone());
+                let _ = reply.send(lock);
             }
         }
     }
 
     fn begin_frame(
         &mut self,
+        tool_name: String,
         principle_names: Vec<String>,
         snapshot_paths: Vec<PathBuf>,
         live_messages_len: usize,
@@ -206,7 +255,11 @@ impl ReviewSession {
         let frame_id = if needs_new {
             let id = self.stack.next_id();
             let names: Vec<&str> = principle_names.iter().map(String::as_str).collect();
-            let mut frame = StepFrame::new(id, live_messages_len, &names);
+            // The iterated tool is set at construction — every frame
+            // is born from a tool call, so the lock is intrinsic to
+            // the frame's identity. The agent-side gate consults it
+            // to short-circuit drift.
+            let mut frame = StepFrame::new(id, live_messages_len, &names, tool_name);
             for path in &snapshot_paths {
                 if let Err(e) = frame.snapshot.capture_file(path) {
                     warn!(path = %path.display(), error = %e,
@@ -240,6 +293,7 @@ impl ReviewSession {
     fn apply_verdicts(
         &mut self,
         frame_id: StepId,
+        call_id: &str,
         tool_name: &str,
         arguments_json: &str,
         verdicts: Vec<Verdict>,
@@ -282,10 +336,17 @@ impl ReviewSession {
             )
         }) {
             let feedback = format_feedback(&self.bundles, rethink);
-            push_attempt(frame, tool_name, arguments_json, &verdicts, AttemptOutcome::Rewound);
+            push_attempt(frame, call_id, tool_name, arguments_json, &verdicts, AttemptOutcome::Rewound);
             frame.status = StepStatus::Abandoned;
+            // Squash event must precede the resolved event: the UI's
+            // group-by-stepId render keys off `ReviewFrameResolved` to
+            // drop the iteration-box outline, and once the box is gone
+            // any orphan denied bubbles inside it would briefly appear
+            // ungrouped before the squash hits.
+            emit_squashed(&self.events, frame);
             let _ = self.events.send(ChatEvent::ReviewFrameResolved {
                 step_id: frame_id.0,
+                call_id: call_id.to_string(),
                 outcome: ReviewResolution::Rewound { feedback: feedback.clone() },
             });
             let _ = self.rewind_tx.send(RewindSignal::Continue {
@@ -295,10 +356,12 @@ impl ReviewSession {
         }
 
         if failures.is_empty() {
-            push_attempt(frame, tool_name, arguments_json, &verdicts, AttemptOutcome::Executed);
+            push_attempt(frame, call_id, tool_name, arguments_json, &verdicts, AttemptOutcome::Executed);
             frame.status = StepStatus::Accepted;
+            emit_squashed(&self.events, frame);
             let _ = self.events.send(ChatEvent::ReviewFrameResolved {
                 step_id: frame_id.0,
+                call_id: call_id.to_string(),
                 outcome: ReviewResolution::Accepted,
             });
             return Approval::Allow;
@@ -306,13 +369,14 @@ impl ReviewSession {
 
         match pick_failure_with_budget(&self.bundles, frame, &failures) {
             FailureChoice::Retry { reason, attempt, max_attempts } => {
-                push_attempt(frame, tool_name, arguments_json, &verdicts, AttemptOutcome::DeniedRetry);
+                push_attempt(frame, call_id, tool_name, arguments_json, &verdicts, AttemptOutcome::DeniedRetry);
                 let blocking: Vec<String> = failures
                     .iter()
                     .map(|v| v.principle_name.clone())
                     .collect();
                 let _ = self.events.send(ChatEvent::ReviewFrameProgress {
                     step_id: frame_id.0,
+                    call_id: call_id.to_string(),
                     attempt,
                     max_attempts,
                     blocking,
@@ -320,19 +384,23 @@ impl ReviewSession {
                 Approval::Deny(deny_reason(reason).into())
             }
             FailureChoice::AskUser(reason) => {
-                push_attempt(frame, tool_name, arguments_json, &verdicts, AttemptOutcome::Escalated);
+                push_attempt(frame, call_id, tool_name, arguments_json, &verdicts, AttemptOutcome::Escalated);
                 frame.status = StepStatus::Accepted;
+                emit_squashed(&self.events, frame);
                 let _ = self.events.send(ChatEvent::ReviewFrameResolved {
                     step_id: frame_id.0,
+                    call_id: call_id.to_string(),
                     outcome: ReviewResolution::Escalated { reason: reason.clone() },
                 });
                 Approval::Deny(deny_reason(reason).into())
             }
             FailureChoice::AllSkipped => {
-                push_attempt(frame, tool_name, arguments_json, &verdicts, AttemptOutcome::Executed);
+                push_attempt(frame, call_id, tool_name, arguments_json, &verdicts, AttemptOutcome::Executed);
                 frame.status = StepStatus::Accepted;
+                emit_squashed(&self.events, frame);
                 let _ = self.events.send(ChatEvent::ReviewFrameResolved {
                     step_id: frame_id.0,
+                    call_id: call_id.to_string(),
                     outcome: ReviewResolution::Accepted,
                 });
                 Approval::Allow
@@ -341,14 +409,40 @@ impl ReviewSession {
     }
 }
 
+/// Emit `AttemptsSquashed` listing this frame's denied attempt
+/// `call_id`s. Called when a frame transitions to a terminal status
+/// (`Accepted` or `Abandoned`) so the UI can drop the in-flight tool
+/// bubbles for the failed attempts immediately, instead of waiting
+/// for end-of-turn `HistoryReplaced` to clean them up.
+///
+/// The accepted/escalated attempt's `call_id` is intentionally
+/// excluded: only `DeniedRetry` and `Rewound` outcomes get squashed
+/// from the projected transcript, so only those should disappear
+/// from the live UI.
+fn emit_squashed(events: &broadcast::Sender<ChatEvent>, frame: &StepFrame) {
+    use crate::step::AttemptOutcome as AO;
+    let call_ids: Vec<String> = frame
+        .attempts
+        .iter()
+        .filter(|a| matches!(a.outcome, AO::DeniedRetry | AO::Rewound))
+        .map(|a| a.call_id.clone())
+        .collect();
+    if call_ids.is_empty() {
+        return;
+    }
+    let _ = events.send(ChatEvent::AttemptsSquashed { call_ids });
+}
+
 fn push_attempt(
     frame: &mut StepFrame,
+    call_id: &str,
     tool_name: &str,
     arguments_json: &str,
     verdicts: &[Verdict],
     outcome: AttemptOutcome,
 ) {
     frame.attempts.push(AttemptRecord {
+        call_id: call_id.to_string(),
         tool_name: tool_name.to_string(),
         arguments_json: arguments_json.to_string(),
         verdicts: verdicts.to_vec(),
@@ -577,6 +671,43 @@ pub enum BuildError {
 #[async_trait]
 impl ApprovalPolicy for ReviewApproval {
     async fn decide(&self, call: &ToolCall) -> Approval {
+        // Iteration gate: if a step is currently Active and locked to
+        // a tool, reject anything else (except `abort_step`, the
+        // self-issued rewind escape). This runs *before* the principle
+        // filter so unrelated tools that wouldn't otherwise summon a
+        // reviewer still get short-circuited — that's where drift
+        // tends to happen after compaction shortens the agent's
+        // memory of the iteration.
+        if call.name.as_str() != ABORT_STEP_TOOL_NAME {
+            let (lock_tx, lock_rx) = oneshot::channel();
+            if self
+                .req_tx
+                .send(ReviewRequest::CheckLock { reply: lock_tx })
+                .is_err()
+            {
+                return Approval::Deny(
+                    deny_reason("review runner unavailable").into(),
+                );
+            }
+            if let Ok(Some(locked)) = lock_rx.await
+                && locked != call.name.as_str()
+            {
+                return Approval::Deny(
+                    format!(
+                        "tool '{}' is not available during this review iteration on '{}'. \
+                         Call '{}' with adjusted arguments, or call '{}' with a 'reason' \
+                         describing what you need to reconsider — that rewinds the step \
+                         and frees the toolset.",
+                        call.name.as_str(),
+                        locked,
+                        locked,
+                        ABORT_STEP_TOOL_NAME,
+                    )
+                    .into(),
+                );
+            }
+        }
+
         // Filter by applies_to (no state).
         let matching: Vec<Arc<ReviewerBundle>> = self
             .bundles
@@ -604,6 +735,7 @@ impl ApprovalPolicy for ReviewApproval {
         if self
             .req_tx
             .send(ReviewRequest::BeginFrame {
+                tool_name: call.name.as_str().to_string(),
                 principle_names,
                 snapshot_paths,
                 reply: begin_tx,
@@ -628,6 +760,7 @@ impl ApprovalPolicy for ReviewApproval {
         if begin.is_new {
             let _ = self.events.send(ChatEvent::ReviewFrameOpened {
                 step_id: begin.frame_id.0,
+                call_id: call.id.as_str().to_string(),
                 tool_name: call.name.as_str().to_string(),
                 args_summary: args_summary.clone(),
             });
@@ -677,6 +810,7 @@ impl ApprovalPolicy for ReviewApproval {
                 warn!(error = %reason, "review system failure; aborting turn");
                 let _ = self.events.send(ChatEvent::ReviewFrameResolved {
                     step_id: begin.frame_id.0,
+                    call_id: call.id.as_str().to_string(),
                     outcome: ReviewResolution::ReviewSystemFailure {
                         principle: failure.principle.clone(),
                         error: reason.clone(),
@@ -695,6 +829,7 @@ impl ApprovalPolicy for ReviewApproval {
             .req_tx
             .send(ReviewRequest::ApplyVerdicts {
                 frame_id: begin.frame_id,
+                call_id: call.id.as_str().to_string(),
                 tool_name: call.name.as_str().to_string(),
                 arguments_json,
                 verdicts,
@@ -759,6 +894,7 @@ async fn run_reviewer_with_retries(
     };
     let _ = events.send(ChatEvent::ReviewerStarted {
         step_id: frame_id.0,
+        call_id: call.id.as_str().to_string(),
         reviewer_call_id,
         principle: principle_name.clone(),
     });
@@ -787,10 +923,16 @@ async fn run_reviewer_with_retries(
                     tool_name: call.name.as_str().to_string(),
                     args_summary: args_summary.to_string(),
                     verdict: to_wire_verdict(&verdict.kind),
+                    call_id: Some(call.id.as_str().to_string()),
                 };
                 if append_review_log(state_dir, &entry).is_ok() {
                     let _ = events.send(ChatEvent::ReviewerCompleted {
                         step_id: entry.step_id,
+                        // Read from `call` directly; the persisted log
+                        // entry uses `Option<String>` for legacy-row
+                        // back-compat, but the live event always knows
+                        // its callId from the in-flight ToolCall.
+                        call_id: call.id.as_str().to_string(),
                         reviewer_call_id: entry.reviewer_call_id,
                         principle: entry.principle.clone(),
                         verdict: entry.verdict.clone(),
@@ -1307,6 +1449,7 @@ mod tests {
             ChatEvent::ReviewerCompleted { .. } => "Completed",
             ChatEvent::ReviewFrameProgress { .. } => "Progress",
             ChatEvent::ReviewFrameResolved { .. } => "Resolved",
+            ChatEvent::AttemptsSquashed { .. } => "Squashed",
             _ => "Other",
         }
     }
@@ -1463,7 +1606,14 @@ mod tests {
 
         let evs = drain(&mut ev_sub);
         let seq: Vec<_> = evs.iter().map(kind).collect();
-        assert_eq!(seq, vec!["Opened", "Started", "Completed", "Resolved"]);
+        // `Squashed` precedes `Resolved` on a Rethink: the Rewound
+        // attempt is squashed live so the UI can drop its bubble while
+        // the iteration-box outline (which goes away on Resolved) is
+        // still anchored.
+        assert_eq!(
+            seq,
+            vec!["Opened", "Started", "Completed", "Squashed", "Resolved"]
+        );
         match evs.last().unwrap() {
             ChatEvent::ReviewFrameResolved {
                 outcome: ReviewResolution::Rewound { feedback },

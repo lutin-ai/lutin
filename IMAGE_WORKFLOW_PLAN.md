@@ -2,6 +2,56 @@
 
 A new Lutin workflow for local image generation. Mirrors the chat workflow's shape: a chat-style UI where the user types a prompt and generated images appear inline in the scrollback.
 
+## Status (as of Slice 7)
+
+**Done.**
+- Slice 1 — Python smoke test against ComfyUI (FLUX schnell fp8 generates in ~5s on the Blackwell card).
+- Slice 2 — `workflows/image/` workflow shell: Cargo crate, manifest, Dockerfile, hello UI, Sidebar wiring. New "Images" section appears, sessions start, iframe renders.
+- Slice 3 — Real protocol + ComfyUI integration. `@lutin/image-protocol` package, Rust `comfy.rs` client, end-to-end `Generate` with base64 image returned and rendered inline.
+- UI fix-up (post-Slice 3) — Adopted `@lutin/chat-widgets/theme.css` tokens (`lutin-chat` wrapper) and an `App.module.css`; removed inline styles. Composer extracted to a memoized child that owns the draft state, so keystrokes no longer re-render the turn list (slow-typing fix).
+- Slice 4 — Progress streaming. `comfy::ws_bridge` task connects to ComfyUI's `/ws?clientId=<id>` with exponential reconnect backoff and translates `progress` / `execution_success` / `execution_error` into `ImageEvent` broadcasts. Engine adds a `broadcast::Sender<ImageEvent>` and forwards into `Frame::Broadcast`. Generate splits into `queue_prompt` + `await_images` so `JobQueued { job_id }` fires between the two; `JobDone`/`JobError` fire on the way out (insurance for when the WS is flapping). UI binds events to the latest pending turn and renders a determinate progress bar (`step/total`).
+- Slice 7 — UI polish.
+  - Per-image hover overlay with four icon-only actions: Open (lightbox), Copy path (writes `image_id` to clipboard), Copy prompt, Regenerate with same seed (re-fires `Generate` with the original turn's seed locked, other params from current settings/overrides).
+  - Lightbox is a centered modal with Esc-to-close, scrim-click-to-close, and reuses `LazyImage` so opening a historical image fetches bytes through the same `getImage` path as the grid thumbnail.
+  - Composer keyboard: ⌘↵ / Ctrl+↵ submits unconditionally; plain ↵ still submits (Shift+↵ inserts newline); ↑ in an empty draft recalls the last submitted prompt (`lastPrompt` state at App level, set on submit).
+- Slice 6 — Sessions / persistence.
+  - `LUTIN_SESSION_STATE_DIR` consumed by the engine. Per-session disk layout is `<state_dir>/transcript.json`, `<state_dir>/summary.json`, and `<state_dir>/images/<ts>-<seed>-<idx>.<ext>`.
+  - `transcript.json` holds a `Vec<TranscriptEntry>` (prompt + params + image refs or error). Atomic write (tmp + rename) on every turn; load on boot, replay on first paint.
+  - `summary.json` written at boot and after every turn so dormant sessions show last_activity / preview / message_count in the desktop sidebar (CP-shared `SessionSummary` schema).
+  - Protocol gained `LoadTranscript` and `GetImage(image_id)`; `GeneratedImage` now carries `image_id` (relative path under the session state dir). Path traversal rejected before the FS read.
+  - UI: on mount, calls `LoadTranscript` and rebuilds `Turn`s. Bytes live in an App-level `Map<imageId, dataUrl>`. Fresh `Generate` populates the map immediately; restored images use a `LazyImage` that fires `GetImage` on first mount and renders a placeholder until bytes land. Each grid item parallel-fetches independently.
+- Slice 5 — Settings, multi-image, sizing.
+  - Settings persistence: `<project>/.lutin/image/lutin.image.toml` (`comfyui_url`, default size/count/steps/cfg). On-disk fields all optional → first-run defaults; engine holds the live copy in `Arc<RwLock<ImageSettings>>`. Protocol gains `GetSettings` / `SetSettings` / `HealthCheck`.
+  - Configurable URL flows everywhere: HTTP client, `/system_stats` health probe, WS bridge (re-reads URL on each reconnect cycle, so a URL change takes effect within `WS_RECONNECT_MAX`).
+  - Generate params expanded: `negative_prompt`, `count` (→ ComfyUI `batch_size`), `steps`, `cfg`. Response shape changed from `Image(GeneratedImage)` to `Images(Vec<GeneratedImage>)`.
+  - UI: gear-icon header opens a settings modal; composer grew an "Advanced" disclosure (per-turn overrides for negative prompt, count, steps, cfg, width, height, seed). Each advanced field defaults via placeholder to the workflow default. Multi-image responses render as a grid (1/2/2x2/3-col responsive). Health check drives an "ComfyUI not reachable" empty state with a Retry button + settings shortcut.
+
+**Known issues to address before more slices.**
+- Composer is a single textarea with hardcoded 1024×1024 and FLUX-schnell defaults — exposed knobs come in Slice 5.
+
+## Remaining work
+
+Slices below are the original plan, lightly re-scoped now that Slices 1–3 are landed.
+
+### Slice 4 — Progress streaming ✅ done
+
+### Slice 5 — Settings, multi-image, sizing ✅ done
+
+### Slice 6 — Sessions / persistence ✅ done
+
+### Slice 7 — UI polish & theme ✅ done
+
+### Later (not yet sliced)
+- Additional templates: SDXL, SD 3.5 — each is a `templates/<name>.json` + a dropdown entry. No protocol changes needed.
+- `img2img` / inpainting / ControlNet / LoRAs — each adds a graph template plus a few extra `Generate` params.
+- Upscaling pass as a post-step in the same graph.
+
+## Open decisions still on the table
+
+- **Default model.** Locked: FLUX schnell, single template `templates/flux-schnell.json`.
+- **Per-session vs. flat-within-project gallery.** Defaulting to per-session in Slice 6 unless you redirect.
+- **Settings UI surface.** Inlined in the image workflow itself (matches how chat handles persona/TTS controls); planned in Slice 5.
+
 ## Backend: ComfyUI (external)
 
 ComfyUI is a hard prerequisite. The user installs and runs it themselves — Lutin does not bundle, install, or manage the ComfyUI process.

@@ -160,6 +160,11 @@
     return api;
   }
 
+  // Zoom is driven by the chrome via `webview.setZoom`, which the
+  // engine propagates to all iframes natively. No plugin-side
+  // counter-scaling needed — and the prior CSS `zoom` path was the
+  // root cause of typing lag on Linux WebKitGTK.
+
   window.addEventListener("message", function (e) {
     if (!e.data || typeof e.data !== "object") return;
     if (e.data.type !== "lutin-init") return;

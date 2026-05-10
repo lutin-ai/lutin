@@ -255,6 +255,13 @@ pub struct ReviewLogEntry {
     pub tool_name: String,
     pub args_summary: String,
     pub verdict: ReviewVerdictWire,
+    /// Tool-call id of the attempt that this verdict was scored
+    /// against. The UI groups verdicts under each tool bubble by this
+    /// id — distinct from `step_id` because a step may have multiple
+    /// attempts (different `call_id`s) before reviewers approve.
+    /// `None` on rows persisted before this field existed.
+    #[serde(default)]
+    pub call_id: Option<String>,
 }
 
 /// One row in the sub-agent panel. `id` is the canonical display form
@@ -463,6 +470,10 @@ pub enum ChatEvent {
     /// failing principle.
     ReviewFrameOpened {
         step_id: u64,
+        /// Tool-call id of the first attempt (the one that opened the
+        /// frame). The UI uses this to anchor the iteration-box
+        /// outline to a specific tool bubble.
+        call_id: String,
         tool_name: String,
         /// Truncated single-line projection of the tool arguments JSON
         /// (~120 chars). Engine-side truncation keeps the wire small
@@ -479,6 +490,9 @@ pub enum ChatEvent {
     /// from drifting from the canonical mapping.
     ReviewerStarted {
         step_id: u64,
+        /// Tool-call id of the attempt this reviewer is scoring. UI
+        /// groups inline verdicts under the matching tool bubble.
+        call_id: String,
         reviewer_call_id: u64,
         principle: String,
     },
@@ -487,6 +501,9 @@ pub enum ChatEvent {
     /// `reviewer_call_id`.
     ReviewerCompleted {
         step_id: u64,
+        /// Tool-call id of the attempt this verdict scores. UI keys
+        /// inline verdict rows off this id (one bubble = one attempt).
+        call_id: String,
         reviewer_call_id: u64,
         principle: String,
         verdict: ReviewVerdictWire,
@@ -501,6 +518,9 @@ pub enum ChatEvent {
     /// currently fail.
     ReviewFrameProgress {
         step_id: u64,
+        /// Tool-call id of the attempt that just got denied. UI marks
+        /// that bubble's status with the failure summary.
+        call_id: String,
         attempt: u32,
         max_attempts: u32,
         blocking: Vec<String>,
@@ -510,6 +530,12 @@ pub enum ChatEvent {
     /// when the frame first appeared.
     ReviewFrameResolved {
         step_id: u64,
+        /// Tool-call id of the resolving attempt — accepted/escalated
+        /// → the call that ran (or would have); rewound → the call
+        /// the agent voluntarily backed out of; review-system failure
+        /// → the call the failing reviewer was scoring. Always a real
+        /// id; never empty.
+        call_id: String,
         outcome: ReviewResolution,
     },
     /// Provider opened a tool-call block; arguments are about to
@@ -534,6 +560,20 @@ pub enum ChatEvent {
         context_tokens: Option<u32>,
         total_prompt_tokens: u64,
         total_completion_tokens: u64,
+    },
+    /// One or more denied attempts in a now-resolved step are no
+    /// longer in the canonical transcript. The UI drops every tool
+    /// entry whose `call_id` matches; the engine emits this *before*
+    /// the matching `ReviewFrameResolved` so the iteration-box outline
+    /// is still anchored when the squash hits.
+    ///
+    /// Mirrors what end-of-turn `squash_denied_attempts` removes from
+    /// the message log. Live emission lets the chat scrollback shed
+    /// failed bubbles the moment a step accepts (or rewinds), instead
+    /// of the user seeing a clutter of red tool entries persist until
+    /// the entire turn is over.
+    AttemptsSquashed {
+        call_ids: Vec<String>,
     },
 }
 
@@ -721,6 +761,7 @@ mod tests {
                 "ChatEvent::ReviewFrameOpened",
                 encode(&ChatEvent::ReviewFrameOpened {
                     step_id: 7,
+                    call_id: "c".into(),
                     tool_name: "edit".into(),
                     args_summary: String::new(),
                 })
@@ -730,6 +771,7 @@ mod tests {
                 "ChatEvent::ReviewerStarted",
                 encode(&ChatEvent::ReviewerStarted {
                     step_id: 7,
+                    call_id: "c".into(),
                     reviewer_call_id: 1,
                     principle: "p".into(),
                 })
@@ -739,6 +781,7 @@ mod tests {
                 "ChatEvent::ReviewerCompleted(Pass)",
                 encode(&ChatEvent::ReviewerCompleted {
                     step_id: 7,
+                    call_id: "c".into(),
                     reviewer_call_id: 1,
                     principle: "p".into(),
                     verdict: ReviewVerdictWire::Pass,
@@ -750,6 +793,7 @@ mod tests {
                 "ChatEvent::ReviewerCompleted(Fail{Fix})",
                 encode(&ChatEvent::ReviewerCompleted {
                     step_id: 7,
+                    call_id: "c".into(),
                     reviewer_call_id: 2,
                     principle: "p".into(),
                     verdict: ReviewVerdictWire::Fail {
@@ -765,6 +809,7 @@ mod tests {
                 "ChatEvent::ReviewFrameProgress",
                 encode(&ChatEvent::ReviewFrameProgress {
                     step_id: 7,
+                    call_id: "c".into(),
                     attempt: 1,
                     max_attempts: 3,
                     blocking: vec!["p".into()],
@@ -775,6 +820,7 @@ mod tests {
                 "ChatEvent::ReviewFrameResolved(Accepted)",
                 encode(&ChatEvent::ReviewFrameResolved {
                     step_id: 7,
+                    call_id: "c".into(),
                     outcome: ReviewResolution::Accepted,
                 })
                 .unwrap(),
@@ -783,6 +829,7 @@ mod tests {
                 "ChatEvent::ReviewFrameResolved(Rewound)",
                 encode(&ChatEvent::ReviewFrameResolved {
                     step_id: 7,
+                    call_id: "c".into(),
                     outcome: ReviewResolution::Rewound { feedback: "fb".into() },
                 })
                 .unwrap(),
@@ -804,6 +851,7 @@ mod tests {
                         tool_name: "edit".into(),
                         args_summary: String::new(),
                         verdict: ReviewVerdictWire::Pass,
+                        call_id: Some("c".into()),
                     }],
                 }))
                 .unwrap(),
@@ -868,6 +916,7 @@ mod tests {
                 &[
                     0x0a, // variant 10
                     0x07, // step_id 7
+                    0x01, b'c', // call_id "c"
                     0x04, b'e', b'd', b'i', b't', // tool_name "edit"
                     0x00, // args_summary ""
                 ],
@@ -877,6 +926,7 @@ mod tests {
                 &[
                     0x0b, // variant 11
                     0x07, // step_id 7
+                    0x01, b'c', // call_id "c"
                     0x01, // reviewer_call_id 1
                     0x01, b'p', // principle "p"
                 ],
@@ -885,7 +935,9 @@ mod tests {
                 "ChatEvent::ReviewerCompleted(Pass)",
                 &[
                     0x0c, // variant 12
-                    0x07, 0x01, // step_id, reviewer_call_id
+                    0x07, // step_id
+                    0x01, b'c', // call_id "c"
+                    0x01, // reviewer_call_id
                     0x01, b'p', // principle
                     0x00, // verdict variant Pass
                     0x01, b'T', // ts "T"
@@ -895,7 +947,9 @@ mod tests {
                 "ChatEvent::ReviewerCompleted(Fail{Fix})",
                 &[
                     0x0c, // variant 12
-                    0x07, 0x02, // step_id, reviewer_call_id
+                    0x07, // step_id
+                    0x01, b'c', // call_id "c"
+                    0x02, // reviewer_call_id
                     0x01, b'p', // principle
                     0x02, // verdict variant Fail
                     0x00, // severity Fix
@@ -909,6 +963,7 @@ mod tests {
                 &[
                     0x0d, // variant 13
                     0x07, // step_id
+                    0x01, b'c', // call_id "c"
                     0x01, 0x03, // attempt, max_attempts
                     0x01, 0x01, b'p', // blocking ["p"]
                 ],
@@ -918,6 +973,7 @@ mod tests {
                 &[
                     0x0e, // variant 14
                     0x07, // step_id
+                    0x01, b'c', // call_id "c"
                     0x00, // outcome Accepted
                 ],
             ),
@@ -926,6 +982,7 @@ mod tests {
                 &[
                     0x0e, // variant 14
                     0x07, // step_id
+                    0x01, b'c', // call_id "c"
                     0x01, // outcome Rewound
                     0x02, b'f', b'b', // feedback "fb"
                 ],
@@ -946,6 +1003,8 @@ mod tests {
                     0x04, b'e', b'd', b'i', b't', // tool_name "edit"
                     0x00, // args_summary ""
                     0x00, // verdict variant Pass
+                    0x01, // call_id Option tag = Some
+                    0x01, b'c', // call_id "c"
                 ],
             ),
         ];

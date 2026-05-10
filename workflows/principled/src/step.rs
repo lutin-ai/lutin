@@ -133,6 +133,12 @@ pub enum AttemptOutcome {
 /// whose tool actually ran.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
+    /// Tool-call id from the agent SDK; matches the `call_id` on the
+    /// emitted `ToolCallStreaming` / `ToolCallCompleted` events. The
+    /// engine uses this to tell the UI which streamed tool bubbles
+    /// belong to a step that has now resolved (so denied attempts can
+    /// disappear live, before end-of-turn squash).
+    pub call_id: String,
     /// Tool name + args at the moment of the attempt. JSON-encoded
     /// args to stay protocol-shape-agnostic.
     pub tool_name: String,
@@ -227,10 +233,30 @@ pub struct StepFrame {
     /// Pure provenance — not used in the current control flow but
     /// kept for sidebar audit rendering.
     pub rewound_from: Option<StepId>,
+    /// Tool name the agent committed to on this step's first attempt.
+    /// Subsequent retries within the same `Active` frame are gated to
+    /// this name (or `abort_step`) by the review approval policy —
+    /// keeps the agent from drifting onto unrelated tools mid-step,
+    /// which is otherwise possible after compaction summarizes away
+    /// the iteration context. Set at frame construction (a frame
+    /// always has a triggering tool call), never cleared — survives
+    /// the Active → Accepted transition so audit views and any future
+    /// reactivation via rewind still see the original lock.
+    pub iterated_tool: String,
 }
 
 impl StepFrame {
-    pub fn new(id: StepId, conversation_index: usize, principle_names: &[&str]) -> Self {
+    /// `iterated_tool` is the tool name from the call that triggered
+    /// this frame — every frame has one (a frame is created in response
+    /// to a tool call going through approval). Embedding it in the
+    /// constructor instead of leaving it `Option` makes "Active frame
+    /// without a lock" unrepresentable.
+    pub fn new(
+        id: StepId,
+        conversation_index: usize,
+        principle_names: &[&str],
+        iterated_tool: String,
+    ) -> Self {
         let reviewers = principle_names
             .iter()
             .map(|name| {
@@ -254,6 +280,7 @@ impl StepFrame {
             },
             carried_forward: String::new(),
             rewound_from: None,
+            iterated_tool,
         }
     }
 }
@@ -334,9 +361,9 @@ impl StepStack {
             return Ok(RewindOutcome::BottomOfStack);
         };
 
-        // Restore the prior frame too — its tool's effects need to
-        // be rolled back so the main agent can choose differently.
-        prior.snapshot.restore_files()?;
+        // Do NOT restore the prior frame's snapshot — that frame was
+        // already accepted by reviewers, and rolling back its edits
+        // makes the agent see its own approved work vanish.
         prior.status = StepStatus::Active;
         if !prior.carried_forward.is_empty() {
             prior.carried_forward.push_str("\n\n");
@@ -405,7 +432,7 @@ mod tests {
 
     #[test]
     fn step_frame_initializes_reviewer_slots() {
-        let f = StepFrame::new(StepId(0), 7, &["a", "b"]);
+        let f = StepFrame::new(StepId(0), 7, &["a", "b"], "edit".into());
         assert_eq!(f.snapshot.conversation_index, 7);
         assert_eq!(f.reviewers.len(), 2);
         for (_name, slot) in &f.reviewers {
@@ -418,10 +445,10 @@ mod tests {
     fn rewind_pops_top_and_reactivates_prior() {
         let mut stack = StepStack::default();
         let id0 = stack.next_id();
-        stack.push(StepFrame::new(id0, 0, &["p"]));
+        stack.push(StepFrame::new(id0, 0, &["p"], "edit".into()));
         stack.accept_active();
         let id1 = stack.next_id();
-        stack.push(StepFrame::new(id1, 5, &["p"]));
+        stack.push(StepFrame::new(id1, 5, &["p"], "edit".into()));
 
         let out = stack.rewind("future said: this approach was wrong").unwrap();
         assert_eq!(out, RewindOutcome::Rewound { reactivated: id0 });
@@ -438,7 +465,7 @@ mod tests {
     fn rewind_at_bottom_signals_escalation() {
         let mut stack = StepStack::default();
         let id0 = stack.next_id();
-        stack.push(StepFrame::new(id0, 0, &["p"]));
+        stack.push(StepFrame::new(id0, 0, &["p"], "edit".into()));
 
         let out = stack.rewind("nothing below").unwrap();
         assert_eq!(out, RewindOutcome::BottomOfStack);
@@ -451,15 +478,15 @@ mod tests {
     fn rewind_accumulates_carried_forward() {
         let mut stack = StepStack::default();
         let id0 = stack.next_id();
-        stack.push(StepFrame::new(id0, 0, &["p"]));
+        stack.push(StepFrame::new(id0, 0, &["p"], "edit".into()));
         stack.accept_active();
         let id1 = stack.next_id();
-        stack.push(StepFrame::new(id1, 1, &["p"]));
+        stack.push(StepFrame::new(id1, 1, &["p"], "edit".into()));
         stack.rewind("first rewind").unwrap();
 
         // After rewinding, push a new attempt frame and rewind again.
         let id2 = stack.next_id();
-        stack.push(StepFrame::new(id2, 1, &["p"]));
+        stack.push(StepFrame::new(id2, 1, &["p"], "edit".into()));
         stack.rewind("second rewind").unwrap();
 
         let active = stack.active().unwrap();
@@ -468,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_restores_files_for_both_top_and_prior() {
+    fn rewind_restores_only_top_frame_files() {
         let dir = tempdir().unwrap();
         let a = dir.path().join("a.txt");
         let b = dir.path().join("b.txt");
@@ -477,22 +504,23 @@ mod tests {
 
         let mut stack = StepStack::default();
         let id0 = stack.next_id();
-        let mut f0 = StepFrame::new(id0, 0, &[]);
+        let mut f0 = StepFrame::new(id0, 0, &[], "edit".into());
         f0.snapshot.capture_file(&a).unwrap();
         stack.push(f0);
         std::fs::write(&a, b"a1").unwrap();
         stack.accept_active();
 
         let id1 = stack.next_id();
-        let mut f1 = StepFrame::new(id1, 0, &[]);
+        let mut f1 = StepFrame::new(id1, 0, &[], "edit".into());
         f1.snapshot.capture_file(&b).unwrap();
         stack.push(f1);
         std::fs::write(&b, b"b1").unwrap();
 
         stack.rewind("rewind").unwrap();
 
-        // Both files restored to pre-step content.
-        assert_eq!(std::fs::read(&a).unwrap(), b"a0");
+        // Only the rewound (top) frame's file reverts. The prior
+        // frame was already accepted by reviewers, so its edits stay.
+        assert_eq!(std::fs::read(&a).unwrap(), b"a1");
         assert_eq!(std::fs::read(&b).unwrap(), b"b0");
     }
 }

@@ -50,3 +50,9 @@ export { useScrollStick } from "./hooks/useScrollStick";
 
 export { Markdown } from "./markdown";
 export type { MarkdownProps } from "./markdown";
+
+export {
+  COMPOSER_APPEND_EVENT,
+  appendComposerText,
+} from "./composerEvents";
+export type { ComposerAppendDetail } from "./composerEvents";

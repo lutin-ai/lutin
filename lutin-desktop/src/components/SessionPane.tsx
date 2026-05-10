@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { cpSendOk } from "../api";
 import { useApp } from "../store";
 import type { ProjectInfo, WorkflowInfo } from "../types";
@@ -38,19 +39,50 @@ export function SessionPane({ project }: Props) {
     return () => { cancelled = true; };
   }, [project.slug, setSessions]);
 
-  // Workflow list is needed to resolve digest → bundle for the
-  // active session's iframe.
+  // Workflow list is needed to resolve digest → bundle for the active
+  // session's iframe. We refetch on mount AND whenever the window
+  // regains focus — so a `docker build` run from a terminal lands in
+  // the iframe as soon as the user clicks back into Lutin without
+  // requiring a manual reload. When the digest moves, PluginIframe's
+  // `[workflow, digest]` effect re-runs, which resets `opened` to
+  // `null` and triggers a fresh `workflow_open_plugin`; the BundleCache
+  // miss path then fetches + installs the new tarball and evicts the
+  // stale on-disk dir for this workflow id.
   useEffect(() => {
     let cancelled = false;
-    cpSendOk("ListWorkflows")
-      .then((r) => {
-        if (cancelled) return;
-        if (typeof r === "object" && "Workflows" in r) {
-          setWorkflows(dedupById(r.Workflows));
-        }
+    const refetch = () => {
+      cpSendOk("ListWorkflows")
+        .then((r) => {
+          if (cancelled) return;
+          if (typeof r === "object" && "Workflows" in r) {
+            setWorkflows((prev) => {
+              const next = dedupById(r.Workflows);
+              return sameWorkflows(prev, next) ? prev : next;
+            });
+          }
+        })
+        .catch(() => { /* iframe will sit on the resolving placeholder */ });
+    };
+    refetch();
+    // Window-level focus catches both browser focus (e.g. clicking
+    // back into the webview from devtools) and OS window focus on most
+    // platforms. Tauri's `tauri://focus` is the authoritative signal
+    // for OS-level focus changes (workspace switches, alt-tab) on
+    // platforms where the webview's `focus` event misses them.
+    window.addEventListener("focus", refetch);
+    let unlistenFocus: (() => void) | null = null;
+    getCurrentWindow()
+      .listen("tauri://focus", refetch)
+      .then((u) => {
+        if (cancelled) u();
+        else unlistenFocus = u;
       })
-      .catch(() => { /* iframe will sit on the resolving placeholder */ });
-    return () => { cancelled = true; };
+      .catch(() => { /* non-fatal — window focus listener still works */ });
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", refetch);
+      if (unlistenFocus) unlistenFocus();
+    };
   }, [project.slug]);
 
   const activeSession = sessions.find((s) => s.id === selected) ?? null;
@@ -135,4 +167,19 @@ function dedupById<T extends { id: string }>(xs: T[]): T[] {
     out.push(x);
   }
   return out;
+}
+
+// Avoid churning the workflows-state reference on focus refetches that
+// returned the same data — a fresh array would force PluginIframe to
+// re-run its `[workflow, digest]` effect, tearing down the iframe even
+// when nothing actually changed.
+function sameWorkflows(
+  a: WorkflowInfo[] | null,
+  b: WorkflowInfo[],
+): boolean {
+  if (a === null || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].digest !== b[i].digest) return false;
+  }
+  return true;
 }

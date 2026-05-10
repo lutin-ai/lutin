@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // Per-message right-click affordances. Each bubble owns its own menu
 // and edit state, so multiple bubbles can't share an open menu — that
@@ -28,6 +29,7 @@ interface UseMessageMenuArgs {
 
 export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [host, setHost] = useState<HTMLElement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
@@ -38,6 +40,16 @@ export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
       if (!actions && !canCopy()) return;
       e.preventDefault();
       setPos({ x: e.clientX, y: e.clientY });
+      // Portal target: the nearest `.lutin-chat` ancestor. We can't
+      // portal to `document.body` because the chat's CSS variables
+      // (--chat-surface, --chat-text, …) are scoped to `.lutin-chat` —
+      // outside that scope the menu renders transparent on default
+      // body color. The `.lutin-chat` root has no `transform`, so
+      // `position: fixed` viewport coords still resolve correctly
+      // (the transform that breaks fixed-positioning lives on the
+      // virtualizer's row wrappers, deeper in the tree).
+      const target = e.currentTarget as HTMLElement;
+      setHost(target.closest(".lutin-chat") as HTMLElement | null);
     },
     [id, actions],
   );
@@ -96,7 +108,7 @@ export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
     onContextMenu: open,
     menu:
       pos && items.length > 0 ? (
-        <ContextMenu pos={pos} items={items} onClose={close} />
+        <ContextMenu pos={pos} items={items} onClose={close} host={host} />
       ) : null,
     editing,
     editor:
@@ -119,10 +131,12 @@ function ContextMenu({
   pos,
   items,
   onClose,
+  host,
 }: {
   pos: { x: number; y: number };
   items: MenuItem[];
   onClose: () => void;
+  host: HTMLElement | null;
 }) {
   const ref = useRef<HTMLUListElement>(null);
 
@@ -142,7 +156,15 @@ function ContextMenu({
     };
   }, [onClose]);
 
-  return (
+  // Portal target: the `.lutin-chat` root so the menu inherits the
+  // chat's CSS variables (--chat-surface, --chat-text, …). Falling
+  // back to `document.body` keeps the menu visible when no host is
+  // resolvable, but it'll render unstyled — that's a developer bug
+  // (the menu was opened from a bubble outside any `.lutin-chat`
+  // ancestor) rather than a runtime path users should hit.
+  if (typeof document === "undefined") return null;
+  const target = host ?? document.body;
+  return createPortal(
     <ul
       ref={ref}
       className="lutin-chat__context-menu"
@@ -161,7 +183,8 @@ function ContextMenu({
           </button>
         </li>
       ))}
-    </ul>
+    </ul>,
+    target,
   );
 }
 

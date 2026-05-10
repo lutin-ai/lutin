@@ -18,7 +18,7 @@ use lutin_llm::anthropic::{AnthropicAuth, AnthropicProvider, OAuthCredentialStor
 use lutin_llm::ollama::{OllamaConfig, OllamaProvider};
 use lutin_llm::openai_compat_provider::{OpenAiCompatConfig, OpenAiCompatProvider};
 use lutin_llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use lutin_llm::{LlmProvider, ModelId};
+use lutin_llm::{LlmProvider, ModelId, NonStreamingProvider};
 use lutin_settings::{ProviderConfig, ProviderKind, ResolvedAuth, Settings};
 use lutin_tools::{FilterMode, ReadState, ToolContext};
 use thiserror::Error;
@@ -65,6 +65,12 @@ pub struct BuildArgs<'a> {
     /// Defaults to empty — placeholders for unset fields collapse to
     /// empty strings, so personas without placeholders don't notice.
     pub prompt_extras: PromptExtras,
+    /// When `true`, route the agent's streaming calls through the
+    /// provider's non-streaming `complete()` and synthesize a single-
+    /// batch event sequence. Used by workflows that don't render
+    /// incremental text (the principled workflow, where each step is
+    /// one model turn shown only after it finishes).
+    pub disable_streaming: bool,
 }
 
 /// Assemble an [`Agent`] ready to run one round-loop. Workflows that
@@ -113,6 +119,7 @@ fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildErro
         model_override,
         extra_tools,
         prompt_extras,
+        disable_streaming,
     } = args;
 
     let provider_name = persona
@@ -125,6 +132,11 @@ fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildErro
         .find(|p| p.name == provider_name)
         .ok_or_else(|| BuildError::ProviderNotFound(provider_name.to_string()))?;
     let provider = build_provider(provider_cfg)?;
+    let provider: Arc<dyn LlmProvider> = if disable_streaming {
+        Arc::new(NonStreamingProvider::new(provider))
+    } else {
+        provider
+    };
 
     let model = model_override
         .or_else(|| persona.model.clone())

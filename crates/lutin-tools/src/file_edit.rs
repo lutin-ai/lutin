@@ -162,6 +162,20 @@ impl FileEdit {
             return ToolOutput::err("old_string must not be empty");
         }
 
+        // Some models (notably Qwen3-Coder under vLLM) emit edits where
+        // old_string and new_string are byte-identical — a silent no-op
+        // that previously reported "edited N occurrences" while the file
+        // stayed unchanged. Surface it as an error so the model gets a
+        // chance to self-correct instead of marching on under the
+        // impression the change landed.
+        if input.old_string == input.new_string {
+            return ToolOutput::err(
+                "old_string and new_string are identical — this would be a no-op. \
+                 If you meant to delete, pass an empty new_string. \
+                 Otherwise re-read the file and provide the exact differing bytes.",
+            );
+        }
+
         let path = self.ctx.resolve(&input.path);
 
         let metadata = match tokio::fs::metadata(&path).await {

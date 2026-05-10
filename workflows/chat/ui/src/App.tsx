@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ChatView, type MessageActions } from "@lutin/chat-widgets";
+import { ChatView, appendComposerText, type MessageActions } from "@lutin/chat-widgets";
 import "@lutin/chat-widgets/theme.css";
 import type { Lutin } from "./lutin";
 import {
@@ -37,7 +37,6 @@ interface Props {
 export function App({ lutin }: Props) {
   const [snap, dispatch] = useReducer(reduce, initialSnapshot);
   const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
-  const [draft, setDraft] = useState("");
   // `null` = parent session view; `agent#N` = read-only child transcript.
   // The desktop sidebar drives this — chat doesn't render its own
   // sub-agent picker anymore. We mirror the chrome's selection in
@@ -48,14 +47,14 @@ export function App({ lutin }: Props) {
   const tts = useChatTts(lutin, ttsOn, ttsSpeed);
 
   // Wire PTT / open-mic transcription deliveries into the composer.
-  // We append rather than replace so the user can stack voice input
-  // on top of already-typed text. The plan calls for "don't auto-send"
-  // — the user reviews the result before hitting send.
+  // The composer owns its own draft state — going through a window
+  // CustomEvent keeps re-renders local to the composer subtree instead
+  // of re-rendering the entire transcript on every voice-input append
+  // (which is the same reason the composer doesn't lift `draft` up).
   useEffect(() => {
     if (!lutin.onTranscription) return;
     const off = lutin.onTranscription(({ text }) => {
-      if (!text) return;
-      setDraft((prev) => (prev.length === 0 ? text : `${prev} ${text}`));
+      appendComposerText(text);
     });
     return off;
   }, [lutin]);
@@ -383,10 +382,17 @@ export function App({ lutin }: Props) {
   const HiddenComposer = useMemo(() => () => null, []);
 
   const viewing = selectedAgent;
-  const vm =
-    viewing === null
-      ? toViewModel(snap)
-      : subAgentViewModel(snap.subAgentTranscripts[viewing] ?? []);
+  // Memoize the projected view model so re-renders that don't touch
+  // the snapshot don't allocate a fresh `messages` array and `turn`
+  // object. Without this, ChatView's `useScrollStick` deps trip on
+  // every render and force a `scrollTop = scrollHeight` reflow.
+  const vm = useMemo(
+    () =>
+      viewing === null
+        ? toViewModel(snap)
+        : subAgentViewModel(snap.subAgentTranscripts[viewing] ?? []),
+    [viewing, snap],
+  );
   const composerSlot = viewing === null ? Composer : HiddenComposer;
 
   return (
@@ -395,8 +401,6 @@ export function App({ lutin }: Props) {
       turn={vm.turn}
       onSend={send}
       onCancel={cancel}
-      draft={draft}
-      onDraftChange={setDraft}
       messageActions={messageActions}
       slots={{ Composer: composerSlot }}
     />

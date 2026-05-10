@@ -122,3 +122,108 @@ describe("two tool calls in one turn", () => {
     expect(tool.args.value).toEqual({ u: "x" });
   });
 });
+
+describe("historyReplaced mid-stream (rewind)", () => {
+  // A reviewer-driven rewind cancels the agent without emitting
+  // `toolCallCompleted` for the in-flight tool, then emits a
+  // `historyReplaced` reflecting the truncated transcript. Without
+  // resetting `turn.flushed`, the orphaned running tool entry would
+  // ride along to the next `messageFinished` and end up permanently
+  // glued into `completed` with `status: running`.
+  test("clears in-flight flushed/buf so orphaned running tools don't leak", () => {
+    let s = initialSnapshot;
+    s = reduce(s, { type: "submitOptimistic", text: "go" });
+    s = reduce(s, { type: "event", event: { kind: "delta", text: "thinking..." } });
+    s = emitToolCall(s, "call_rewound", "fs_write", { path: "x" });
+    if (s.turn.kind !== "streaming") throw new Error("expected streaming");
+    // pushToolStart flushed the prior text buf, so flushed = [text, tool].
+    expect(s.turn.flushed.length).toBe(2);
+    expect(
+      s.turn.flushed.some((m) => m.role === "tool" && m.status.kind === "running"),
+    ).toBe(true);
+
+    // Rewind: engine emits new history without the in-flight tool.
+    s = reduce(s, {
+      type: "event",
+      event: { kind: "historyReplaced", history: [{ kind: "user", text: "go" }] },
+    });
+    if (s.turn.kind !== "streaming") throw new Error("turn should still be streaming");
+    expect(s.turn.flushed).toEqual([]);
+    expect(s.turn.buf).toBe("");
+
+    // Post-rewind stream proceeds; messageFinished should not resurrect
+    // the rewound tool.
+    s = reduce(s, { type: "event", event: { kind: "delta", text: "retry" } });
+    s = reduce(s, {
+      type: "event",
+      event: { kind: "messageFinished", turnId: 1n, reason: { kind: "completed" } },
+    });
+    const stuck = s.completed.filter(
+      (m) => m.role === "tool" && m.status.kind === "running",
+    );
+    expect(stuck).toEqual([]);
+  });
+
+  test("idle turn: historyReplaced just swaps completed", () => {
+    const s = reduce(initialSnapshot, {
+      type: "event",
+      event: { kind: "historyReplaced", history: [{ kind: "user", text: "hi" }] },
+    });
+    expect(s.turn.kind).toBe("idle");
+    expect(s.completed).toEqual([{ role: "user", text: "hi" }]);
+  });
+});
+
+describe("attemptsSquashed (live denied-attempt cleanup)", () => {
+  // Engine-emitted event: when a step accepts (or rewinds), the failed
+  // attempts are no longer in the canonical transcript, so the UI
+  // drops their tool bubbles before end-of-turn historyReplaced lands.
+  test("drops streaming flushed entries by callId", () => {
+    let s = initialSnapshot;
+    s = reduce(s, { type: "submitOptimistic", text: "go" });
+    s = emitToolCall(s, "denied_a", "fs_write", { v: 1 });
+    s = reduce(s, {
+      type: "event",
+      event: {
+        kind: "toolCallCompleted",
+        id: "denied_a",
+        outcome: { kind: "failed", text: "rejected" },
+      },
+    });
+    s = emitToolCall(s, "accepted_b", "fs_write", { v: 2 });
+    if (s.turn.kind !== "streaming") throw new Error("expected streaming");
+    expect(s.turn.flushed.filter((m) => m.role === "tool").length).toBe(2);
+
+    s = reduce(s, {
+      type: "event",
+      event: { kind: "attemptsSquashed", callIds: ["denied_a"] },
+    });
+    if (s.turn.kind !== "streaming") throw new Error("still streaming");
+    const tools = s.turn.flushed.filter((m) => m.role === "tool");
+    expect(tools.length).toBe(1);
+    expect(tools[0]?.role === "tool" && tools[0].callId).toBe("accepted_b");
+  });
+
+  test("drops completed entries by callId when turn is idle", () => {
+    let s: SessionSnapshot = {
+      ...initialSnapshot,
+      completed: [
+        { role: "user", text: "go" },
+        {
+          role: "tool",
+          callId: "denied_x",
+          name: "fs_write",
+          args: { kind: "parsed", value: {} },
+          status: { kind: "failed", reason: "denied" },
+        },
+        { role: "assistant", text: "trying again" },
+      ],
+    };
+    s = reduce(s, {
+      type: "event",
+      event: { kind: "attemptsSquashed", callIds: ["denied_x"] },
+    });
+    expect(s.completed.some((m) => m.role === "tool")).toBe(false);
+    expect(s.completed.length).toBe(2);
+  });
+});

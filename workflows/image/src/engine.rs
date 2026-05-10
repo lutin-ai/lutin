@@ -7,6 +7,9 @@
 //! inline (base64) on the protocol channel.
 
 mod comfy;
+mod settings;
+mod store;
+mod summary;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -18,17 +21,19 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures_util::{SinkExt, StreamExt};
 use image_workflow::{
-    GeneratedImage, ImageError, ImageOk, ImageRequest, ImageResponse,
+    GenerateParams, GeneratedImage, ImageError, ImageEvent, ImageOk, ImageRequest,
+    ImageResponse, ImageSettings, TranscriptEntry, TranscriptImage, TranscriptStatus,
     decode as img_decode, encode as img_encode,
 };
 use lutin_auth::{Scope, SessionId, Slug, VerifyingKey, WorkflowId, pubkey_from_str, verify};
 use lutin_protocol::{Frame, HandshakeResult, PROTOCOL_VERSION, decode, encode};
 use rand::RngCore;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{RwLock, broadcast};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-use crate::comfy::{ComfyError, FetchedImage};
+use crate::comfy::{ComfyError, FetchedImage, QueueParams};
 
 struct Env {
     project: Slug,
@@ -37,6 +42,12 @@ struct Env {
     session: SessionId,
     addr: SocketAddr,
     handoff_path: PathBuf,
+    /// `<project>/.lutin/`. Image-workflow settings live under
+    /// `<project_config_dir>/image/lutin.image.toml`.
+    project_config_dir: PathBuf,
+    /// Per-session state dir, e.g. `<project>/.lutin/sessions/<id>/`.
+    /// Holds `transcript.json`, `summary.json`, and `images/`.
+    state_dir: PathBuf,
 }
 
 impl Env {
@@ -54,6 +65,8 @@ impl Env {
                 .parse()
                 .context("LUTIN_WORKFLOW_ADDR is not a valid socket addr")?,
             handoff_path: PathBuf::from(require_env("LUTIN_WORKFLOW_HANDOFF_PATH")?),
+            project_config_dir: PathBuf::from(require_env("LUTIN_PROJECT_CONFIG_DIR")?),
+            state_dir: PathBuf::from(require_env("LUTIN_SESSION_STATE_DIR")?),
         })
     }
 }
@@ -70,8 +83,26 @@ struct AppState {
     issuer: VerifyingKey,
     http: reqwest::Client,
     /// Stable per-process id used on every ComfyUI POST. Re-used by
-    /// the WS connection in Slice 4 so progress events route here.
+    /// the WS bridge so ComfyUI delivers progress for prompts queued
+    /// here to our connection.
     client_id: Arc<String>,
+    /// Fan-out for progress events. The WS bridge feeds this; each
+    /// connected workflow client subscribes and forwards into its own
+    /// `Frame::Broadcast`.
+    events: broadcast::Sender<ImageEvent>,
+    /// Live settings, read on every Generate / WS reconnect. `RwLock`
+    /// rather than `watch` because reads are frequent (every job) and
+    /// writes are rare (a settings panel save).
+    settings: Arc<RwLock<ImageSettings>>,
+    /// `<project>/.lutin/` — the parent of the per-workflow settings
+    /// dir. Held for the on-save persistence path.
+    project_config_dir: PathBuf,
+    /// Per-session dir; transcript + summary + images all live here.
+    state_dir: PathBuf,
+    /// Live transcript. Written under the lock on every turn (success
+    /// or error) and replayed for `LoadTranscript`. Held in memory so
+    /// the on-disk file is just a crash-recovery copy.
+    transcript: Arc<RwLock<Vec<TranscriptEntry>>>,
 }
 
 #[tokio::main]
@@ -100,6 +131,44 @@ async fn main() -> Result<()> {
         .build()
         .context("build reqwest client")?;
     let client_id = Arc::new(uuid_v4());
+    // 64 slots: comfortable headroom for one workflow client plus a
+    // handful of stacked progress events. Lagged subscribers get
+    // dropped (warn-logged) — same backpressure shape as chat.
+    let (events, _) = broadcast::channel::<ImageEvent>(64);
+
+    // Load persisted settings (defaults if missing). `RwLock` rather
+    // than a one-shot read because `SetSettings` rewrites this at
+    // runtime and the WS bridge / Generate paths read it back.
+    let settings = match settings::load(&env.project_config_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "failed to load image settings; using defaults");
+            ImageSettings::default()
+        }
+    };
+    let settings = Arc::new(RwLock::new(settings));
+
+    // Long-lived WS bridge to ComfyUI. Owns reconnection; the engine
+    // doesn't restart it. Cloning is cheap; settings are read on every
+    // reconnect cycle so a runtime URL change picks up automatically.
+    tokio::spawn(comfy::ws_bridge(
+        (*client_id).clone(),
+        settings.clone(),
+        events.clone(),
+    ));
+
+    // Load the persisted transcript (empty for first-run sessions)
+    // and refresh summary.json so a resumed dormant session gets its
+    // last_activity bumped even before any new turns happen.
+    let transcript = match store::load(&env.state_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "failed to load transcript; starting empty");
+            Vec::new()
+        }
+    };
+    summary::write(&env.state_dir, &transcript);
+    let transcript = Arc::new(RwLock::new(transcript));
 
     let state = AppState {
         project: env.project,
@@ -108,6 +177,11 @@ async fn main() -> Result<()> {
         issuer: env.project_pubkey,
         http,
         client_id,
+        events,
+        settings,
+        project_config_dir: env.project_config_dir,
+        state_dir: env.state_dir,
+        transcript,
     };
 
     loop {
@@ -177,42 +251,64 @@ async fn serve_conn(sock: TcpStream, state: AppState) -> Result<()> {
     let ack = encode(&Frame::HelloAck(HandshakeResult::Accepted))?;
     tx.send(Message::Binary(ack.into())).await?;
 
-    while let Some(msg) = rx.next().await {
-        let bytes = match msg? {
-            Message::Binary(b) => b,
-            Message::Close(_) => break,
-            Message::Ping(p) => {
-                tx.send(Message::Pong(p)).await?;
-                continue;
-            }
-            _ => continue,
-        };
-        let frame = decode(&bytes)?;
-        match frame {
-            Frame::Payload { request_id, body } => {
-                let req: ImageRequest = match img_decode(&body) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(error = %e, "failed to decode ImageRequest");
-                        let resp: ImageResponse =
-                            Err(ImageError::Internal(format!("decode request: {e}")));
+    let mut events = state.events.subscribe();
+
+    loop {
+        tokio::select! {
+            biased;
+            ev = events.recv() => match ev {
+                Ok(e) => {
+                    let body = img_encode(&e)?;
+                    let frame = encode(&Frame::Broadcast { body })?;
+                    if tx.send(Message::Binary(frame.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(n, "client lagged ImageEvent broadcast; closing");
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            msg = rx.next() => {
+                let Some(msg) = msg else { break };
+                let bytes = match msg? {
+                    Message::Binary(b) => b,
+                    Message::Close(_) => break,
+                    Message::Ping(p) => {
+                        tx.send(Message::Pong(p)).await?;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let frame = decode(&bytes)?;
+                match frame {
+                    Frame::Payload { request_id, body } => {
+                        let req: ImageRequest = match img_decode(&body) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(error = %e, "failed to decode ImageRequest");
+                                let resp: ImageResponse =
+                                    Err(ImageError::Internal(format!("decode request: {e}")));
+                                let body = img_encode(&resp)?;
+                                let out = encode(&Frame::Payload { request_id, body })?;
+                                tx.send(Message::Binary(out.into())).await?;
+                                continue;
+                            }
+                        };
+                        let resp = handle_request(&state, req).await;
                         let body = img_encode(&resp)?;
                         let out = encode(&Frame::Payload { request_id, body })?;
                         tx.send(Message::Binary(out.into())).await?;
-                        continue;
                     }
-                };
-                let resp = handle_request(&state, req).await;
-                let body = img_encode(&resp)?;
-                let out = encode(&Frame::Payload { request_id, body })?;
-                tx.send(Message::Binary(out.into())).await?;
+                    Frame::Ping { nonce } => {
+                        let out = encode(&Frame::Pong { nonce })?;
+                        tx.send(Message::Binary(out.into())).await?;
+                    }
+                    Frame::Close { .. } => break,
+                    frame => warn!(?frame, "unexpected frame from client"),
+                }
             }
-            Frame::Ping { nonce } => {
-                let out = encode(&Frame::Pong { nonce })?;
-                tx.send(Message::Binary(out.into())).await?;
-            }
-            Frame::Close { .. } => break,
-            frame => warn!(?frame, "unexpected frame from client"),
         }
     }
     Ok(())
@@ -220,49 +316,290 @@ async fn serve_conn(sock: TcpStream, state: AppState) -> Result<()> {
 
 async fn handle_request(state: &AppState, req: ImageRequest) -> ImageResponse {
     match req {
-        ImageRequest::Generate(params) => {
-            let seed = params.seed.unwrap_or_else(random_seed);
-            let started = Instant::now();
-            info!(
-                prompt_len = params.prompt.len(),
-                seed,
-                width = params.width,
-                height = params.height,
-                "generate start"
-            );
-            let result = comfy::generate(
-                &state.http,
-                state.client_id.as_str(),
-                &params.prompt,
-                seed,
-                params.width,
-                params.height,
-            )
-            .await;
-            let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-            match result {
-                Ok(FetchedImage { mime, bytes }) => {
-                    info!(seed, ms, bytes = bytes.len(), "generate ok");
-                    Ok(ImageOk::Image(GeneratedImage {
-                        mime,
-                        bytes_b64: B64.encode(&bytes),
-                        seed,
-                        ms,
-                    }))
-                }
-                Err(ComfyError::Unreachable(r)) => {
-                    warn!(reason = %r, "comfy unreachable");
-                    Err(ImageError::ComfyUnreachable(r))
-                }
-                Err(ComfyError::Execution(r)) => {
-                    warn!(reason = %r, "comfy execution error");
-                    Err(ImageError::Comfy(r))
-                }
-                Err(ComfyError::Internal(e)) => {
-                    warn!(error = %e, "comfy internal error");
-                    Err(ImageError::Internal(format!("{e:#}")))
-                }
+        ImageRequest::Generate(params) => handle_generate(state, params).await,
+        ImageRequest::GetSettings => {
+            let s = state.settings.read().await.clone();
+            Ok(ImageOk::Settings(s))
+        }
+        ImageRequest::SetSettings(new) => {
+            // Persist before swapping the live copy: a write failure
+            // means the next process boot would silently drop the new
+            // settings, which is a worse surprise than rejecting the
+            // request now.
+            if let Err(e) = settings::save(&state.project_config_dir, &new) {
+                warn!(error = %e, "failed to save image settings");
+                return Err(ImageError::Internal(format!("save settings: {e:#}")));
             }
+            *state.settings.write().await = new;
+            Ok(ImageOk::SettingsUpdated)
+        }
+        ImageRequest::HealthCheck => {
+            let base = state.settings.read().await.comfyui_url.clone();
+            match comfy::health_check(&state.http, &base).await {
+                Ok(()) => Ok(ImageOk::Health {
+                    reachable: true,
+                    message: base,
+                }),
+                Err(msg) => Ok(ImageOk::Health {
+                    reachable: false,
+                    message: msg,
+                }),
+            }
+        }
+        ImageRequest::LoadTranscript => {
+            let entries = state.transcript.read().await.clone();
+            Ok(ImageOk::Transcript(entries))
+        }
+        ImageRequest::GetImage(image_id) => handle_get_image(state, &image_id).await,
+    }
+}
+
+/// Resolve `image_id` against the session state dir, refusing any
+/// path that escapes it. The well-formed shape is `images/<file>`;
+/// anything with `..` or an absolute prefix is rejected before we
+/// touch the filesystem.
+async fn handle_get_image(state: &AppState, image_id: &str) -> ImageResponse {
+    if image_id.is_empty()
+        || image_id.contains("..")
+        || image_id.starts_with('/')
+        || image_id.contains('\\')
+    {
+        return Err(ImageError::Internal(format!("invalid image_id: {image_id}")));
+    }
+    let path = state.state_dir.join(image_id);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) => return Err(ImageError::Internal(format!("read {}: {e}", path.display()))),
+    };
+    let mime = mime_for(image_id);
+    // We don't track per-image seed/ms after restore — the transcript
+    // entry carries those. `GetImage` only needs to deliver bytes.
+    Ok(ImageOk::Image(GeneratedImage {
+        image_id: image_id.to_string(),
+        mime,
+        bytes_b64: B64.encode(&bytes),
+        seed: 0,
+        ms: 0,
+    }))
+}
+
+fn mime_for(image_id: &str) -> String {
+    let ext = image_id.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+async fn handle_generate(state: &AppState, params: GenerateParams) -> ImageResponse {
+    if params.count == 0 {
+        return Err(ImageError::Internal("count must be >= 1".into()));
+    }
+    let seed = params.seed.unwrap_or_else(random_seed);
+    let started = Instant::now();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let base = state.settings.read().await.comfyui_url.clone();
+    info!(
+        prompt_len = params.prompt.len(),
+        seed,
+        width = params.width,
+        height = params.height,
+        count = params.count,
+        steps = params.steps,
+        cfg = params.cfg,
+        "generate start"
+    );
+    // Two-step: queue first so we have a `prompt_id` to bind progress
+    // events to, then await completion. Between the two we broadcast
+    // `JobQueued` so the UI can switch the pending turn from
+    // "generating…" to a real progress bar before the first WS event
+    // lands.
+    let qp = QueueParams {
+        prompt: &params.prompt,
+        negative_prompt: &params.negative_prompt,
+        seed,
+        width: params.width,
+        height: params.height,
+        batch_size: params.count,
+        steps: params.steps,
+        cfg: params.cfg,
+        model_id: &params.model_id,
+    };
+    let prompt_id =
+        match comfy::queue_prompt(&state.http, &base, state.client_id.as_str(), &qp).await {
+            Ok(id) => id,
+            Err(e) => {
+                let err = map_comfy_err(e, "queue");
+                append_error_entry(state, &params, &started_at, &err).await;
+                return Err(err);
+            }
+        };
+    let _ = state.events.send(ImageEvent::JobQueued {
+        job_id: prompt_id.clone(),
+    });
+
+    match comfy::await_images(&state.http, &base, &prompt_id).await {
+        Ok(fetched) => {
+            let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            info!(
+                seed,
+                ms,
+                count = fetched.len(),
+                %prompt_id,
+                "generate ok"
+            );
+            // The WS bridge usually delivers `execution_success` first,
+            // but emit our own `JobDone` too — that way progress UIs
+            // work even if the WS is currently disconnected (the
+            // `/history` poll covered the completion side).
+            let _ = state.events.send(ImageEvent::JobDone {
+                job_id: prompt_id,
+            });
+            // Write each image to disk before responding so a crash
+            // mid-response doesn't leave the UI with a base64 blob it
+            // can't re-fetch on next load.
+            let mut images: Vec<GeneratedImage> = Vec::with_capacity(fetched.len());
+            for (idx, FetchedImage { mime, bytes }) in fetched.into_iter().enumerate() {
+                let image_id = match write_image(state, &started_at, seed, idx, &mime, &bytes) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let err = ImageError::Internal(format!("save image: {e:#}"));
+                        append_error_entry(state, &params, &started_at, &err).await;
+                        return Err(err);
+                    }
+                };
+                images.push(GeneratedImage {
+                    image_id,
+                    mime,
+                    bytes_b64: B64.encode(&bytes),
+                    seed,
+                    ms,
+                });
+            }
+            let entry = TranscriptEntry {
+                prompt: params.prompt.clone(),
+                negative_prompt: params.negative_prompt.clone(),
+                width: params.width,
+                height: params.height,
+                steps: params.steps,
+                cfg: params.cfg,
+                model_id: params.model_id.clone(),
+                started_at: started_at.clone(),
+                status: TranscriptStatus::Done {
+                    images: images
+                        .iter()
+                        .map(|i| TranscriptImage {
+                            image_id: i.image_id.clone(),
+                            mime: i.mime.clone(),
+                            seed: i.seed,
+                            ms: i.ms,
+                        })
+                        .collect(),
+                },
+            };
+            persist_entry(state, entry).await;
+            Ok(ImageOk::Images(images))
+        }
+        Err(e) => {
+            let err = map_comfy_err(e, "await");
+            let message = match &err {
+                ImageError::ComfyUnreachable(r) => format!("comfy unreachable: {r}"),
+                ImageError::Comfy(r) => r.clone(),
+                ImageError::Internal(m) => m.clone(),
+            };
+            let _ = state.events.send(ImageEvent::JobError {
+                job_id: prompt_id,
+                message,
+            });
+            append_error_entry(state, &params, &started_at, &err).await;
+            Err(err)
+        }
+    }
+}
+
+/// Write the image bytes under `<state_dir>/images/<ts>-<seed>-<idx>.<ext>`
+/// and return its session-relative `image_id`. Creates the `images/`
+/// dir on first call.
+fn write_image(
+    state: &AppState,
+    started_at: &str,
+    seed: u64,
+    idx: usize,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<String> {
+    let images_dir = state.state_dir.join("images");
+    std::fs::create_dir_all(&images_dir)
+        .with_context(|| format!("mkdir {}", images_dir.display()))?;
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "bin",
+    };
+    // RFC3339 has colons which are unfriendly in filenames on some
+    // platforms; strip them along with `+`/`.` for a flat,
+    // sort-friendly stem.
+    let stamp: String = started_at
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let filename = format!("{stamp}-{seed}-{idx}.{ext}");
+    let path = images_dir.join(&filename);
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(format!("images/{filename}"))
+}
+
+async fn persist_entry(state: &AppState, entry: TranscriptEntry) {
+    let mut entries = state.transcript.write().await;
+    entries.push(entry);
+    if let Err(e) = store::save(&state.state_dir, &entries) {
+        warn!(error = %e, "failed to persist image transcript");
+    }
+    summary::write(&state.state_dir, &entries);
+}
+
+async fn append_error_entry(
+    state: &AppState,
+    params: &GenerateParams,
+    started_at: &str,
+    err: &ImageError,
+) {
+    let message = match err {
+        ImageError::ComfyUnreachable(r) => format!("comfy unreachable: {r}"),
+        ImageError::Comfy(r) => r.clone(),
+        ImageError::Internal(m) => m.clone(),
+    };
+    let entry = TranscriptEntry {
+        prompt: params.prompt.clone(),
+        negative_prompt: params.negative_prompt.clone(),
+        width: params.width,
+        height: params.height,
+        steps: params.steps,
+        cfg: params.cfg,
+        model_id: params.model_id.clone(),
+        started_at: started_at.to_string(),
+        status: TranscriptStatus::Error { message },
+    };
+    persist_entry(state, entry).await;
+}
+
+fn map_comfy_err(e: ComfyError, stage: &str) -> ImageError {
+    match e {
+        ComfyError::Unreachable(r) => {
+            warn!(stage, reason = %r, "comfy unreachable");
+            ImageError::ComfyUnreachable(r)
+        }
+        ComfyError::Execution(r) => {
+            warn!(stage, reason = %r, "comfy execution error");
+            ImageError::Comfy(r)
+        }
+        ComfyError::Internal(e) => {
+            warn!(stage, error = %e, "comfy internal error");
+            ImageError::Internal(format!("{e:#}"))
         }
     }
 }
