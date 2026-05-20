@@ -24,8 +24,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use chat::{
-    ChatError, ChatEvent, ChatOk, ChatRequest, ChatResponse, FinishReason, HistoricalMessage,
-    MessageMeta, SessionState, SubAgentInfo, SubAgentStatus, ToolOutcome, TurnId,
+    ChatError, ChatEvent, ChatOk, ChatRequest, ChatResponse, FinishReason, HistoricalEntry,
+    HistoricalMessage, MessageMeta, SessionState, SubAgentInfo, SubAgentStatus, ToolOutcome,
+    TurnId,
     decode as chat_decode, encode as chat_encode, load_state, save_state,
 };
 use crate::store::{
@@ -109,7 +110,7 @@ enum AgentCmd {
     Rerun { turn: TurnId },
     Cancel,
     /// In-place mutation of the transcript. The new state is delivered
-    /// via the `HistoryReplaced` broadcast (single source of truth for
+    /// via the `TranscriptReplaced` broadcast (single source of truth for
     /// every subscriber, including the originator); the `reply` here
     /// just carries success/failure for the request/response pair.
     Mutate {
@@ -234,16 +235,32 @@ async fn main() -> Result<()> {
         agent_registry: agent_registry_tx,
     };
 
+    // CP no longer reaps containers on shutdown — workflows manage
+    // their own lifetime. If no client connects for IDLE_TIMEOUT,
+    // exit so the container goes away.
+    let idle = lutin_workflow_sdk::idle::IdleTracker::new();
+    let idle_watcher = idle.clone();
+    tokio::spawn(async move {
+        lutin_workflow_sdk::idle::wait_until_idle(idle_watcher, IDLE_TIMEOUT).await;
+        info!(timeout_secs = IDLE_TIMEOUT.as_secs(), "idle timeout reached; exiting");
+        std::process::exit(0);
+    });
+
     loop {
         let (sock, peer) = listener.accept().await?;
         let state = state.clone();
+        let guard = idle.guard();
         tokio::spawn(async move {
+            let _guard = guard;
             if let Err(e) = serve_conn(sock, state).await {
                 warn!(%peer, error = %e, "connection ended");
             }
         });
     }
 }
+
+/// Self-shutdown after this long without any connected clients.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 type WsSink = SplitSink<WebSocketStream<TcpStream>, Message>;
 
@@ -364,7 +381,7 @@ async fn handle_request(state: &AppState, req: ChatRequest) -> ChatResponse {
                 .map_err(|e| ChatError::Internal(format!("load transcript: {e}")))?;
             Ok(ChatOk::Subscribed {
                 state: s,
-                history: project_history(&entries),
+                entries: project_transcript(&entries),
             })
         }
         ChatRequest::GetState => match load_state(&state.state_dir) {
@@ -1109,14 +1126,13 @@ async fn handle_subagent_completion(
     // Persist + broadcast before the turn streams so subscribers see
     // the new entry alongside (or before) any assistant deltas. The
     // turn's tail does its own save — this earlier write is the cost
-    // of giving the chrome a HistoryReplaced anchor for the injected
+    // of giving the chrome a TranscriptReplaced anchor for the injected
     // message.
     if let Err(e) = store::save(&ctx.state_dir, entries) {
         warn!(error = %e, "save transcript after agent response failed");
     }
     write_summary(ctx, entries);
-    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
-    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(ChatEvent::TranscriptReplaced(project_transcript(entries)));
     let _ = ctx.events.send(build_summary_updated(entries));
     // text=None: the agent-response message is already on the
     // transcript; we just want the agent loop to take a turn against it.
@@ -1160,8 +1176,7 @@ fn apply_mutation(
         ChatError::PersistFailed { op: "save transcript".into() }
     })?;
     write_summary(ctx, entries);
-    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
-    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(ChatEvent::TranscriptReplaced(project_transcript(entries)));
     let _ = ctx.events.send(build_summary_updated(entries));
     Ok(())
 }
@@ -1427,8 +1442,7 @@ async fn run_turn(
         if let Err(e) = store::save(&ctx.state_dir, entries) {
             warn!(error = %e, "save transcript after user push failed");
         }
-        let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
-        let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+        let _ = ctx.events.send(ChatEvent::TranscriptReplaced(project_transcript(entries)));
         let _ = ctx.events.send(build_summary_updated(entries));
     }
     let pre_turn_len = entries.len();
@@ -1491,8 +1505,7 @@ async fn run_turn(
         turn_id: turn,
         reason,
     });
-    let _ = ctx.events.send(ChatEvent::HistoryReplaced(project_history(entries)));
-    let _ = ctx.events.send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+    let _ = ctx.events.send(ChatEvent::TranscriptReplaced(project_transcript(entries)));
     let _ = ctx.events.send(build_summary_updated(entries));
     // Capture any spawn / stop / terminal transition the orchestrator
     // produced during this turn. Snapshotting once at the tail rather
@@ -1528,7 +1541,7 @@ fn sync_new_entries(agent_messages: &[lutin_llm::Message], entries: &mut Vec<Ent
 /// [`maybe_compact`]; we mirror the splice into `entries` (so metrics
 /// stay aligned), append a snapshot of the dropped messages to a
 /// per-session archive sidecar, persist the new transcript, and broadcast
-/// `HistoryReplaced` + `MetricsReplaced` so the UI can rerender.
+/// `TranscriptReplaced` so the UI can rerender.
 async fn run_compaction(
     ctx: &RunnerCtx,
     agent: &mut Agent,
@@ -1586,10 +1599,7 @@ async fn run_compaction(
     write_summary(ctx, entries);
     let _ = ctx
         .events
-        .send(ChatEvent::HistoryReplaced(project_history(entries)));
-    let _ = ctx
-        .events
-        .send(ChatEvent::MetricsReplaced(project_metrics(entries)));
+        .send(ChatEvent::TranscriptReplaced(project_transcript(entries)));
     let _ = ctx.events.send(build_summary_updated(entries));
     info!(
         kept = outcome.kept,
@@ -1920,6 +1930,22 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// by `call_id`; `projected_slots` mirrors this iteration order.
 fn project_history(entries: &[Entry]) -> Vec<HistoricalMessage> {
     project_messages(entries.iter().map(|e| &e.message))
+}
+
+/// Project entries to the paired wire shape carried by
+/// `TranscriptReplaced` and `ChatOk::Subscribed`. Built by zipping the
+/// two existing projections so message/metric alignment is enforced by
+/// construction — the wire never carries two parallel vecs that could
+/// race during broadcast.
+fn project_transcript(entries: &[Entry]) -> Vec<HistoricalEntry> {
+    let history = project_history(entries);
+    let metrics = project_metrics(entries);
+    debug_assert_eq!(history.len(), metrics.len(), "projection alignment");
+    history
+        .into_iter()
+        .zip(metrics)
+        .map(|(message, meta)| HistoricalEntry { message, meta })
+        .collect()
 }
 
 /// Same projection rules as [`project_history`], but driven from raw

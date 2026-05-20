@@ -180,4 +180,62 @@
     window.lutin = lutin;
     resolveLutin(lutin);
   }, { once: true });
+
+  // Chrome → iframe focus request: when the user presses the
+  // configured `focusWorkflow` chord (e.g. `i`), the chrome posts this
+  // and we focus the iframe's primary composer. A plugin can override
+  // by handling the message itself (event is observable before this
+  // handler runs only if it registers a capture-phase listener); the
+  // default behaviour is "focus the first textarea, else the first
+  // text input".
+  window.addEventListener("message", function (e) {
+    if (!e.data || typeof e.data !== "object") return;
+    if (e.data.type !== "lutin-focus-input") return;
+    const target =
+      document.querySelector("textarea:not([disabled])") ||
+      document.querySelector('input[type="text"]:not([disabled])') ||
+      document.querySelector("input:not([type]):not([disabled])");
+    if (target && typeof target.focus === "function") target.focus();
+  });
+
+  // Iframe → chrome keydown forwarding. The chrome's window-level
+  // app-keybind handler can't see keys absorbed by a cross-origin
+  // iframe, so the shim forwards them. We skip while a text input or
+  // contenteditable has focus — those keystrokes are real typing, not
+  // navigation. Escape is the one exception: when typing, Escape
+  // blurs the input (so the next key lands as nav) *and* forwards so
+  // chrome clears any in-flight leader.
+  function isTextTarget(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName;
+    if (tag === "INPUT") {
+      const t = (el.getAttribute("type") || "text").toLowerCase();
+      // Buttons, checkboxes, etc. don't consume keys as text.
+      return t === "text" || t === "search" || t === "email" || t === "url" ||
+             t === "tel" || t === "password" || t === "number";
+    }
+    if (tag === "TEXTAREA") return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+  window.addEventListener("keydown", function (e) {
+    const inText = isTextTarget(e.target);
+    if (inText && e.key === "Escape") {
+      try { e.target.blur && e.target.blur(); } catch (_) {}
+      // fall through to forward so parent clearLeader runs.
+    } else if (inText) {
+      return;
+    }
+    try {
+      parent.postMessage({
+        type: "lutin-keydown",
+        key: e.key,
+        code: e.code,
+        ctrlKey: !!e.ctrlKey,
+        metaKey: !!e.metaKey,
+        shiftKey: !!e.shiftKey,
+        altKey: !!e.altKey,
+      }, "*");
+    } catch (_) { /* parent unreachable — fine */ }
+  }, true);
 })();

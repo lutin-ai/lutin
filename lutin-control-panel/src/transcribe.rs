@@ -15,12 +15,14 @@ use anyhow::{Context, Result};
 use lutin_control_protocol::{
     BeamSize, ParakeetConfig, ParakeetModel, SttConfig, WhisperConfig, WhisperModel,
 };
-use lutin_stt::parakeet::ParakeetFactory;
+use lutin_stt::parakeet::ParakeetStreamingFactory;
 use lutin_stt::whisper::WhisperFactory;
-use lutin_stt::{SttBackendFactory, SttError, SttWorker, TranscribeParams};
+use lutin_stt::{
+    SttBackendFactory, SttError, SttStream, SttStreamingFactory, SttWorker, TranscribeParams,
+};
 use thiserror::Error;
 use tokio::fs;
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 use tracing::{info, warn};
 
 use crate::downloads::download_to;
@@ -77,32 +79,36 @@ pub async fn ensure_whisper_model(
 
 // -- parakeet download ------------------------------------------------------
 
-fn parakeet_repo(model: ParakeetModel) -> &'static str {
-    match model {
-        // Community ONNX export — the upstream `nvidia/parakeet-tdt-*`
-        // repos ship NeMo checkpoints, not ONNX. `istupakov`'s mirror
-        // is the canonical conversion source we know parakeet-rs's
-        // `from_pretrained` works against.
-        ParakeetModel::Tdt06bV3 => "istupakov/parakeet-tdt-0.6b-v3-onnx",
-    }
-}
-
 fn parakeet_subdir(model: ParakeetModel) -> &'static str {
     match model {
-        ParakeetModel::Tdt06bV3 => "tdt-0.6b-v3",
+        // Wire enum still says `Tdt06bV3` for back-compat with old
+        // settings files, but on disk we keep the streaming-unified
+        // weights under their own subdir — the file names and the
+        // model itself are different from istupakov's offline export,
+        // and reusing the old dir would mix incompatible weights.
+        ParakeetModel::Tdt06bV3 => "unified-0.6b-en",
     }
 }
 
-/// Files parakeet-rs's `ParakeetTDT::from_pretrained` looks up inside
-/// the model directory. `encoder-model.onnx.data` is the external
-/// weights blob — separate file because the `.onnx` graph references
-/// it by relative path.
-const PARAKEET_FILES: &[&str] = &[
-    "encoder-model.onnx",
-    "encoder-model.onnx.data",
-    "decoder_joint-model.onnx",
-    "vocab.txt",
-];
+/// Files `parakeet-rs`'s `ParakeetUnified::from_pretrained` looks up
+/// inside the model directory. We point at `bobNight`'s ONNX mirror
+/// of `nvidia/parakeet-unified-en-0.6b` — the *streaming-trained*
+/// checkpoint, not the offline TDT v3 export. The streaming code
+/// path runs the encoder on overlapping windows; the offline model
+/// produces only blank tokens when fed those windows, hence the
+/// switch. The repo ships everything at root with the exact file
+/// names the loader looks for. `encoder.onnx.data` is the external
+/// weights blob the `.onnx` graph references by relative path.
+fn parakeet_files(model: ParakeetModel) -> &'static [(&'static str, &'static str)] {
+    match model {
+        ParakeetModel::Tdt06bV3 => &[
+            ("encoder.onnx", "bobNight/parakeet-unified-en-0.6b-onnx"),
+            ("encoder.onnx.data", "bobNight/parakeet-unified-en-0.6b-onnx"),
+            ("decoder_joint.onnx", "bobNight/parakeet-unified-en-0.6b-onnx"),
+            ("tokenizer.model", "bobNight/parakeet-unified-en-0.6b-onnx"),
+        ],
+    }
+}
 
 pub fn parakeet_models_dir(global_config_dir: &Path) -> PathBuf {
     global_config_dir.join("models").join("parakeet")
@@ -125,8 +131,7 @@ pub async fn ensure_parakeet_model(
     fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("create {}", dir.display()))?;
-    let repo = parakeet_repo(model);
-    for &file in PARAKEET_FILES {
+    for &(file, repo) in parakeet_files(model) {
         let dest = dir.join(file);
         if dest.exists() {
             continue;
@@ -177,7 +182,17 @@ pub enum SttFailure {
 /// time per backend — fine at N=2; revisit if a third backend lands.
 pub struct SttManager {
     whisper: Mutex<Option<(WhisperModel, Arc<dyn SttWorker>)>>,
-    parakeet: Mutex<Option<(ParakeetModel, Arc<dyn SttWorker>)>>,
+    parakeet: Mutex<Option<(ParakeetModel, Arc<dyn SttStreamingFactory>)>>,
+    /// Serialises whisper / parakeet model loads so two concurrent
+    /// `ensure_*` calls don't both fall through the cache check and
+    /// race two `commit_from_file` invocations against the same
+    /// ONNX file. ORT 1.24 has been observed to surface a bare
+    /// `io::Error("No such file or directory")` when a second
+    /// session-build runs against a model whose external data file
+    /// is still being mapped by the first; serialising here makes
+    /// the second caller a fast cache hit.
+    whisper_load: AsyncMutex<()>,
+    parakeet_load: AsyncMutex<()>,
     config_dir: PathBuf,
 }
 
@@ -186,6 +201,8 @@ impl SttManager {
         Self {
             whisper: Mutex::new(None),
             parakeet: Mutex::new(None),
+            whisper_load: AsyncMutex::new(()),
+            parakeet_load: AsyncMutex::new(()),
             config_dir,
         }
     }
@@ -194,6 +211,14 @@ impl SttManager {
         &self,
         model: WhisperModel,
     ) -> Result<Arc<dyn SttWorker>, SttFailure> {
+        if let Some((m, w)) = &*self.whisper.lock().expect("whisper slot poisoned")
+            && *m == model
+        {
+            return Ok(w.clone());
+        }
+        let _load_guard = self.whisper_load.lock().await;
+        // Recheck under the load gate: a concurrent caller may have
+        // populated the slot while we were waiting.
         if let Some((m, w)) = &*self.whisper.lock().expect("whisper slot poisoned")
             && *m == model
         {
@@ -216,52 +241,64 @@ impl SttManager {
     async fn ensure_parakeet(
         &self,
         model: ParakeetModel,
-    ) -> Result<Arc<dyn SttWorker>, SttFailure> {
-        if let Some((m, w)) = &*self.parakeet.lock().expect("parakeet slot poisoned")
+    ) -> Result<Arc<dyn SttStreamingFactory>, SttFailure> {
+        if let Some((m, f)) = &*self.parakeet.lock().expect("parakeet slot poisoned")
             && *m == model
         {
-            return Ok(w.clone());
+            return Ok(f.clone());
+        }
+        let _load_guard = self.parakeet_load.lock().await;
+        // Recheck under the load gate (see [`ensure_whisper`]).
+        if let Some((m, f)) = &*self.parakeet.lock().expect("parakeet slot poisoned")
+            && *m == model
+        {
+            return Ok(f.clone());
         }
         let dir = ensure_parakeet_model(&self.config_dir, model)
             .await
             .map_err(SttFailure::ModelUnavailable)?;
-        let worker: Arc<dyn SttWorker> =
-            tokio::task::spawn_blocking(move || -> Result<Arc<dyn SttWorker>, SttError> {
-                Ok(Arc::from(ParakeetFactory::new(dir).create_worker()?))
-            })
-            .await
-            .map_err(|e| SttFailure::ModelUnavailable(anyhow::anyhow!("load task panicked: {e}")))?
-            .map_err(|e| SttFailure::ModelUnavailable(anyhow::anyhow!(e)))?;
-        *self.parakeet.lock().expect("parakeet slot poisoned") = Some((model, worker.clone()));
-        Ok(worker)
+        let factory: Arc<dyn SttStreamingFactory> = tokio::task::spawn_blocking(
+            move || -> Result<Arc<dyn SttStreamingFactory>, SttError> {
+                Ok(Arc::new(ParakeetStreamingFactory::load(dir)?))
+            },
+        )
+        .await
+        .map_err(|e| SttFailure::ModelUnavailable(anyhow::anyhow!("load task panicked: {e}")))?
+        .map_err(|e| SttFailure::ModelUnavailable(anyhow::anyhow!(e)))?;
+        *self.parakeet.lock().expect("parakeet slot poisoned") = Some((model, factory.clone()));
+        Ok(factory)
     }
 
-    pub async fn ensure_worker(&self, cfg: &SttConfig) -> Result<Arc<dyn SttWorker>, SttFailure> {
+    /// Warm up whichever backend the config selects. Used by the
+    /// `OpenTranscription` handler to kick off the model load before
+    /// the user has finished talking. Returns nothing — callers
+    /// surface load errors on the next real op.
+    pub async fn ensure_worker(&self, cfg: &SttConfig) -> Result<(), SttFailure> {
         match cfg {
-            SttConfig::Whisper(WhisperConfig { model, .. }) => self.ensure_whisper(*model).await,
-            SttConfig::Parakeet(ParakeetConfig { model }) => self.ensure_parakeet(*model).await,
+            SttConfig::Whisper(WhisperConfig { model, .. }) => {
+                self.ensure_whisper(*model).await.map(|_| ())
+            }
+            SttConfig::Parakeet(ParakeetConfig { model }) => {
+                self.ensure_parakeet(*model).await.map(|_| ())
+            }
         }
     }
 
-    /// Run inference. `pcm` is 16 kHz mono i16 PCM. Conversion to f32
-    /// + actual decode happens on the blocking thread inside the
-    /// backend, so the caller pays no scaling cost on the request
-    /// handler.
-    pub async fn transcribe(
+    /// Run one-shot whisper inference. `pcm` is 16 kHz mono i16 PCM —
+    /// conversion to f32 + decode happen on the blocking thread inside
+    /// the backend. Parakeet uses `open_parakeet_stream` instead.
+    pub async fn transcribe_whisper(
         &self,
         pcm: Vec<i16>,
-        cfg: &SttConfig,
+        cfg: &WhisperConfig,
     ) -> Result<String, SttFailure> {
-        let worker = self.ensure_worker(cfg).await?;
-        let params = match cfg {
-            SttConfig::Whisper(w) => TranscribeParams {
-                language: w.language.clone(),
-                beam_size: match w.beam_size {
-                    BeamSize::Greedy => 1,
-                    BeamSize::Beam(n) => n.get(),
-                },
+        let worker = self.ensure_whisper(cfg.model).await?;
+        let params = TranscribeParams {
+            language: cfg.language.clone(),
+            beam_size: match cfg.beam_size {
+                BeamSize::Greedy => 1,
+                BeamSize::Beam(n) => n.get(),
             },
-            SttConfig::Parakeet(_) => TranscribeParams::default(),
         };
         let text = tokio::task::spawn_blocking(move || -> Result<String, SttError> {
             worker.transcribe(&pcm, &params, &never_cancelled())
@@ -273,6 +310,21 @@ impl SttManager {
             warn!("stt returned empty transcription");
         }
         Ok(text)
+    }
+
+    /// Open a new parakeet streaming session. The returned
+    /// `Box<dyn SttStream>` carries per-stream decoder state and is
+    /// driven by the per-stream worker task in
+    /// `transcription_streams`.
+    pub async fn open_parakeet_stream(
+        &self,
+        cfg: &ParakeetConfig,
+    ) -> Result<Box<dyn SttStream>, SttFailure> {
+        let factory = self.ensure_parakeet(cfg.model).await?;
+        tokio::task::spawn_blocking(move || factory.open_stream())
+            .await
+            .map_err(|e| SttFailure::Inference(anyhow::anyhow!("open stream task panicked: {e}")))?
+            .map_err(map_stt_error)
     }
 }
 

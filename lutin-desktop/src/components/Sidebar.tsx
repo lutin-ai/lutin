@@ -5,19 +5,14 @@ import type {
   SessionId,
   SessionInfo,
   SubAgentRow,
+  WorkflowId,
   WorkflowInfo,
 } from "../types";
 import styles from "./Sidebar.module.css";
+import { WorkflowIcon } from "./WorkflowIcon";
+import { RowMenu, type RowMenuItem } from "./RowMenu";
+import { BUCKET_LABEL, BUCKET_ORDER, bucketFor, relativeTime, type Bucket } from "./sessionTime";
 
-// Sidebar surfaces one section per known workflow so the user can
-// start sessions without a picker. Each entry maps a workflow id to
-// the section label shown above its session list. Order here drives
-// section order in the sidebar.
-const WORKFLOW_SECTIONS: Array<{ id: string; label: string }> = [
-  { id: "chat", label: "Chats" },
-  { id: "principled", label: "Principled" },
-  { id: "image", label: "Images" },
-];
 const SIDEBAR_WIDTH_KEY = "lutin.sidebar.width";
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 600;
@@ -31,17 +26,15 @@ function loadInitialWidth(): number {
 }
 
 export function Sidebar() {
-  const projects = useApp((s) => s.projects);
   const selected = useApp((s) => s.selectedProject);
-  const select = useApp((s) => s.selectProject);
   const view = useApp((s) => s.view);
-  const setView = useApp((s) => s.setView);
   const conn = useApp((s) => s.conn);
   const sessionsBySlug = useApp((s) => s.sessionsBySlug);
   const setSessions = useApp((s) => s.setSessions);
   const selectedSession = useApp((s) => s.selectedSession);
   const selectSession = useApp((s) => s.selectSession);
   const applyEvent = useApp((s) => s.applyEvent);
+  const removeSession = useApp((s) => s.removeSession);
   const chatStateBySession = useApp((s) => s.chatStateBySession);
   const selectSubAgent = useApp((s) => s.selectSubAgent);
 
@@ -88,11 +81,26 @@ export function Sidebar() {
     setDragging(true);
   };
 
-  const [creating, setCreating] = useState(false);
-  const [newSlug, setNewSlug] = useState("");
-  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [workflows, setWorkflows] = useState<Record<string, WorkflowInfo>>({});
+  // Per-row right-click menu. One open at a time; row id is stashed
+  // alongside viewport coords. Click-outside / Escape close via the
+  // <RowMenu> component itself.
+  const [rowMenu, setRowMenu] = useState<
+    | { id: SessionId; title: string; x: number; y: number }
+    | null
+  >(null);
+  // Sub-agent trees collapse by default; only opted-in rows render
+  // children. The chip on each row toggles membership in this set.
+  const [expandedAgents, setExpandedAgents] = useState<Set<SessionId>>(new Set());
+  // Cheap clock-tick so relative timestamps re-render without
+  // requiring a session update. One minute is enough — sub-minute
+  // values say "now" anyway.
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setClockTick((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Resolve installed workflows once on connect so each section's
   // "+" button can start a session without a picker. Missing images
@@ -112,35 +120,6 @@ export function Sidebar() {
       .catch(() => { /* picker stays hidden */ });
     return () => { cancelled = true; };
   }, [conn.kind]);
-
-  const submit = async () => {
-    if (!newSlug.trim() || !newName.trim()) return;
-    setError(null);
-    try {
-      await cpSendOk({
-        CreateProject: { slug: newSlug.trim(), display_name: newName.trim() },
-      });
-      setNewSlug("");
-      setNewName("");
-      setCreating(false);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const remove = async (slug: string) => {
-    setError(null);
-    try {
-      await cpSendOk({ DeleteProject: { slug } });
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const onSelect = (slug: string) => {
-    if (view.kind === "settings") setView({ kind: "project" });
-    select(slug);
-  };
 
   const inSettings = view.kind === "settings";
 
@@ -185,6 +164,9 @@ export function Sidebar() {
     if (!selected) return;
     try {
       await cpSendOk({ DeleteSession: { slug: selected, session: id } });
+      // SessionEnded only marks Dormant now (so reap doesn't hide rows);
+      // a real delete needs to drop the row explicitly.
+      removeSession(selected, id);
     } catch (e) {
       setError(String(e));
     }
@@ -212,87 +194,21 @@ export function Sidebar() {
         role="separator"
         aria-orientation="vertical"
       />
-      <div className={styles.sectionHead}>
-        <span className={styles.sectionLabel}>Projects</span>
-        <button
-          className={styles.addBtn}
-          title="New project"
-          disabled={conn.kind !== "connected" || creating}
-          onClick={() => setCreating(true)}
-        >
-          +
-        </button>
-      </div>
+      {error && <div className={styles.error}>{error}</div>}
 
-      <ul className={styles.list}>
-        {projects.map((p) => (
-          <li
-            key={p.slug}
-            className={!inSettings && selected === p.slug ? styles.active : undefined}
-            onClick={() => onSelect(p.slug)}
-          >
-            <span className={styles.folderIcon} aria-hidden>
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
-                <path d="M1.5 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1h6.1a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
-              </svg>
-            </span>
-            <span className={styles.projName}>{p.display_name}</span>
-            <button
-              className={styles.deleteBtn}
-              title="Delete"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (confirm(`Delete project ${p.slug}?`)) remove(p.slug);
-              }}
-            >
-              ×
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      {creating && (
-        <div className={styles.creator}>
-          <input
-            placeholder="slug"
-            value={newSlug}
-            onChange={(e) => setNewSlug(e.target.value)}
-            autoFocus
-          />
-          <input
-            placeholder="display name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-          <div className={styles.creatorRow}>
-            <button className={styles.primary} onClick={submit}>Create</button>
-            <button
-              onClick={() => {
-                setCreating(false);
-                setNewSlug("");
-                setNewName("");
-                setError(null);
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-          {error && <div className={styles.error}>{error}</div>}
-        </div>
-      )}
-
-      {selected && !inSettings && WORKFLOW_SECTIONS.map(({ id: wfId, label }) => {
-        const wf = workflows[wfId];
+      {selected && !inSettings && buildSidebarSections(workflows, sessionsByWorkflow).map(({ id: wfId, label, icon, installed }) => {
         const sessions = sessionsByWorkflow[wfId] ?? [];
         return (
           <div key={wfId}>
           <div className={styles.sectionHead}>
-            <span className={styles.sectionLabel}>{label}</span>
+            <span className={styles.sectionLabel}>
+              <WorkflowIcon id={wfId} fallback={icon} />
+              {label}
+            </span>
             <button
               className={styles.addBtn}
-              title={wf ? `New ${label.toLowerCase()}` : `${label} workflow not installed`}
-              disabled={conn.kind !== "connected" || !wf}
+              title={installed ? `New ${label}` : `${label} workflow not installed`}
+              disabled={conn.kind !== "connected" || !installed}
               onClick={() => startSession(wfId)}
             >
               +
@@ -300,90 +216,144 @@ export function Sidebar() {
           </div>
 
           <div className={styles.chatTable}>
-            {sessions.length > 0 && (
-              <div className={styles.chatHeader}>
-                <span />
-                <span>title</span>
-                <span>persona</span>
-                <span className={styles.colRight}>ctx</span>
-                <span />
-              </div>
-            )}
             {sessions.length === 0 && (
               <div className={styles.emptyRow}>No sessions yet.</div>
             )}
-            {sessions.map((s) => {
-              const title = s.summary?.title?.trim() || `${wfId} · ${shortId(s.id)}`;
-              const persona = s.summary?.persona ?? "—";
-              const ctx = s.summary?.context_tokens;
-              const isActive = selectedSession === s.id;
-              // Sub-agents only flow in for the session whose iframe
-              // is mounted (today: the selected chat). Other chats
-              // render as plain rows. The selected sub-agent (if any)
-              // visually de-highlights the parent chat row so the
-              // selection stays unambiguous.
-              const chatState = chatStateBySession[s.id];
-              const subAgents = chatState?.agents ?? [];
-              const subSelected = chatState?.selected ?? null;
-              const parentSelected = isActive && subSelected === null;
-              return (
-                <div key={s.id}>
-                  <div
-                    className={`${styles.chatRow} ${parentSelected ? styles.active : ""}`}
-                    onClick={() => {
-                      selectSession(s.id);
-                      // Clicking the parent chat row deselects any
-                      // child agent — there's no separate "back"
-                      // affordance in the iframe anymore.
-                      if (subSelected !== null) selectSubAgent(s.id, null);
-                    }}
-                    title={tooltipFor(s)}
-                  >
-                    <span
-                      className={styles.chatState}
-                      data-state={s.state.toLowerCase()}
-                      aria-hidden
-                    />
-                    <span className={styles.chatTitle}>{title}</span>
-                    <span className={styles.chatPersona}>{persona}</span>
-                    <span
-                      className={`${styles.chatCtx} ${styles.colRight}`}
-                      data-band={ctx != null ? ctxBand(ctx) : undefined}
-                    >
-                      {ctx != null ? formatTokens(ctx) : "—"}
-                    </span>
-                    <button
-                      className={styles.deleteBtn}
-                      title="Delete session"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`Delete "${title}"? History will be lost.`)) {
-                          deleteSession(s.id);
-                        }
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  {subAgents.length > 0 && (
-                    <SubAgentRows
-                      session={s.id}
-                      agents={subAgents}
-                      selected={subSelected}
-                      onSelect={(id) => {
-                        selectSession(s.id);
-                        selectSubAgent(s.id, id);
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
+            {bucketSessions(sessions).map(({ bucket, rows }) => (
+              <div key={bucket} className={styles.bucket}>
+                <div className={styles.bucketLabel}>{BUCKET_LABEL[bucket]}</div>
+                {rows.map((s) => {
+                  const title = s.summary?.title?.trim() || `${wfId} · ${shortId(s.id)}`;
+                  const isActive = selectedSession === s.id;
+                  const chatState = chatStateBySession[s.id];
+                  const subAgents = chatState?.agents ?? [];
+                  const subSelected = chatState?.selected ?? null;
+                  const parentSelected = isActive && subSelected === null;
+                  const lastIso = s.summary?.last_activity ?? s.created_at;
+                  const subCount = subAgents.length;
+                  const expanded = expandedAgents.has(s.id);
+                  return (
+                    <div key={s.id}>
+                      <div
+                        className={`${styles.chatRow} ${parentSelected ? styles.active : ""}`}
+                        onClick={() => {
+                          selectSession(s.id);
+                          if (subSelected !== null) selectSubAgent(s.id, null);
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setRowMenu({ id: s.id, title, x: e.clientX, y: e.clientY });
+                        }}
+                        title={tooltipFor(s)}
+                      >
+                        <span
+                          className={styles.chatState}
+                          data-state={s.state.toLowerCase()}
+                          aria-hidden
+                        />
+                        <span className={styles.chatTitle}>{title}</span>
+                        {subCount > 0 && (
+                          <button
+                            type="button"
+                            className={styles.subChip}
+                            data-expanded={expanded || undefined}
+                            title={expanded ? "Hide sub-agents" : `Show ${subCount} sub-agent${subCount === 1 ? "" : "s"}`}
+                            aria-expanded={expanded}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedAgents((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(s.id)) next.delete(s.id);
+                                else next.add(s.id);
+                                return next;
+                              });
+                            }}
+                          >
+                            <CogIcon />
+                            {subCount}
+                          </button>
+                        )}
+                        <span className={styles.chatTime}>{relativeTime(lastIso)}</span>
+                      </div>
+                      {expanded && subAgents.length > 0 && (
+                        <SubAgentRows
+                          session={s.id}
+                          agents={subAgents}
+                          selected={subSelected}
+                          onSelect={(id) => {
+                            selectSession(s.id);
+                            selectSubAgent(s.id, id);
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
           </div>
           </div>
         );
       })}
+      {rowMenu && (
+        <RowMenu
+          pos={{ x: rowMenu.x, y: rowMenu.y }}
+          items={buildSessionMenu(rowMenu, deleteSession)}
+          onClose={() => setRowMenu(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+function buildSessionMenu(
+  menu: { id: SessionId; title: string },
+  deleteSession: (id: SessionId) => void,
+): RowMenuItem[] {
+  return [
+    {
+      label: "Delete",
+      danger: true,
+      onSelect: () => {
+        if (confirm(`Delete "${menu.title}"? History will be lost.`)) {
+          deleteSession(menu.id);
+        }
+      },
+    },
+  ];
+}
+
+// Group already-time-sorted sessions into the four buckets the sidebar
+// renders. Empty buckets are dropped so the rendered list has no gaps.
+function bucketSessions(sessions: SessionInfo[]): Array<{ bucket: Bucket; rows: SessionInfo[] }> {
+  const now = new Date();
+  const groups: Record<Bucket, SessionInfo[]> = {
+    today: [],
+    yesterday: [],
+    thisWeek: [],
+    older: [],
+  };
+  for (const s of sessions) {
+    const iso = s.summary?.last_activity ?? s.created_at;
+    groups[bucketFor(iso, now)].push(s);
+  }
+  return BUCKET_ORDER.filter((b) => groups[b].length > 0).map((b) => ({
+    bucket: b,
+    rows: groups[b],
+  }));
+}
+
+function CogIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M7 1.5v1.6M7 10.9v1.6M1.5 7h1.6M10.9 7h1.6M2.9 2.9l1.1 1.1M10 10l1.1 1.1M2.9 11.1L4 10M10 4l1.1-1.1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
@@ -471,6 +441,38 @@ function flattenSubAgents(agents: SubAgentRow[]): FlatSubAgent[] {
   return out;
 }
 
+interface SidebarSection {
+  id: WorkflowId;
+  label: string;
+  icon: string | null;
+  installed: boolean;
+}
+
+// One sidebar section per installed workflow, plus a fallback section
+// for any workflow id that owns sessions but is no longer installed —
+// so the user can still see and delete dormant sessions when an image
+// is removed. Installed sections sort alphabetically by display name;
+// orphan sections trail, sorted by id.
+function buildSidebarSections(
+  workflows: Record<string, WorkflowInfo>,
+  sessionsByWorkflow: Record<string, SessionInfo[]>,
+): SidebarSection[] {
+  const installed: SidebarSection[] = Object.values(workflows).map((w) => ({
+    id: w.id,
+    label: w.display_name,
+    icon: w.icon || null,
+    installed: true,
+  }));
+  installed.sort((a, b) => a.label.localeCompare(b.label));
+
+  const orphans: SidebarSection[] = Object.keys(sessionsByWorkflow)
+    .filter((id) => !(id in workflows))
+    .sort()
+    .map((id) => ({ id, label: id, icon: null, installed: false }));
+
+  return [...installed, ...orphans];
+}
+
 function shortId(id: string): string {
   return id.length > 10 ? id.slice(0, 8) + "…" : id;
 }
@@ -478,15 +480,6 @@ function shortId(id: string): string {
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
   return String(n);
-}
-
-/** Color band for the ctx column. Kept in lockstep with the chat
- *  composer's `SummaryFooter::bandFor` so both surfaces agree on
- *  what counts as "comfortable / busy / hot". */
-function ctxBand(tokens: number): "low" | "mid" | "high" {
-  if (tokens <= 50_000) return "low";
-  if (tokens <= 100_000) return "mid";
-  return "high";
 }
 
 // Tooltip aggregates the fields we don't render inline so the row

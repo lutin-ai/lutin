@@ -46,6 +46,26 @@ export function App({ lutin }: Props) {
   const [ttsSpeed, setTtsSpeed] = useState(1.0);
   const tts = useChatTts(lutin, ttsOn, ttsSpeed);
 
+  // Persist composer draft per session so switching chats away and
+  // back doesn't drop in-progress text. Lives in iframe-origin
+  // localStorage — survives PluginIframe remounts as well as full app
+  // restarts. The session id keys ensures drafts don't bleed across
+  // sessions inside the same chat workflow.
+  const draftKey = `lutin.chat.draft:${lutin.session}`;
+  const [draft, setDraftState] = useState<string>(() => {
+    try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
+  });
+  const onDraftChange = useCallback((text: string) => {
+    setDraftState(text);
+    try {
+      if (text.length === 0) localStorage.removeItem(draftKey);
+      else localStorage.setItem(draftKey, text);
+    } catch {
+      // Private-mode or quota errors are non-fatal — the in-memory
+      // draft still works for this session.
+    }
+  }, [draftKey]);
+
   // Wire PTT / open-mic transcription deliveries into the composer.
   // The composer owns its own draft state — going through a window
   // CustomEvent keeps re-renders local to the composer subtree instead
@@ -306,18 +326,15 @@ export function App({ lutin }: Props) {
   // reflects persona switches and the first user message immediately.
   useEffect(() => {
     const title = deriveTitle(snap.completed);
-    const tokens = snap.summary ?? {
-      contextTokens: null,
-      totalPromptTokens: 0,
-      totalCompletionTokens: 0,
-    };
     // Omit `title` when we can't derive one (transcript not yet
     // loaded after a remount). `null` would tell the chrome to clear
     // the persisted title; `undefined` leaves it intact, so the
     // sidebar keeps showing the on-disk title until we have something
-    // authoritative to publish.
+    // authoritative to publish. Same convention for token fields:
+    // before the engine has re-emitted `SummaryUpdated` post-remount
+    // `snap.summary` is null and we must not clobber chrome's `ctx`.
     lutin.publishSummary({
-      ...tokens,
+      ...(snap.summary ?? {}),
       persona: snap.persona,
       ...(title !== null ? { title } : {}),
     });
@@ -401,6 +418,8 @@ export function App({ lutin }: Props) {
       turn={vm.turn}
       onSend={send}
       onCancel={cancel}
+      draft={draft}
+      onDraftChange={onDraftChange}
       messageActions={messageActions}
       slots={{ Composer: composerSlot }}
     />

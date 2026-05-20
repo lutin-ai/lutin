@@ -123,7 +123,9 @@ export type CpEvent =
   | { SessionEnded: { slug: Slug; session: SessionId } }
   // `TtsAudio` is intercepted in Rust (`drain_updates`) and routed
   // to the playback module — never reaches JS — so it's intentionally
-  // not in this union. The remaining TTS variants do.
+  // not in this union. `TranscriptionPartial` is similarly intercepted
+  // and folded into the overlay phase polled via `overlay_current_phase`.
+  // The remaining TTS variants do.
   | { TtsFinished: { stream_id: number } }
   | {
       TtsBackendDownload: {

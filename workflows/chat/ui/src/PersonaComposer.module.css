@@ -19,12 +19,14 @@
 }
 .shell:focus-within {
   border-color: var(--chat-accent);
-  box-shadow: 0 0 0 3px var(--chat-focus-ring);
 }
 .shell[data-disabled] { opacity: 0.6; }
 
 .input {
   width: 100%;
+  /* width:100% + padding without border-box puts the cursor and the
+   * intrinsic content area past the shell's right padding. */
+  box-sizing: border-box;
   resize: none;
   font-family: inherit;
   font-size: var(--chat-fs-xl);
@@ -33,8 +35,8 @@
   background: transparent;
   border: 0;
   outline: none;
-  padding: 12px 14px 4px;
-  min-height: 36px;
+  padding: 10px 12px 4px;
+  min-height: 34px;
   max-height: 240px;
   /* See chat-widgets theme.css — CSS auto-grow replaces a
    * reflow-thrashing JS effect that slowed typing on long transcripts. */
@@ -264,7 +266,6 @@
 .send {
   background: var(--chat-accent);
   color: var(--chat-accent-on);
-  box-shadow: 0 0 0 1px rgba(232, 116, 59, 0.30), 0 4px 14px -6px var(--chat-accent);
 }
 .send:hover:not(:disabled) { background: var(--chat-accent-hover); }
 .send:active:not(:disabled) { transform: scale(0.94); }

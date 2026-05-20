@@ -55,6 +55,12 @@ pub enum Trigger {
 pub struct ActivePtt {
     pub stream_id: TranscriptionStreamId,
     pub target: Target,
+    /// Accumulated streaming-transcript partial. Empty for whisper
+    /// streams (one-shot, no partials emitted) and grows as parakeet
+    /// `Event::TranscriptionPartial` deltas arrive. Read by the chunk
+    /// pump to update the overlay pill; cleared with the rest of
+    /// `ActivePtt` on PTT release.
+    pub partial: String,
 }
 
 /// Single dispatch entry. Runs on the tokio runtime so the OS
@@ -117,7 +123,14 @@ async fn ptt_down<R: Runtime>(app: AppHandle<R>, trigger: Trigger, target: Targe
     };
 
     let started_at = Instant::now();
-    overlay::show(&app, OverlayPhase::Listening { mib: 0.0, elapsed_ms: 0 });
+    overlay::show(
+        &app,
+        OverlayPhase::Listening {
+            mib: 0.0,
+            elapsed_ms: 0,
+            partial: String::new(),
+        },
+    );
 
     // Open the CP-side stream. Block here on the OpenTranscription
     // round-trip — until CP gives us a stream id we can't pump
@@ -152,6 +165,7 @@ async fn ptt_down<R: Runtime>(app: AppHandle<R>, trigger: Trigger, target: Targe
     *state.active_ptt.lock().expect("active_ptt poisoned") = Some(ActivePtt {
         stream_id,
         target,
+        partial: String::new(),
     });
 
     debug!(?trigger, ?stream_id, "PTT down: stream opened");
@@ -175,17 +189,27 @@ async fn pump_chunks<R: Runtime>(
     let mut bytes_sent: u64 = 0;
     while let Some(samples) = rx.recv().await {
         bytes_sent = bytes_sent.saturating_add((samples.len() * 2) as u64);
-        // Update the overlay live — MiB sent + elapsed listening time.
-        // `update` (rather than `show`) skips the event emit + window
-        // show; the overlay JS polls the cached phase 10x/sec so a
-        // higher cadence here would just be wasted work.
+        // Update the overlay live — MiB sent + elapsed listening time +
+        // any partial transcript accumulated so far. `update` (rather
+        // than `show`) skips the event emit + window show; the overlay
+        // JS polls the cached phase 10x/sec so a higher cadence here
+        // would just be wasted work.
         let mib = bytes_to_mib(bytes_sent);
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        let partial = state
+            .active_ptt
+            .lock()
+            .expect("active_ptt poisoned")
+            .as_ref()
+            .filter(|p| p.stream_id == stream_id)
+            .map(|p| p.partial.clone())
+            .unwrap_or_default();
         overlay::update(
             &app,
             OverlayPhase::Listening {
                 mib,
                 elapsed_ms,
+                partial,
             },
         );
 

@@ -61,11 +61,10 @@ export type Turn =
 export interface SessionSnapshot {
   persona: string | null;
   completed: Message[];
-  /** Parallel to `completed` — the engine's `MetricsReplaced` broadcast
-   *  always arrives paired with `HistoryReplaced`, so once both have
-   *  been applied the arrays are aligned 1:1. While one has just landed
-   *  but not the other, the lengths can diverge for a few ms — render
-   *  defensively (treat missing entries as "no metrics yet"). */
+  /** Parallel to `completed`. The engine ships transcript and metrics
+   *  together via the single `transcriptReplaced` broadcast, so these
+   *  two arrays are always written from the same reducer step and
+   *  align 1:1 by construction. */
   metrics: MessageMeta[];
   /** Live sub-agent registry rows. Replaced wholesale on each
    *  `subAgentsChanged` event (and on the response to `listSubAgents`). */
@@ -154,12 +153,11 @@ function applyEvent(state: SessionSnapshot, ev: ChatEvent): SessionSnapshot {
     }
     case "stateChanged":
       return { ...state, persona: ev.state.persona };
-    case "historyReplaced": {
-      const completed: Message[] = ev.history.map(fromHistorical);
-      return { ...state, completed };
+    case "transcriptReplaced": {
+      const completed: Message[] = ev.entries.map((e) => fromHistorical(e.message));
+      const metrics: MessageMeta[] = ev.entries.map((e) => e.meta);
+      return { ...state, completed, metrics };
     }
-    case "metricsReplaced":
-      return { ...state, metrics: ev.metrics };
     case "subAgentsChanged":
       return { ...state, subAgents: ev.subAgents };
     case "subAgentTranscriptUpdated":
@@ -356,8 +354,21 @@ function applyResponse(
   const ok = resp.value;
   switch (ok.kind) {
     case "subscribed": {
-      const completed: Message[] = ok.history.map(fromHistorical);
-      return { ...state, persona: ok.state.persona, completed };
+      // Subscribe is sent once on mount, before any user action, so
+      // its transcript snapshot is the authoritative starting state.
+      // Always adopt it — the prior "skip on non-clean-slate" guard
+      // dropped history whenever a streaming delta arrived first,
+      // leaving the user staring at an empty transcript on chat switch.
+      // `turn` is preserved so any deltas already buffered into the
+      // streaming state survive the swap; subsequent broadcasts
+      // (transcriptReplaced, etc.) reconcile any committed mid-flight
+      // changes idempotently.
+      return {
+        ...state,
+        persona: ok.state.persona,
+        completed: ok.entries.map((e) => fromHistorical(e.message)),
+        metrics: ok.entries.map((e) => e.meta),
+      };
     }
     case "state":
     case "stateUpdated":
@@ -381,7 +392,7 @@ function applyResponse(
       // Personas is fetched by App.tsx separately and never flows
       // through this reducer. historyAcknowledged is a no-op on
       // purpose — the engine delivers the new transcript via the
-      // `historyReplaced` broadcast (see applyEvent), so applying it
+      // `transcriptReplaced` broadcast (see applyEvent), so applying it
       // here too would be redundant. These cases exist to keep the
       // exhaustiveness check honest.
       return state;

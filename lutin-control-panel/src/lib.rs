@@ -163,7 +163,8 @@ impl Supervisor {
         let manager = Arc::new(transcribe::SttManager::new(
             config.global_config_dir.clone(),
         ));
-        let transcription = transcription_streams::TranscriptionRegistry::new(manager);
+        let transcription =
+            transcription_streams::TranscriptionRegistry::new(manager, ev_tx.clone());
 
         // Single sink for every loaded TTS backend; CP fans events
         // out onto the broadcast as they arrive. Unbounded because
@@ -338,15 +339,27 @@ impl AppState {
     }
 
     async fn handle_finish_transcription(&self, stream_id: TranscriptionStreamId) -> Response {
-        let Some(stream) = self.transcription.take(stream_id) else {
-            return Response::Err(ApiError::TranscriptionStreamNotFound(stream_id));
+        let result = match self.transcription.take(stream_id) {
+            transcription_streams::FinishOutcome::NotFound => {
+                return Response::Err(ApiError::TranscriptionStreamNotFound(stream_id));
+            }
+            transcription_streams::FinishOutcome::Whisper { samples, config } => self
+                .transcription
+                .manager()
+                .transcribe_whisper(samples, &config)
+                .await,
+            transcription_streams::FinishOutcome::Parakeet { reply } => match reply.await {
+                Ok(r) => r,
+                // Worker dropped the oneshot without sending — load
+                // failed before any Finish could be processed, or the
+                // task panicked. Surface as a generic inference error;
+                // the worker logs the underlying cause.
+                Err(_) => Err(transcribe::SttFailure::Inference(anyhow::anyhow!(
+                    "parakeet worker exited before sending final transcript"
+                ))),
+            },
         };
-        match self
-            .transcription
-            .manager()
-            .transcribe(stream.samples, &stream.config)
-            .await
-        {
+        match result {
             Ok(text) => Response::Ok(ResponseOk::Transcription { text }),
             // Variant is the source of truth: `ModelUnavailable` means
             // the desktop should surface "model couldn't be made
@@ -461,12 +474,38 @@ async fn supervisor(
             Vec::new()
         }
     };
-    let mut session_registry: sessions::SessionRegistry = Vec::new();
+    // Re-attach any session containers that outlived a previous CP
+    // run. Workflows self-exit on idle, so an old container is either
+    // a live session whose desktop still expects to dial it, or an
+    // already-stopped one — the rehydrate path covers the former and
+    // ignores the latter.
+    let mut session_registry: sessions::SessionRegistry = {
+        let by_slug: std::collections::HashMap<_, _> = projects
+            .iter()
+            .map(|p| (p.info.slug.clone(), pubkey_from_signing(&p.signing)))
+            .collect();
+        sessions::rehydrate(&config.projects_root, |slug| by_slug.get(slug).cloned()).await
+    };
+
+    // Poll for workflow containers that have self-exited (idle
+    // timeout, crash, manual `docker stop`) so the registry doesn't
+    // hand the desktop a stale addr. 15s is fast enough that a user
+    // who closes the desktop, waits out the workflow's idle timeout,
+    // and reopens it sees an honest "dormant" row instead of a token
+    // pointing at nothing.
+    let mut reap_ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+    reap_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Drop the immediate-fire tick — first reap happens after the
+    // first interval, not at startup (rehydrate already pruned).
+    reap_ticker.tick().await;
 
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
+            _ = reap_ticker.tick() => {
+                sessions::reap_exited(&mut session_registry, &events).await;
+            }
             cmd = rx.recv() => {
                 match cmd {
                     Some(c) => handle_command(c, &mut projects, &mut session_registry, &config, &events).await,
@@ -476,7 +515,14 @@ async fn supervisor(
         }
     }
 
-    sessions::stop_all(&mut session_registry).await;
+    // Intentionally do not stop session containers on shutdown.
+    // Workflows manage their own lifecycle now (self-exit on idle);
+    // letting them keep running across CP restarts lets the desktop
+    // reconnect without losing in-flight state.
+}
+
+fn pubkey_from_signing(signing: &SigningKey) -> lutin_control_protocol::ProjectPubkey {
+    lutin_control_protocol::ProjectPubkey::new(signing.verifying_key().to_bytes())
 }
 
 async fn handle_command(

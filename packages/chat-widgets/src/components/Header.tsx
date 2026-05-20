@@ -1,26 +1,17 @@
 import type { HeaderProps } from "../slots";
 
-export function Header({ turn, onCancel }: HeaderProps) {
-  if (turn.kind === "idle") return null;
-  return (
-    <div className="lutin-chat__header">
-      {turn.kind === "streaming" && (
-        <>
-          <span className="lutin-chat__streaming-dot" aria-hidden />
-          <span>streaming…</span>
-        </>
-      )}
-      {turn.kind === "errored" && <span>error: {turn.message}</span>}
-      <span className="lutin-chat__header-spacer" />
-      {turn.kind === "streaming" && onCancel && (
-        <button
-          type="button"
-          className="lutin-chat__header-cancel"
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-      )}
-    </div>
-  );
+// Streaming state is rendered by the composer (busy spinner + Cancel),
+// so the header only surfaces error/maxRounds — and even those are
+// also covered by the ErrorBanner below it. Keep it lean: render
+// nothing for streaming, fall back to a minimal error chip otherwise.
+export function Header({ turn }: HeaderProps) {
+  if (turn.kind === "idle" || turn.kind === "streaming") return null;
+  if (turn.kind === "errored") {
+    return (
+      <div className="lutin-chat__header">
+        <span>error: {turn.message}</span>
+      </div>
+    );
+  }
+  return null;
 }

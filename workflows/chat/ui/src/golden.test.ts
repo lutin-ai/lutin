@@ -76,14 +76,9 @@ describe("ChatEvent decode goldens", () => {
       },
     ],
     [
-      "HistoryReplaced(empty)",
+      "TranscriptReplaced(empty)",
       hex(0x06, 0x00),
-      { kind: "historyReplaced", history: [] },
-    ],
-    [
-      "MetricsReplaced(empty)",
-      hex(0x07, 0x00),
-      { kind: "metricsReplaced", metrics: [] },
+      { kind: "transcriptReplaced", entries: [] },
     ],
   ];
 
@@ -104,7 +99,7 @@ describe("ChatResponse decode goldens", () => {
         value: {
           kind: "subscribed",
           state: { persona: null, modelOverride: null },
-          history: [],
+          entries: [],
         },
       },
     ],
@@ -117,13 +112,20 @@ describe("ChatResponse decode goldens", () => {
         0x01,
         0x00,
         0x02, 0x68, 0x69,
+        0x00,
+        0x01, 0x01, 0x54,
       ),
       {
         ok: true,
         value: {
           kind: "subscribed",
           state: { persona: "alice", modelOverride: null },
-          history: [{ kind: "user", text: "hi" }],
+          entries: [
+            {
+              message: { kind: "user", text: "hi" },
+              meta: { kind: "user", timestamp: "T" },
+            },
+          ],
         },
       },
     ],

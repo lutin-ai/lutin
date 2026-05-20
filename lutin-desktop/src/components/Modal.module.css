@@ -1,0 +1,208 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.panel {
+  width: min(560px, 90vw);
+  max-height: 70vh;
+  background: var(--bg-1);
+  border: 1px solid var(--border-3);
+  border-radius: var(--r-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.panelWide {
+  width: min(960px, 95vw);
+  max-height: 75vh;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  flex: 1;
+  min-height: 0;
+}
+.splitLeft {
+  border-right: 1px solid var(--border-2);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.splitRight {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-3) var(--s-4);
+  color: var(--text-1);
+  font-size: var(--fs-lg);
+}
+.previewEmpty {
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  padding: var(--s-2) 0;
+}
+
+.previewTitle {
+  font-size: var(--fs-2xl);
+  color: var(--text-1-strong);
+  margin-bottom: var(--s-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.previewSub {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--s-3);
+}
+.previewGrid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--s-3);
+  row-gap: 4px;
+  font-size: var(--fs-md);
+  margin-bottom: var(--s-3);
+}
+.previewKey { color: var(--text-3); }
+.previewVal { color: var(--text-1); }
+.previewExcerpt {
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.previewGroup {
+  margin-bottom: var(--s-3);
+}
+.previewGroupHead {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--s-1);
+}
+.previewRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px 0;
+  font-size: var(--fs-md);
+  color: var(--text-1);
+}
+.previewRowTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.previewRowMeta {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  flex-shrink: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border-2);
+}
+
+.title {
+  font-size: var(--fs-lg);
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-1);
+  font-size: var(--fs-2xl);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border-2);
+}
+.input::placeholder { color: var(--text-4); }
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-1);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.option {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-xl);
+  min-width: 0;
+}
+.option > :first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.option:hover { background: var(--bg-3); }
+.optionActive { background: var(--accent-soft); color: var(--text-1-strong); }
+
+.optionSub {
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.stateDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.stateDot[data-state="running"] {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.stateDot[data-state="dormant"] {
+  background: transparent;
+  border: 1px solid var(--text-4);
+}
+
+.empty {
+  padding: var(--s-4);
+  color: var(--text-3);
+  text-align: center;
+  font-size: var(--fs-lg);
+}

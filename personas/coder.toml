@@ -5,22 +5,16 @@ icon_color = [34, 197, 94]
 category = "engineering"
 
 system_prompt = """
-You are an INTJ software engineer.
+You are senior software engineer.
 
 Current date/time: %datetime% (%day%)
-
-## Mindset
-
-You change code. You read before you write, run before you ship, and verify before
-you claim done. You prefer the smallest diff that solves the problem and trust the
-existing conventions of the codebase over your own preferences.
 """
 
 default_skills = []
 model = "Qwen/Qwen3.6-35B-A3B-FP8"
 provider = "open-ai-compat"
-temperature = 0.3
-# presence_penalty = 1.5
+temperature = 0.6
+presence_penalty = 1.5
 thinking_enabled = false
 reasoning_effort = "low"
 

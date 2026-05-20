@@ -87,9 +87,18 @@ function formatTime(d: Date | null): string {
 }
 
 export function UserBubble({ message, actions }: UserMessageProps) {
-  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  const menu = useMessageMenu({
+    id: message.id,
+    text: message.text,
+    actions,
+    hasMeta: !!message.meta,
+  });
   return (
-    <div className="lutin-chat__msg lutin-chat__msg--user" onContextMenu={menu.onContextMenu}>
+    <div
+      className="lutin-chat__msg lutin-chat__msg--user"
+      onContextMenu={menu.onContextMenu}
+      {...menu.dataAttrs}
+    >
       {message.meta && (
         <div className="lutin-chat__msg-meta">
           <MetricsHeader meta={message.meta} />
@@ -114,6 +123,7 @@ export function AssistantBubble({ message, actions }: AssistantMessageProps) {
     id: message.id,
     text: message.text,
     actions: streaming ? undefined : actions,
+    hasMeta: !!message.meta,
   });
 
   // Split at the last newline: the prefix is committed and parsed as
@@ -137,6 +147,7 @@ export function AssistantBubble({ message, actions }: AssistantMessageProps) {
     <article
       className="lutin-chat__msg lutin-chat__msg--assistant"
       onContextMenu={menu.onContextMenu}
+      {...menu.dataAttrs}
     >
       {(streaming || message.meta) && (
         <div className="lutin-chat__msg-meta">
@@ -168,7 +179,12 @@ export function AssistantBubble({ message, actions }: AssistantMessageProps) {
 
 export function AgentBubble({ message, actions }: AgentMessageProps) {
   const [open, setOpen] = useState(false);
-  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  const menu = useMessageMenu({
+    id: message.id,
+    text: message.text,
+    actions,
+    hasMeta: !!message.meta,
+  });
   const cls = [
     "lutin-chat__msg",
     "lutin-chat__msg--agent",
@@ -185,6 +201,7 @@ export function AgentBubble({ message, actions }: AgentMessageProps) {
       open={open}
       onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
       onContextMenu={menu.onContextMenu}
+      {...menu.dataAttrs}
     >
       <summary className="lutin-chat__msg-meta lutin-chat__agent-head">
         <span className="lutin-chat__who">
@@ -212,9 +229,18 @@ export function AgentBubble({ message, actions }: AgentMessageProps) {
 }
 
 export function SystemBubble({ message, actions }: SystemMessageProps) {
-  const menu = useMessageMenu({ id: message.id, text: message.text, actions });
+  const menu = useMessageMenu({
+    id: message.id,
+    text: message.text,
+    actions,
+    hasMeta: !!message.meta,
+  });
   return (
-    <div className="lutin-chat__msg lutin-chat__msg--system" onContextMenu={menu.onContextMenu}>
+    <div
+      className="lutin-chat__msg lutin-chat__msg--system"
+      onContextMenu={menu.onContextMenu}
+      {...menu.dataAttrs}
+    >
       {message.meta && (
         <div className="lutin-chat__msg-meta">
           <span className="lutin-chat__msg-role">system</span>

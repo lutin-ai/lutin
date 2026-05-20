@@ -6,10 +6,22 @@ import styles from "./overlay.module.css";
 /// Mirrors the Rust `OverlayPhase` enum 1:1 — externally tagged on
 /// `kind` because the `error` variant carries a message.
 type OverlayPhase =
-  | { kind: "listening"; mib: number; elapsed_ms: number }
+  | {
+      kind: "listening";
+      mib: number;
+      elapsed_ms: number;
+      partial: string;
+    }
   | { kind: "transcribing" }
   | { kind: "done" }
   | { kind: "error"; message: string };
+
+/// Safety cap on the live-transcript display. The pill wraps to
+/// multiple lines; this just bounds the visual size so a five-minute
+/// dictation doesn't push the bottom of the pill off-screen. When
+/// trimmed, we prepend "…" so it's clear earlier words are off the
+/// top.
+const PARTIAL_MAX_CHARS = 220;
 
 const PHASE_LABEL: Record<OverlayPhase["kind"], string> = {
   listening: "Listening",
@@ -17,6 +29,12 @@ const PHASE_LABEL: Record<OverlayPhase["kind"], string> = {
   done: "Copied",
   error: "Error",
 };
+
+function tail(s: string): string {
+  const trimmed = s.trimStart();
+  if (trimmed.length <= PARTIAL_MAX_CHARS) return trimmed;
+  return `…${trimmed.slice(trimmed.length - PARTIAL_MAX_CHARS)}`;
+}
 
 /// Format an elapsed milliseconds count as `m:ss` (or `ss s` under
 /// 60s). Whole-second resolution is plenty for a glanceable readout
@@ -69,17 +87,23 @@ export function OverlayApp() {
   // this matches the actual state during the brief window before the
   // phase event reaches us — nothing weird flashes on screen.
   const effective: OverlayPhase =
-    phase ?? { kind: "listening", mib: 0, elapsed_ms: 0 };
+    phase ?? { kind: "listening", mib: 0, elapsed_ms: 0, partial: "" };
+  const streaming = effective.kind === "listening" && effective.partial.length > 0;
   const label =
     effective.kind === "error"
       ? effective.message
       : effective.kind === "listening"
-      ? `${PHASE_LABEL.listening} · ${formatElapsed(effective.elapsed_ms)} · ${effective.mib.toFixed(2)} MiB`
+      ? streaming
+        ? `${formatElapsed(effective.elapsed_ms)} · ${tail(effective.partial)}`
+        : `${PHASE_LABEL.listening} · ${formatElapsed(effective.elapsed_ms)} · ${effective.mib.toFixed(2)} MiB`
       : PHASE_LABEL[effective.kind];
   const dot = PHASE_DOT[effective.kind];
 
   return (
-    <div className={styles.pill} data-dot={dot}>
+    <div
+      className={`${styles.pill} ${streaming ? styles.streaming : ""}`.trim()}
+      data-dot={dot}
+    >
       {effective.kind === "done" ? (
         <svg
           className={styles.check}

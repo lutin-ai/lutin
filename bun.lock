@@ -89,6 +89,20 @@
         "typescript": "~5.8.3",
       },
     },
+    "packages/reviewed-protocol": {
+      "name": "@lutin/reviewed-protocol",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "~5.8.3",
+      },
+    },
+    "packages/scratchpad-protocol": {
+      "name": "@lutin/scratchpad-protocol",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "~5.8.3",
+      },
+    },
     "workflows/chat/ui": {
       "name": "lutin-chat-ui",
       "version": "0.1.0",
@@ -133,6 +147,42 @@
         "@lutin/principled-protocol": "workspace:*",
         "@lutin/shim-types": "workspace:*",
         "@tanstack/react-virtual": "^3.10.8",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "typescript": "~5.8.3",
+        "vite": "^7.0.4",
+      },
+    },
+    "workflows/reviewed/ui": {
+      "name": "lutin-reviewed-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lutin/chat-widgets": "workspace:*",
+        "@lutin/reviewed-protocol": "workspace:*",
+        "@lutin/shim-types": "workspace:*",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "typescript": "~5.8.3",
+        "vite": "^7.0.4",
+      },
+    },
+    "workflows/scratchpad/ui": {
+      "name": "lutin-scratchpad-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lutin/chat-widgets": "workspace:*",
+        "@lutin/scratchpad-protocol": "workspace:*",
+        "@lutin/shim-types": "workspace:*",
         "react": "^19.1.0",
         "react-dom": "^19.1.0",
       },
@@ -253,6 +303,10 @@
     "@lutin/image-protocol": ["@lutin/image-protocol@workspace:packages/image-protocol"],
 
     "@lutin/principled-protocol": ["@lutin/principled-protocol@workspace:packages/principled-protocol"],
+
+    "@lutin/reviewed-protocol": ["@lutin/reviewed-protocol@workspace:packages/reviewed-protocol"],
+
+    "@lutin/scratchpad-protocol": ["@lutin/scratchpad-protocol@workspace:packages/scratchpad-protocol"],
 
     "@lutin/shim-types": ["@lutin/shim-types@workspace:packages/lutin-shim-types"],
 
@@ -403,6 +457,10 @@
     "lutin-mobile": ["lutin-mobile@workspace:lutin-mobile"],
 
     "lutin-principled-ui": ["lutin-principled-ui@workspace:workflows/principled/ui"],
+
+    "lutin-reviewed-ui": ["lutin-reviewed-ui@workspace:workflows/reviewed/ui"],
+
+    "lutin-scratchpad-ui": ["lutin-scratchpad-ui@workspace:workflows/scratchpad/ui"],
 
     "marked": ["marked@16.4.2", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-TI3V8YYWvkVf3KJe1dRkpnjs68JUPyEa5vjKrp1XEEJUAOaQc+Qj+L1qWbPd0SJuAdQkFU0h73sXXqwDYxsiDA=="],
 

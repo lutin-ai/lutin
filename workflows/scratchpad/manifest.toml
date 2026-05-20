@@ -1,0 +1,5 @@
+name = "Scratchpad"
+description = "Constructive workflow: agent and reviewers shape a draft tool call before any side effect"
+
+[runtime]
+kind = "binary"

@@ -1,12 +1,24 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useAppKeybinds } from "../appKeybinds";
 import { useApp } from "../store";
 import styles from "./TopBar.module.css";
 
-export function TopBar() {
+export interface TopBarProps {
+  onOpenProjects: () => void;
+  onCreateProject: () => void;
+}
+
+export function TopBar({ onOpenProjects, onCreateProject }: TopBarProps) {
   const view = useApp((s) => s.view);
   const setView = useApp((s) => s.setView);
   const conn = useApp((s) => s.conn);
+  const projects = useApp((s) => s.projects);
+  const selectedSlug = useApp((s) => s.selectedProject);
+  const projectChord = useAppKeybinds((s) =>
+    s.binds.find((b) => b.action === "openProjectPicker")?.combo ?? "",
+  );
 
+  const activeProject = projects.find((p) => p.slug === selectedSlug) ?? null;
   const win = getCurrentWindow();
 
   return (
@@ -15,6 +27,24 @@ export function TopBar() {
         <div className={styles.logo} aria-hidden />
         <span className={styles.wordmark}>lutin</span>
       </div>
+
+      <button
+        className={styles.project}
+        data-empty={activeProject === null}
+        title="Switch project"
+        onClick={onOpenProjects}
+      >
+        <span>{activeProject?.display_name ?? "no project"}</span>
+        {projectChord && <span className={styles.projectChord}>{projectChord}</span>}
+      </button>
+
+      <button
+        className={styles.newProject}
+        title="New project"
+        onClick={onCreateProject}
+      >
+        + new project
+      </button>
 
       <nav className={styles.nav}>
         <button
@@ -31,7 +61,6 @@ export function TopBar() {
       <div className={styles.spacer} data-tauri-drag-region />
 
       <div className={styles.right}>
-        <span className={styles.kbd} title="Command palette (not yet wired)">⌘ K</span>
         <span className={styles.conn} data-state={conn.kind}>
           <span className={styles.dot} />
           {connLabel(conn.kind)}

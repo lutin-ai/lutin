@@ -9,7 +9,8 @@
   color: var(--text-1);
   padding: var(--s-3);
   gap: var(--s-2);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .resizer {
@@ -32,28 +33,40 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--s-3) var(--s-2) var(--s-2);
+  padding: var(--s-3) var(--s-1) 6px;
+  margin-top: var(--s-2);
+  border-bottom: 1px solid var(--border-2);
 }
 
 .sectionLabel {
-  font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-lg);
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-2);
+  color: var(--text-1);
+}
+/* Workflow icons inherit currentColor so a single fill follows the
+ * label's color across hover / active / dim states. Slightly dimmed
+ * so the label, not the glyph, leads the eye. */
+.sectionLabel :global(.lutin-wf-icon) {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
 }
 
 .addBtn {
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-3);
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--r-sm);
-  font-size: 16px;
+  font-size: 20px;
   line-height: 1;
   display: grid;
   place-items: center;
+  transition: background 0.1s, color 0.1s;
 }
 .addBtn:hover:not(:disabled) {
   color: var(--text-1-strong);
@@ -65,9 +78,7 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -160,47 +171,40 @@
   word-break: break-word;
 }
 
-/* Chats are rendered as a 5-column table:
- *   state-dot | title (flex) | persona | ctx (right) | delete-x
- * Header row uses the same grid so the columns stay aligned. */
+/* Session rows. Layout per row:
+ *   state-dot · title (1fr) · [sub-agent chip?] · time
+ * No table header — single piece of data on each side of the title
+ * doesn't need columnar alignment. */
 .chatTable {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  gap: 1px;
+  flex: 0 0 auto;
+  gap: 2px;
 }
 
-.chatHeader,
+.bucket {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.bucketLabel {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  padding: 8px var(--s-2) 4px;
+  font-weight: 500;
+}
+
 .chatRow {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr) 80px 48px 16px;
+  display: flex;
   align-items: center;
   gap: var(--s-2);
   padding: 6px var(--s-2);
   border-radius: var(--r-md);
   font-size: var(--fs-lg);
-}
-
-.chatHeader {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-3);
-  border-bottom: 1px solid var(--border-2);
-  border-radius: 0;
-  padding: 6px var(--s-2) 7px;
-  cursor: default;
-}
-
-.colRight { text-align: right; }
-
-.chatRow {
   cursor: pointer;
   color: var(--text-1);
   transition: background 0.1s, color 0.1s;
+  min-width: 0;
 }
 .chatRow:hover { background: var(--bg-2); color: var(--text-1-strong); }
 .chatRow.active {
@@ -218,7 +222,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  justify-self: center;
+  flex-shrink: 0;
 }
 .chatState[data-state="running"] {
   background: var(--ok);
@@ -227,34 +231,79 @@
 .chatState[data-state="dormant"] { background: var(--text-4); }
 
 .chatTitle {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chatPersona,
-.chatCtx {
+.chatTime {
+  flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
-.chatCtx { color: var(--text-3); }
 
-/* Color-coded ctx readout matching `SummaryFooter`. Bands:
- *   low  ≤ 50k tokens  — green  (comfortable)
- *   mid  ≤ 100k tokens — yellow (busy, watch it)
- *   high > 100k tokens — red    (compact soon)
- * Idle / empty stays at the muted base color so a fresh row
- * doesn't flash green before the first usage report. */
-.chatCtx[data-band="low"]  { color: var(--ok,   #4ade80); }
-.chatCtx[data-band="mid"]  { color: var(--warn, #facc15); }
-.chatCtx[data-band="high"] { color: var(--err,  #f87171); }
+/* Sub-agent count chip on the parent row. Acts as the expander too —
+ * clicking toggles whether children render below. Pressed state when
+ * the tree is open so it reads as a sticky toggle, not a button. */
+.subChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 1px 5px 1px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: transparent;
+  color: var(--text-3);
+  font: 500 var(--fs-sm) / 1 var(--font-mono);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.subChip:hover {
+  color: var(--text-1);
+  border-color: var(--border-2);
+  background: var(--bg-2);
+}
+.subChip[data-expanded] {
+  color: var(--accent);
+  border-color: var(--accent-line, var(--accent));
+}
+.subChip svg { color: currentColor; }
 
-.chatRow .deleteBtn { visibility: hidden; }
-.chatRow:hover .deleteBtn { visibility: visible; }
+/* Right-click menu portaled to body. Compact, dark, with a danger
+ * variant for destructive items. */
+.rowMenu {
+  position: fixed;
+  z-index: 1000;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  min-width: 140px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.rowMenuItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--text-1);
+  cursor: pointer;
+}
+.rowMenuItem:hover { background: var(--bg-2); }
+.rowMenuItemDanger { color: var(--err); }
+.rowMenuItemDanger:hover { background: var(--err-soft, rgba(184, 106, 106, .14)); }
 
 /* Sub-agent rows render directly below their parent chat row. The
  * row is a flex line (not the chat-row grid) because the indent +

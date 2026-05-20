@@ -8,7 +8,10 @@ pub mod backend;
 pub mod parakeet;
 pub mod whisper;
 
-pub use backend::{MIN_INFERENCE_SAMPLES, SttBackendFactory, SttWorker, TranscribeParams};
+pub use backend::{
+    MIN_INFERENCE_SAMPLES, SttBackendFactory, SttStream, SttStreamingFactory, SttWorker,
+    TranscribeParams,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SttError {

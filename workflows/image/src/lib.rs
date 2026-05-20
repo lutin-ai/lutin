@@ -35,7 +35,12 @@ pub struct ImageSettings {
 /// dropdown entry; nothing here changes the protocol shape.
 pub const MODEL_FLUX_SCHNELL: &str = "flux-schnell";
 pub const MODEL_FLUX2_DEV: &str = "flux2-dev";
-pub const MODEL_IDS: &[&str] = &[MODEL_FLUX_SCHNELL, MODEL_FLUX2_DEV];
+pub const MODEL_CYBERREALISTIC_PONY: &str = "cyberrealistic-pony";
+pub const MODEL_IDS: &[&str] = &[
+    MODEL_FLUX_SCHNELL,
+    MODEL_FLUX2_DEV,
+    MODEL_CYBERREALISTIC_PONY,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateParams {

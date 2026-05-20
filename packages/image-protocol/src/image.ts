@@ -17,7 +17,12 @@ export interface ImageSettings {
 
 export const MODEL_FLUX_SCHNELL = "flux-schnell";
 export const MODEL_FLUX2_DEV = "flux2-dev";
-export const MODEL_IDS = [MODEL_FLUX_SCHNELL, MODEL_FLUX2_DEV] as const;
+export const MODEL_CYBERREALISTIC_PONY = "cyberrealistic-pony";
+export const MODEL_IDS = [
+  MODEL_FLUX_SCHNELL,
+  MODEL_FLUX2_DEV,
+  MODEL_CYBERREALISTIC_PONY,
+] as const;
 
 /** Per-model recommended defaults. The composer uses these to pick
  *  field placeholders so a user switching models doesn't have to
@@ -30,6 +35,7 @@ export interface ModelDefaults {
 export const MODEL_DEFAULTS: Record<string, ModelDefaults> = {
   [MODEL_FLUX_SCHNELL]: { steps: 4, cfg: 1.0, label: "FLUX schnell" },
   [MODEL_FLUX2_DEV]: { steps: 28, cfg: 3.5, label: "FLUX.2 dev" },
+  [MODEL_CYBERREALISTIC_PONY]: { steps: 30, cfg: 5.0, label: "CyberRealistic Pony v14" },
 };
 
 export interface GenerateParams {

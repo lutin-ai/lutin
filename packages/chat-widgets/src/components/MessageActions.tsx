@@ -25,19 +25,27 @@ interface UseMessageMenuArgs {
   id: string | undefined;
   text: string;
   actions?: MessageActions;
+  /** Extra items appended after the built-ins (Copy/Edit/Delete/…).
+   *  Used by tool cards to add a "Collapse" toggle. */
+  extraItems?: MenuItem[];
+  /** When true, the menu adds a "Show/Hide info" item that toggles
+   *  `infoOpen`. Bubbles spread `dataAttrs` on their root so the
+   *  CSS hover rules can pin the metrics chip while info is open. */
+  hasMeta?: boolean;
 }
 
-export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
+export function useMessageMenu({ id, text, actions, extraItems, hasMeta }: UseMessageMenuArgs) {
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const [host, setHost] = useState<HTMLElement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [infoOpen, setInfoOpen] = useState(false);
 
   const open = useCallback(
     (e: React.MouseEvent) => {
       // Only act when there's something to do AND we have a stable id.
       if (!id) return;
-      if (!actions && !canCopy()) return;
+      if (!actions && !canCopy() && !(extraItems && extraItems.length > 0) && !hasMeta) return;
       e.preventDefault();
       setPos({ x: e.clientX, y: e.clientY });
       // Portal target: the nearest `.lutin-chat` ancestor. We can't
@@ -51,7 +59,7 @@ export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
       const target = e.currentTarget as HTMLElement;
       setHost(target.closest(".lutin-chat") as HTMLElement | null);
     },
-    [id, actions],
+    [id, actions, extraItems, hasMeta],
   );
 
   const close = useCallback(() => setPos(null), []);
@@ -94,6 +102,28 @@ export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
       },
     });
   }
+  if (hasMeta) {
+    items.push({
+      label: infoOpen ? "Hide info" : "Show info",
+      onSelect: () => {
+        setInfoOpen((v) => !v);
+        close();
+      },
+    });
+  }
+  if (extraItems) {
+    for (const it of extraItems) {
+      // Wrap onSelect so the caller doesn't have to remember to close()
+      // — every menu item dismisses the menu after firing.
+      items.push({
+        label: it.label,
+        onSelect: () => {
+          it.onSelect();
+          close();
+        },
+      });
+    }
+  }
 
   const submitEdit = useCallback(() => {
     if (!actions?.onEdit || !id) return;
@@ -106,6 +136,10 @@ export function useMessageMenu({ id, text, actions }: UseMessageMenuArgs) {
 
   return {
     onContextMenu: open,
+    /** Spread on the root bubble element so CSS can pin the metrics
+     *  chip visible while the user has "Show info" toggled on. */
+    dataAttrs: infoOpen ? { "data-info": "open" as const } : {},
+    infoOpen,
     menu:
       pos && items.length > 0 ? (
         <ContextMenu pos={pos} items={items} onClose={close} host={host} />

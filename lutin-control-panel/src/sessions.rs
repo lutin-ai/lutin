@@ -37,6 +37,13 @@ const SPAWN_POLL: Duration = Duration::from_millis(50);
 const TOKEN_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 90);
 /// Prefix for `docker run --name`; full name is `{PREFIX}-{slug}-{session}`.
 const CONTAINER_PREFIX: &str = "lutin-session";
+/// Docker labels stamped on every session container so the supervisor
+/// can rediscover them after a CP restart. Slug + session id are
+/// non-trivial to round-trip out of the container name (slugs may
+/// contain dashes), so we don't parse the name — we read the labels.
+const SESSION_LABEL_SLUG: &str = "lutin.session.slug";
+const SESSION_LABEL_WORKFLOW: &str = "lutin.session.workflow";
+const SESSION_LABEL_ID: &str = "lutin.session.id";
 
 impl From<SessionError> for ApiError {
     fn from(e: SessionError) -> Self {
@@ -258,6 +265,55 @@ async fn spawn_container(
         slug = slug.as_str(),
         session = session_id.as_str()
     );
+
+    // Adopt-if-running. Workflows now outlive a CP shutdown (they
+    // self-exit on idle), so a "stale" container with our name may
+    // actually be a healthy session we just lost track of. Read its
+    // handoff and register it instead of killing and respawning.
+    // Anything else (exited, partial, name collision after crash)
+    // falls through to the rm -f + fresh spawn below.
+    if is_container_running(&container_name).await {
+        match tokio::fs::read_to_string(&handoff_path).await {
+            Ok(s) if !s.trim().is_empty() => {
+                if let Ok(addr) = s.trim().parse::<SocketAddr>() {
+                    info!(
+                        slug = %slug.as_str(),
+                        session = %session_id.as_str(),
+                        container = %container_name,
+                        "adopting running container instead of respawning"
+                    );
+                    let info = SessionInfo {
+                        id: session_id.clone(),
+                        workflow: workflow.clone(),
+                        created_at: created_at.to_owned(),
+                        state: SessionState::Running,
+                        summary: None,
+                    };
+                    let token = mint_session_token(
+                        signing,
+                        slug.clone(),
+                        workflow.clone(),
+                        session_id.clone(),
+                    )?;
+                    let endpoint = SessionEndpoint {
+                        addr,
+                        token,
+                        project_pubkey: project_pubkey.clone(),
+                    };
+                    let running = RunningSession {
+                        slug: slug.clone(),
+                        info,
+                        addr,
+                        container_name,
+                        project_pubkey,
+                    };
+                    registry.push(running.clone());
+                    return Ok((running, endpoint));
+                }
+            }
+            _ => {}
+        }
+    }
     // Best-effort cleanup of any stale container with the same name.
     let _ = Command::new("docker")
         .args(["rm", "-f", &container_name])
@@ -289,6 +345,12 @@ async fn spawn_container(
             "--rm",
             "--name",
             &container_name,
+            "--label",
+            &format!("{SESSION_LABEL_SLUG}={}", slug.as_str()),
+            "--label",
+            &format!("{SESSION_LABEL_WORKFLOW}={}", workflow.as_str()),
+            "--label",
+            &format!("{SESSION_LABEL_ID}={}", session_id.as_str()),
             // Host networking so the kernel-picked port the workflow
             // binds to is reachable from the desktop on host loopback —
             // mirrors the lutin-project tier's launch flow.
@@ -522,13 +584,166 @@ pub async fn stop_all_for_slug(registry: &mut SessionRegistry, slug: &Slug) {
     }
 }
 
-pub async fn stop_all(registry: &mut SessionRegistry) {
-    for s in registry.drain(..) {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &s.container_name])
-            .output()
-            .await;
+/// Drop registry entries whose container is no longer running, and
+/// emit `SessionEnded` for each. Called periodically by the
+/// supervisor so a workflow that self-exits on idle (or crashes)
+/// stops being advertised as Running. Each removed entry is
+/// announced via the broadcast so connected desktops update their
+/// session list without waiting for the next manual refresh.
+pub async fn reap_exited(
+    registry: &mut SessionRegistry,
+    events: &tokio::sync::broadcast::Sender<lutin_control_protocol::Event>,
+) {
+    let mut i = 0;
+    while i < registry.len() {
+        let still_running = is_container_running(&registry[i].container_name).await;
+        if still_running {
+            i += 1;
+            continue;
+        }
+        let entry = registry.swap_remove(i);
+        info!(
+            slug = %entry.slug.as_str(),
+            session = %entry.info.id,
+            container = %entry.container_name,
+            "reaping exited session container"
+        );
+        let _ = events.send(lutin_control_protocol::Event::SessionEnded {
+            slug: entry.slug,
+            session: entry.info.id,
+        });
     }
+}
+
+/// Discover running session containers and rebuild a `SessionRegistry`.
+/// Called once at supervisor startup so workflows that outlived a CP
+/// crash/restart get re-attached instead of orphaned. Each entry needs
+/// the project pubkey, which lib.rs supplies via `lookup_pubkey`;
+/// containers belonging to projects CP no longer knows about (e.g. the
+/// registry file was hand-edited) are skipped with a warning rather
+/// than re-imported under a key we can't verify.
+pub async fn rehydrate<F>(projects_root: &Path, lookup_pubkey: F) -> SessionRegistry
+where
+    F: Fn(&Slug) -> Option<ProjectPubkey>,
+{
+    let discovered = match list_session_containers().await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "rehydrate: could not list session containers");
+            return Vec::new();
+        }
+    };
+    let mut out: SessionRegistry = Vec::new();
+    for c in discovered {
+        let Some(project_pubkey) = lookup_pubkey(&c.slug) else {
+            warn!(
+                slug = %c.slug.as_str(),
+                container = %c.container_name,
+                "rehydrate: container references unknown project; skipping"
+            );
+            continue;
+        };
+        let handoff_path = projects_root
+            .join(c.slug.as_str())
+            .join(".lutin")
+            .join("sessions")
+            .join(c.session.as_str())
+            .join("handoff");
+        let addr = match tokio::fs::read_to_string(&handoff_path).await {
+            Ok(s) if !s.trim().is_empty() => match s.trim().parse::<SocketAddr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        slug = %c.slug.as_str(),
+                        session = %c.session,
+                        error = %e,
+                        "rehydrate: invalid handoff addr; skipping"
+                    );
+                    continue;
+                }
+            },
+            _ => {
+                warn!(
+                    slug = %c.slug.as_str(),
+                    session = %c.session,
+                    "rehydrate: container running but handoff missing; skipping"
+                );
+                continue;
+            }
+        };
+        let created_at = session_index::read_all(projects_root, &c.slug)
+            .into_iter()
+            .find(|(_, e)| e.id == c.session)
+            .map(|(_, e)| e.created_at)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let info = SessionInfo {
+            id: c.session.clone(),
+            workflow: c.workflow,
+            created_at,
+            state: SessionState::Running,
+            summary: None,
+        };
+        out.push(RunningSession {
+            slug: c.slug,
+            info,
+            addr,
+            container_name: c.container_name,
+            project_pubkey,
+        });
+    }
+    out
+}
+
+struct DiscoveredContainer {
+    container_name: String,
+    slug: Slug,
+    workflow: WorkflowId,
+    session: SessionId,
+}
+
+async fn list_session_containers() -> Result<Vec<DiscoveredContainer>, SessionError> {
+    let out = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("label={SESSION_LABEL_ID}"),
+            "--format",
+            &format!(
+                "{{{{.Names}}}}\t{{{{.Label \"{SESSION_LABEL_SLUG}\"}}}}\t\
+                 {{{{.Label \"{SESSION_LABEL_WORKFLOW}\"}}}}\t\
+                 {{{{.Label \"{SESSION_LABEL_ID}\"}}}}"
+            ),
+        ])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(SessionError::Docker {
+            op: "ps",
+            detail: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        });
+    }
+    let mut discovered = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let (Ok(slug), Ok(workflow), Ok(session)) = (
+            Slug::parse(parts[1]),
+            WorkflowId::parse(parts[2]),
+            SessionId::parse(parts[3]),
+        ) else {
+            warn!(line = %line, "rehydrate: malformed session container labels; skipping");
+            continue;
+        };
+        discovered.push(DiscoveredContainer {
+            container_name: parts[0].to_owned(),
+            slug,
+            workflow,
+            session,
+        });
+    }
+    Ok(discovered)
 }
 
 fn mint_session_token(

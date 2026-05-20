@@ -15,6 +15,23 @@
   letter-spacing: 0.02em;
 }
 
+/* Streaming partial: drop the fixed width and the round-stadium
+   border, let the pill size to its content, wrap to new lines once
+   max-width is hit, and align the indicator dot to the first line
+   instead of vertically centering across the whole block. */
+.pill.streaming {
+  width: auto;
+  min-width: 220px;
+  max-width: 440px;
+  align-items: flex-start;
+  border-radius: 14px;
+  padding: 10px 16px;
+}
+
+.pill.streaming .dot {
+  margin-top: 5px;
+}
+
 .pill[data-dot="done"] {
   border-color: rgba(134, 239, 172, 0.35);
   background: rgba(20, 28, 22, 1);
@@ -59,6 +76,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+/* In streaming mode the partial transcript wraps across lines and
+   the readout grows downward. Drop the single-line clamp; keep the
+   text left-aligned so wrapped lines have a stable left edge. */
+.pill.streaming .label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  text-align: left;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 @keyframes pulse {

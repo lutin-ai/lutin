@@ -1,9 +1,9 @@
-//! Backend abstraction. Implementations sit behind `SttBackendFactory`
-//! and produce `SttWorker`s; today every wired backend is one-shot
-//! (whisper.cpp, Parakeet TDT — both decode the full clip in one
-//! call). When a real-streaming backend lands (`ParakeetEOU`,
-//! `Nemotron`) the trait can grow a sibling `transcribe_stream`
-//! method then — premature today.
+//! Backend abstraction. Two trait pairs: `SttBackendFactory` /
+//! `SttWorker` for one-shot decode (whisper.cpp — full clip in,
+//! transcript out), and `SttStreamingFactory` / `SttStream` for
+//! incremental decode (parakeet via `ParakeetUnified` — chunks in,
+//! token deltas out). Per-backend pick is driven by the wire
+//! `SttConfig` enum at the CP boundary.
 
 use tokio::sync::watch;
 
@@ -53,4 +53,30 @@ pub trait SttWorker: Send + Sync {
 /// path that already exists on disk.
 pub trait SttBackendFactory: Send + Sync {
     fn create_worker(&self) -> Result<Box<dyn SttWorker>, SttError>;
+}
+
+/// One open streaming session. The implementation owns per-stream
+/// mutable state (decoder LSTM cell, audio buffer, accumulated tokens)
+/// so methods take `&mut self`. CP drives one of these per
+/// `OpenTranscription` and drops it on `Finish`/`Cancel`.
+pub trait SttStream: Send {
+    /// Push 16 kHz mono i16 PCM into the stream. Returns any text
+    /// emitted by chunks that became ready as a result — typically
+    /// empty until enough audio for one chunk + right context has
+    /// accumulated, then a token-level delta. Concatenating every
+    /// `push` + the final `finish` delta yields the full transcript.
+    fn push(&mut self, pcm: Vec<i16>) -> Result<String, SttError>;
+
+    /// Drain remaining audio (running the chunk pipeline with `flush`
+    /// semantics so the right-context tail isn't lost) and return the
+    /// *complete* transcript — every token decoded across the
+    /// lifetime of this stream, not just the final delta. Consumes
+    /// the stream; calling anything afterwards is a bug.
+    fn finish(self: Box<Self>) -> Result<String, SttError>;
+}
+
+/// Factory for streaming backends. Owns the loaded ONNX session;
+/// `open_stream` is cheap (clones an `Arc` + zeroes decoder state).
+pub trait SttStreamingFactory: Send + Sync {
+    fn open_stream(&self) -> Result<Box<dyn SttStream>, SttError>;
 }

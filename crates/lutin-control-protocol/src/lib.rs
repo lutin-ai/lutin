@@ -876,6 +876,17 @@ pub enum Event {
     /// `SpeakTts`, *not* with the stream lifetime — the same stream
     /// emits one `Finished` per utterance.
     TtsFinished { stream_id: TtsStreamId },
+    /// Incremental transcript delta for an open transcription stream.
+    /// Fires from the CP-side streaming worker as soon as each
+    /// chunk's tokens are decoded; ordered, append-only, and never
+    /// rewinds (the unified TDT decoder doesn't replace previously
+    /// emitted tokens). The desktop concatenates deltas and clears
+    /// on the matching `ResponseOk::Transcription` reply, which
+    /// carries the authoritative final string.
+    TranscriptionPartial {
+        stream_id: TranscriptionStreamId,
+        text_delta: String,
+    },
     /// Progress on a backend weight download triggered by
     /// `EnsureTtsBackend`. Throttled CP-side to ~one event every
     /// couple of seconds plus a final 100% emission. `total` is `None`
@@ -1124,6 +1135,16 @@ mod tests {
             })),
         ] {
             assert_eq!(decode::<Response>(&encode(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn transcription_event_variants_roundtrip() {
+        for e in [Event::TranscriptionPartial {
+            stream_id: TranscriptionStreamId(7),
+            text_delta: " hello world".to_string(),
+        }] {
+            assert_eq!(decode::<Event>(&encode(&e).unwrap()).unwrap(), e);
         }
     }
 

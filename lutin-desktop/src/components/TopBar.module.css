@@ -80,6 +80,46 @@
   cursor: default;
 }
 
+.project {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-1);
+  font-size: var(--fs-lg);
+  font-family: inherit;
+  padding: 4px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.project:hover { background: var(--bg-3); border-color: var(--border-3); }
+.project[data-empty="true"] { color: var(--text-3); }
+.projectChord {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  margin-left: var(--s-1);
+}
+
+.newProject {
+  background: transparent;
+  border: 1px dashed var(--border-3);
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  font-family: inherit;
+  padding: 4px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.newProject:hover {
+  color: var(--text-1-strong);
+  border-color: var(--border-2);
+  background: var(--bg-2);
+}
+
 .conn {
   display: inline-flex;
   align-items: center;

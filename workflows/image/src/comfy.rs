@@ -16,7 +16,9 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use image_workflow::{ImageEvent, ImageSettings, MODEL_FLUX2_DEV, MODEL_FLUX_SCHNELL};
+use image_workflow::{
+    ImageEvent, ImageSettings, MODEL_CYBERREALISTIC_PONY, MODEL_FLUX2_DEV, MODEL_FLUX_SCHNELL,
+};
 
 /// FLUX schnell ships as a single fused checkpoint — `CheckpointLoaderSimple`
 /// resolves model+CLIP+VAE in one node.
@@ -33,6 +35,10 @@ const FLUX_SCHNELL_CHECKPOINT: &str = "flux1-schnell-fp8.safetensors";
 const FLUX2_DEV_UNET: &str = "flux2_dev_fp8mixed.safetensors";
 const FLUX2_DEV_CLIP: &str = "mistral_3_small_flux2_fp8.safetensors";
 const FLUX2_DEV_VAE: &str = "flux2-vae.safetensors";
+/// CyberRealistic Pony v14 — an SDXL/Pony-Diffusion derivative shipped
+/// as a single fused checkpoint (model+CLIP+VAE), same loader shape as
+/// FLUX schnell but SDXL latents and a conventional CFG scale.
+const CYBERREALISTIC_PONY_CHECKPOINT: &str = "cyberrealisticPony_v140.safetensors";
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
 const WS_RECONNECT_MIN: Duration = Duration::from_millis(500);
@@ -102,6 +108,7 @@ pub async fn queue_prompt(
     let graph = match params.model_id {
         MODEL_FLUX_SCHNELL => build_graph_flux_schnell(params),
         MODEL_FLUX2_DEV => build_graph_flux2_dev(params),
+        MODEL_CYBERREALISTIC_PONY => build_graph_cyberrealistic_pony(params),
         other => {
             return Err(ComfyError::Execution(format!(
                 "unknown model_id: {other}"
@@ -237,6 +244,57 @@ fn build_graph_flux2_dev(p: &QueueParams<'_>) -> Value {
         "13": {
             "class_type": "FluxGuidance",
             "inputs": {"conditioning": ["6", 0], "guidance": p.cfg}
+        }
+    })
+}
+
+/// CyberRealistic Pony graph: standard SDXL pipeline with a fused
+/// checkpoint, conventional CFG (~7), and `dpmpp_2m_sde` + `karras` —
+/// the recipe the Pony Diffusion lineage was tuned for.
+fn build_graph_cyberrealistic_pony(p: &QueueParams<'_>) -> Value {
+    json!({
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": p.seed,
+                "steps": p.steps,
+                "cfg": p.cfg,
+                "sampler_name": "dpmpp_2m_sde",
+                "scheduler": "karras",
+                "denoise": 1.0,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+            }
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": CYBERREALISTIC_PONY_CHECKPOINT}
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": p.width, "height": p.height, "batch_size": p.batch_size}
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": p.prompt, "clip": ["10", 0]}
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": p.negative_prompt, "clip": ["10", 0]}
+        },
+        "10": {
+            "class_type": "CLIPSetLastLayer",
+            "inputs": {"clip": ["4", 1], "stop_at_clip_layer": -2}
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]}
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["8", 0], "filename_prefix": "lutin"}
         }
     })
 }

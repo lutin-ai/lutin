@@ -1,16 +1,37 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { ToolCallProps } from "../slots";
 import { MetricsHeader } from "./MessageBubble";
+import { useMessageMenu } from "./MessageActions";
+import { WriteToolView } from "./WriteToolView";
+import { EditToolView, diffCounts } from "./EditToolView";
+import { ShellToolView } from "./ShellToolView";
+import { parseReadOutput } from "./CodeBlock";
 
 export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const showActions = message.state === "pending" && (onApprove || onDeny);
+  const specialView = renderSpecialView(message.name, message.args, message.result);
+  const copyText = pickCopyText(message.name, message.args, message.result);
+  const menu = useMessageMenu({
+    id: message.id,
+    text: copyText,
+    hasMeta: message.meta != null,
+    extraItems: [
+      {
+        label: collapsed ? "Expand" : "Collapse",
+        onSelect: () => setCollapsed((v) => !v),
+      },
+    ],
+  });
+  const infoOpen = menu.infoOpen;
   const summary =
-    message.args.kind === "parsed"
+    specialView?.headerSummary ??
+    (message.args.kind === "parsed"
       ? argPreview(message.args.value)
       : message.args.raw.length > 0
         ? truncate(message.args.raw.replace(/\s+/g, " "), MAX_PREVIEW)
-        : null;
+        : null);
   const resultBody =
     message.state === "failed" && message.error
       ? message.error
@@ -20,33 +41,65 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
   // Approve/Deny actions live below the body to keep them out of the
   // toggle hit-area; their click handlers stop propagation in case a
   // workflow nests buttons differently.
+  const HeadInner = (
+    <>
+      <span
+        className="lutin-chat__tool-dot"
+        data-state={message.state}
+        aria-hidden="true"
+        title={message.state}
+      />
+      <span className="lutin-chat__tool-name">{message.name}</span>
+      {summary && (specialView || !expanded) && (
+        <span className="lutin-chat__tool-summary">{summary}</span>
+      )}
+      {(message.state === "running" || message.state === "pending") && (
+        <span className="lutin-chat__tool-state" data-state={message.state}>
+          {message.state}
+        </span>
+      )}
+      <MetricsHeader meta={message.meta} />
+    </>
+  );
   return (
-    <div className="lutin-chat__msg lutin-chat__msg--tool">
-    <div className="lutin-chat__tool" data-state={message.state}>
-      <button
-        type="button"
-        className="lutin-chat__tool-head"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <span
-          className="lutin-chat__tool-dot"
-          data-state={message.state}
-          aria-hidden="true"
-          title={message.state}
-        />
-        <span className="lutin-chat__tool-name">{message.name}</span>
-        {summary && !expanded && (
-          <span className="lutin-chat__tool-summary">{summary}</span>
-        )}
-        {(message.state === "running" || message.state === "pending") && (
-          <span className="lutin-chat__tool-state" data-state={message.state}>
-            {message.state}
-          </span>
-        )}
-        <MetricsHeader meta={message.meta} />
-      </button>
-      {expanded && (
+    <div
+      className="lutin-chat__msg lutin-chat__msg--tool"
+      onContextMenu={menu.onContextMenu}
+      {...menu.dataAttrs}
+    >
+    <div className="lutin-chat__tool" data-state={message.state} data-collapsed={collapsed}>
+      {specialView ? (
+        <div className="lutin-chat__tool-head lutin-chat__tool-head--static">
+          {HeadInner}
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="lutin-chat__tool-head"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {HeadInner}
+        </button>
+      )}
+      {infoOpen && message.meta && !collapsed && <InfoPanel meta={message.meta} />}
+      {specialView && !collapsed && (
+        <div className="lutin-chat__tool-detail lutin-chat__tool-detail--special">
+          {specialView.body}
+          {resultBody && message.state === "failed" && (
+            <>
+              <div className="lutin-chat__tool-label">Error</div>
+              <div
+                className="lutin-chat__tool-body"
+                style={{ color: "var(--chat-err)" }}
+              >
+                {resultBody}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {!specialView && expanded && !collapsed && (
         <div className="lutin-chat__tool-detail">
           {message.args.kind === "parsed" && hasArgs(message.args.value) && (
             <>
@@ -81,7 +134,7 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
           )}
         </div>
       )}
-      {showActions && (
+      {showActions && !collapsed && (
         <div className="lutin-chat__tool-actions">
           {onApprove && (
             <button
@@ -110,8 +163,164 @@ export function ToolCall({ message, onApprove, onDeny }: ToolCallProps) {
         </div>
       )}
     </div>
+    {menu.menu}
     </div>
   );
+}
+
+// Some tools have bespoke renderings (file Write previews, Edit diffs)
+// that replace the generic args/output detail. Returns `null` for
+// every other tool; callers fall back to the default ArgsView.
+type SpecialView = { body: ReactNode; headerSummary?: string };
+
+function renderSpecialView(
+  name: string,
+  args: import("../types").ToolCallArgs,
+  result: unknown,
+): SpecialView | null {
+  if (args.kind !== "parsed" || args.value == null || typeof args.value !== "object") {
+    return null;
+  }
+  const obj = args.value as Record<string, unknown>;
+  const lower = name.toLowerCase();
+  if (lower === "write") {
+    const path = readStr(obj, "file_path", "path");
+    const content = readStr(obj, "content", "text");
+    if (path == null || content == null) return null;
+    return {
+      headerSummary: `${path} · ${countLines(content)} lines`,
+      body: <WriteToolView path={path} content={content} />,
+    };
+  }
+  if (lower === "edit") {
+    const path = readStr(obj, "file_path", "path");
+    const oldStr = readStr(obj, "old_string", "oldString");
+    const newStr = readStr(obj, "new_string", "newString");
+    if (path == null || oldStr == null || newStr == null) return null;
+    const { added, removed } = diffCounts(oldStr, newStr);
+    const resultStr = typeof result === "string" ? result : undefined;
+    return {
+      headerSummary: `${path}  +${added} −${removed}`,
+      body: (
+        <EditToolView
+          path={path}
+          oldString={oldStr}
+          newString={newStr}
+          result={resultStr}
+        />
+      ),
+    };
+  }
+  if (lower === "shell" || lower === "bash") {
+    const command = readStr(obj, "command", "cmd");
+    if (command == null) return null;
+    const output = typeof result === "string" ? result : "";
+    return {
+      headerSummary: command,
+      body: <ShellToolView output={output} />,
+    };
+  }
+  if (lower === "read") {
+    const path = readStr(obj, "file_path", "path");
+    if (path == null) return null;
+    const raw = typeof result === "string" ? result : "";
+    // Strip `   N→` / `   N\t` line-number prefixes that the Read tool
+    // emits, otherwise our own gutter would render the numbers twice.
+    const { content, startLine } = parseReadOutput(raw);
+    return {
+      headerSummary:
+        content.length > 0 ? `${path} · ${countLines(content)} lines` : path,
+      body: <WriteToolView path={path} content={content} startLine={startLine} />,
+    };
+  }
+  return null;
+}
+
+function pickCopyText(
+  name: string,
+  args: import("../types").ToolCallArgs,
+  result: unknown,
+): string {
+  if (args.kind === "parsed" && args.value != null && typeof args.value === "object") {
+    const obj = args.value as Record<string, unknown>;
+    const lower = name.toLowerCase();
+    if (lower === "write") {
+      const c = readStr(obj, "content", "text");
+      if (c != null) return c;
+    }
+    if (lower === "edit") {
+      const n = readStr(obj, "new_string", "newString");
+      if (n != null) return n;
+    }
+    if (lower === "read" && typeof result === "string") {
+      return result;
+    }
+    if ((lower === "shell" || lower === "bash") && typeof result === "string") {
+      return result;
+    }
+  }
+  // Fallback: the result body, then a stringified args dump.
+  if (typeof result === "string") return result;
+  if (args.kind === "parsed") {
+    try {
+      return JSON.stringify(args.value, null, 2);
+    } catch {
+      return "";
+    }
+  }
+  return args.raw;
+}
+
+// Inline metrics readout shown when the user picks "Show info" from
+// the context menu. Same data the hover chip would show, just laid out
+// vertically so individual rows are scannable.
+function InfoPanel({ meta }: { meta: import("../types").MessageMeta }) {
+  const rows: Array<[string, string]> = [];
+  if (meta.ttftMs != null) rows.push(["TTFT", formatMs(meta.ttftMs)]);
+  if (meta.durationMs != null) rows.push(["Duration", formatMs(meta.durationMs)]);
+  if (
+    meta.completionTokens != null &&
+    meta.durationMs != null &&
+    meta.durationMs > 0
+  ) {
+    const tps = (meta.completionTokens * 1000) / meta.durationMs;
+    rows.push(["Throughput", `${tps >= 10 ? Math.round(tps) : tps.toFixed(1)} tok/s`]);
+  }
+  if (meta.promptTokens != null) rows.push(["Input tokens", String(meta.promptTokens)]);
+  if (meta.completionTokens != null) rows.push(["Output tokens", String(meta.completionTokens)]);
+  if (meta.time) rows.push(["Time", meta.time.toISOString()]);
+  if (rows.length === 0) return null;
+  return (
+    <dl className="lutin-chat__tool-info">
+      {rows.map(([k, v]) => (
+        <div key={k} className="lutin-chat__tool-info-row">
+          <dt>{k}</dt>
+          <dd>{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)} s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s % 60)}s`;
+}
+
+function readStr(obj: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string") return v;
+  }
+  return null;
+}
+
+function countLines(s: string): number {
+  if (s.length === 0) return 0;
+  return s.split("\n").length;
 }
 
 // One-line preview rendered next to the tool name when collapsed.

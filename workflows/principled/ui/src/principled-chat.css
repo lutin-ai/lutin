@@ -7,9 +7,17 @@
  * specific attempt's call_id. */
 
 .lutin-principled__iteration {
+  /* The wrapper replaces `.lutin-chat__msg` as the row's outermost
+   * element, so it has to recreate the centered-column constraints
+   * (max-width + auto margins) — otherwise the iteration outline and
+   * inline review panel stretch the full scrollback width while the
+   * inner tool bubble stays at 920px. */
   display: flex;
   flex-direction: column;
   gap: 4px;
+  width: 100%;
+  max-width: min(920px, 100%);
+  margin: 0 auto;
 }
 
 .lutin-principled__iteration--active {

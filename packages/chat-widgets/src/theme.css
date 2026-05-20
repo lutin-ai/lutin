@@ -126,11 +126,50 @@
   50% { opacity: 1; }
 }
 
+.lutin-chat__scroll-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .lutin-chat__scrollback {
   flex: 1;
   overflow-y: auto;
   padding: 28px 32px 24px;
   min-height: 0;
+}
+.lutin-chat__jump-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  color: var(--chat-text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  z-index: 2;
+  animation: lutin-chat-pill-in 140ms ease-out;
+}
+.lutin-chat__jump-pill:hover {
+  background: var(--chat-surface-2);
+  border-color: var(--chat-accent-soft);
+}
+.lutin-chat__jump-pill:focus-visible {
+  outline: 2px solid var(--chat-focus-ring);
+  outline-offset: 2px;
+}
+@keyframes lutin-chat-pill-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 /* Inner spacer driven by the virtualizer's getTotalSize(); virtual
@@ -321,6 +360,16 @@
   text-transform: none;
   letter-spacing: 0;
   white-space: nowrap;
+  /* Casual scan should be uncluttered: metrics fade in only when the
+   * user hovers the message, or when they explicitly pin them open via
+   * the right-click "Show info" item. */
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.lutin-chat__msg:hover .lutin-chat__msg-metrics,
+.lutin-chat__msg:focus-within .lutin-chat__msg-metrics,
+.lutin-chat__msg[data-info="open"] .lutin-chat__msg-metrics {
+  opacity: 1;
 }
 /* Inside tool/agent collapsed headers the metrics line should be even
  * quieter — these rows repeat and were dominating the scrollback. */
@@ -617,6 +666,29 @@
   letter-spacing: 0.04em;
   color: var(--chat-text-faint);
 }
+.lutin-md__pre-copy {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-family: var(--chat-font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--chat-text-faint);
+  background: transparent;
+  border: 1px solid var(--chat-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.lutin-md__pre-copy:hover {
+  color: var(--chat-text);
+  border-color: var(--chat-text-dim);
+}
+.lutin-md__pre-copy.is-copied {
+  color: var(--chat-text);
+  border-color: var(--chat-text-dim);
+}
 .lutin-md__pre pre {
   margin: 0;
   padding: 12px 16px;
@@ -639,38 +711,40 @@
   color: inherit;
 }
 
-/* highlight.js token colors, palette-matched to the chat theme. */
-.lutin-md .hljs-comment,
-.lutin-md .hljs-quote { color: var(--chat-text-dim); font-style: italic; }
-.lutin-md .hljs-keyword,
-.lutin-md .hljs-selector-tag,
-.lutin-md .hljs-literal,
-.lutin-md .hljs-built_in,
-.lutin-md .hljs-meta { color: var(--chat-accent); }
-.lutin-md .hljs-string,
-.lutin-md .hljs-attr,
-.lutin-md .hljs-template-variable,
-.lutin-md .hljs-regexp,
-.lutin-md .hljs-link { color: #9bc1a3; }
-.lutin-md .hljs-number,
-.lutin-md .hljs-symbol,
-.lutin-md .hljs-bullet { color: #d4b787; }
-.lutin-md .hljs-attribute,
-.lutin-md .hljs-name,
-.lutin-md .hljs-selector-class,
-.lutin-md .hljs-selector-id,
-.lutin-md .hljs-tag { color: #d4b787; }
-.lutin-md .hljs-title,
-.lutin-md .hljs-section,
-.lutin-md .hljs-function .hljs-title { color: #b9a9d3; }
-.lutin-md .hljs-variable,
-.lutin-md .hljs-params { color: var(--chat-text); }
-.lutin-md .hljs-type,
-.lutin-md .hljs-class .hljs-title { color: #9eb5d8; }
-.lutin-md .hljs-deletion { color: var(--chat-err); background: var(--chat-err-soft); }
-.lutin-md .hljs-addition { color: #9bc1a3; background: rgba(122,168,132,.10); }
-.lutin-md .hljs-emphasis { font-style: italic; }
-.lutin-md .hljs-strong { font-weight: 600; }
+/* highlight.js token colors, palette-matched to the chat theme.
+ * Unscoped so they apply to any `.hljs-*` token in chat content
+ * (markdown code blocks, CodeBlock, diff rows, …). */
+.hljs-comment,
+.hljs-quote { color: var(--chat-text-dim); font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-built_in,
+.hljs-meta { color: var(--chat-accent); }
+.hljs-string,
+.hljs-attr,
+.hljs-template-variable,
+.hljs-regexp,
+.hljs-link { color: #9bc1a3; }
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet { color: #d4b787; }
+.hljs-attribute,
+.hljs-name,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-tag { color: #d4b787; }
+.hljs-title,
+.hljs-section,
+.hljs-function .hljs-title { color: #b9a9d3; }
+.hljs-variable,
+.hljs-params { color: var(--chat-text); }
+.hljs-type,
+.hljs-class .hljs-title { color: #9eb5d8; }
+.hljs-deletion { color: var(--chat-err); background: var(--chat-err-soft); }
+.hljs-addition { color: #9bc1a3; background: rgba(122,168,132,.10); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
 
 .lutin-md table {
   width: 100%;
@@ -736,9 +810,16 @@
   border: 0;
   border-bottom: 1px solid var(--chat-border);
   width: 100%;
+  /* width:100% + padding overflows the parent without border-box,
+   * pushing the right-aligned metrics chip past the card edge. */
+  box-sizing: border-box;
+  min-width: 0;
   text-align: left;
   color: inherit;
   cursor: pointer;
+}
+.lutin-chat__tool-head .lutin-chat__msg-metrics {
+  flex: none;
 }
 .lutin-chat__tool:not(:has(.lutin-chat__tool-detail)) .lutin-chat__tool-head {
   border-bottom: 0;
@@ -944,14 +1025,19 @@
   font-family: inherit;
   font-size: var(--chat-fs-lg);
   line-height: 1.5;
-  padding: var(--chat-s-2) var(--chat-s-3);
-  border: 1px solid var(--chat-border-strong);
+  padding: 8px var(--chat-s-3);
+  /* No visible border by default — the filled surface separates the
+   * input from the chat background. Border-box keeps the content area
+   * inside the visual edge (without it the cursor/scrollbar lands
+   * past the right padding). */
+  box-sizing: border-box;
+  border: 1px solid transparent;
   border-radius: var(--chat-r-md);
   background: var(--chat-surface);
   color: var(--chat-text);
   outline: none;
   max-height: 240px;
-  min-height: 38px;
+  min-height: 34px;
   /* Native auto-grow with no JS. Replaces a write-then-read on
    * `scrollHeight` per keystroke, which forced a document-wide reflow
    * and froze typing on long transcripts. WebViews that don't support
@@ -962,10 +1048,14 @@
   /* Long unbroken tokens (URLs, hashes, model ids) would otherwise
    * push past the shell on the right. */
   overflow-wrap: anywhere;
+  transition: background 0.12s, border-color 0.12s;
+}
+.lutin-chat__composer-input:hover:not(:focus):not(:disabled) {
+  background: var(--chat-surface-2);
 }
 .lutin-chat__composer-input:focus {
-  border-color: var(--chat-accent);
-  box-shadow: 0 0 0 2px var(--chat-focus-ring);
+  border-color: var(--chat-accent-soft);
+  background: var(--chat-surface-2);
 }
 .lutin-chat__composer-input:disabled {
   opacity: 0.6;
@@ -976,7 +1066,8 @@
   color: var(--chat-accent-on);
   border: none;
   padding: 0 var(--chat-s-4);
-  height: 38px;
+  height: 34px;
+  box-sizing: border-box;
   border-radius: var(--chat-r-md);
   font-size: var(--chat-fs-lg);
   font-weight: 500;
@@ -995,7 +1086,8 @@
   color: var(--chat-text);
   border: 1px solid var(--chat-border-strong);
   padding: 0 var(--chat-s-4);
-  height: 38px;
+  height: 34px;
+  box-sizing: border-box;
   border-radius: var(--chat-r-md);
   font-size: var(--chat-fs-lg);
   cursor: pointer;
@@ -1076,3 +1168,207 @@
   border-color: transparent;
 }
 .lutin-chat__msg-edit-save:hover { background: var(--chat-accent-hover); }
+
+/* ----- File-tool widgets (Write preview, Edit diff) ----- */
+
+.lutin-chat__tool-head--static {
+  cursor: default;
+}
+.lutin-chat__tool-head--static:hover {
+  background: var(--chat-surface);
+}
+.lutin-chat__tool-detail--special {
+  padding: 0;
+}
+.lutin-chat__tool-info {
+  margin: 0;
+  padding: 8px var(--chat-s-3);
+  border-bottom: 1px solid var(--chat-border);
+  background: var(--chat-surface);
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--chat-s-3);
+  row-gap: 2px;
+  font-family: var(--chat-font-mono);
+  font-size: 11.5px;
+  color: var(--chat-text-muted);
+}
+.lutin-chat__tool-info-row {
+  display: contents;
+}
+.lutin-chat__tool-info dt {
+  margin: 0;
+  color: var(--chat-text-faint);
+}
+.lutin-chat__tool-info dd {
+  margin: 0;
+  color: var(--chat-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Shared code rendering: 2-column gutter + source. */
+.lutin-code {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  font-family: var(--chat-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--chat-bg-1);
+  overflow: auto;
+}
+.lutin-code__gutter {
+  padding: 8px 10px 8px 12px;
+  color: var(--chat-text-dim);
+  text-align: right;
+  user-select: none;
+  white-space: pre;
+  border-right: 1px solid var(--chat-border);
+  background: var(--chat-bg-1);
+}
+.lutin-code__src {
+  padding: 8px 12px;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--chat-text);
+  background: transparent;
+}
+
+/* Write: preview-with-fade and expand toggle. */
+.lutin-write {
+  display: flex;
+  flex-direction: column;
+}
+.lutin-write__body {
+  position: relative;
+  max-height: none;
+  overflow: hidden;
+}
+.lutin-write__body[data-truncated="true"] .lutin-code {
+  /* Cap height in case a line wraps; lines themselves are already
+   * truncated at the prop boundary. */
+  max-height: 14em;
+}
+.lutin-write__fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3.5em;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0%,
+    var(--chat-bg-1) 100%
+  );
+}
+.lutin-write__toggle {
+  text-align: center;
+  background: var(--chat-surface);
+  border: 0;
+  border-top: 1px solid var(--chat-border);
+  color: var(--chat-text-faint);
+  font-family: var(--chat-font-mono);
+  font-size: 12px;
+  padding: 6px var(--chat-s-3);
+  cursor: pointer;
+}
+.lutin-write__toggle:hover {
+  color: var(--chat-text);
+  background: var(--chat-surface-2);
+}
+
+/* Edit: unified diff with line-number gutter on both sides. */
+.lutin-diff {
+  display: flex;
+  flex-direction: column;
+}
+.lutin-diff__body {
+  font-family: var(--chat-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--chat-bg-1);
+  overflow-x: auto;
+}
+.lutin-diff__hunk {
+  display: flex;
+  flex-direction: column;
+}
+.lutin-diff__sep {
+  padding: 2px var(--chat-s-3);
+  color: var(--chat-text-dim);
+  background: var(--chat-bg-0, var(--chat-bg-1));
+  border-top: 1px solid var(--chat-border);
+  border-bottom: 1px solid var(--chat-border);
+  user-select: none;
+}
+.lutin-diff__row {
+  display: grid;
+  grid-template-columns: 4em 1.25em 1fr;
+  align-items: baseline;
+}
+.lutin-diff__row code {
+  padding: 0 12px 0 4px;
+  white-space: pre;
+  background: transparent;
+  color: var(--chat-text);
+}
+.lutin-diff__lineno {
+  padding: 0 8px 0 10px;
+  color: var(--chat-text-dim);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.lutin-diff__sigil {
+  text-align: center;
+  user-select: none;
+  color: var(--chat-text-dim);
+}
+.lutin-diff__row--add {
+  background: rgba(109, 185, 122, 0.10);
+}
+.lutin-diff__row--add .lutin-diff__sigil { color: #6db97a; }
+.lutin-diff__row--del {
+  background: rgba(220, 80, 80, 0.10);
+}
+.lutin-diff__row--del .lutin-diff__sigil { color: var(--chat-err); }
+
+/* Shell: command-output preview with fade at top (tail-by-default). */
+.lutin-shell {
+  display: flex;
+  flex-direction: column;
+}
+.lutin-shell__body {
+  position: relative;
+  overflow: hidden;
+  background: var(--chat-bg-1);
+}
+.lutin-shell__body[data-truncated="true"] .lutin-shell__out {
+  max-height: 14em;
+}
+.lutin-shell__out {
+  margin: 0;
+  padding: 8px 12px;
+  font-family: var(--chat-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--chat-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+}
+.lutin-shell__fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3.5em;
+  pointer-events: none;
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0) 0%,
+    var(--chat-bg-1) 100%
+  );
+  z-index: 1;
+}

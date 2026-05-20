@@ -8,6 +8,8 @@ import {
   settingsSet,
   type KeybindBackendInfo,
 } from "../api";
+import { APP_ACTION_LABELS, useAppKeybinds, type AppAction } from "../appKeybinds";
+import { useQuickChat } from "../quickChat";
 import { useApp } from "../store";
 import type {
   Action,
@@ -958,7 +960,100 @@ function KeybindsPanel({
         onRevert={() => setDraft(initial.keybinds)}
         label="Save keybinds"
       />
+
+      <AppKeybindsCard />
+      <QuickChatCard />
     </>
+  );
+}
+
+function QuickChatCard() {
+  const projects = useApp((s) => s.projects);
+  const defaultProject = useQuickChat((s) => s.defaultProject);
+  const sessionPtr = useQuickChat((s) => s.sessionPtr);
+  const setDefaultProject = useQuickChat((s) => s.setDefaultProject);
+  const setSessionPtr = useQuickChat((s) => s.setSessionPtr);
+
+  const ptrProject = sessionPtr ? projects.find((p) => p.slug === sessionPtr.project) : null;
+
+  return (
+    <Card
+      title="Quick chat"
+      description={
+        "The chord bound to `openQuickChat` (default `space q`) jumps to " +
+        "a persistent chat session. The default project decides where a " +
+        "new quick-chat session is created when none is pinned yet; the " +
+        "pinned session below is reused on subsequent presses until it " +
+        "is deleted or you reset it here."
+      }
+    >
+      <div className={styles.row}>
+        <Field label="Default project">
+          <Select
+            value={defaultProject ?? ""}
+            onChange={(v) => setDefaultProject(v || null)}
+            options={[
+              { value: "", label: "Use current project" },
+              ...projects.map((p) => ({ value: p.slug, label: p.display_name })),
+            ]}
+            placeholder="Use current project"
+          />
+        </Field>
+      </div>
+      <div className={styles.row}>
+        <Field label="Pinned session">
+          <span>
+            {sessionPtr === null
+              ? "— (none yet; created on first use)"
+              : `${ptrProject?.display_name ?? sessionPtr.project} · ${sessionPtr.session.slice(0, 8)}`}
+          </span>
+        </Field>
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 8 }}>
+        <button onClick={() => setSessionPtr(null)} disabled={sessionPtr === null}>
+          Reset pinned session
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+function AppKeybindsCard() {
+  const binds = useAppKeybinds((s) => s.binds);
+  const setBind = useAppKeybinds((s) => s.setBind);
+  const reset = useAppKeybinds((s) => s.reset);
+
+  return (
+    <Card
+      title="App shortcuts"
+      description={
+        "In-app combos only — they fire while this window has focus and " +
+        "you're not typing in a text field. Format: a single key " +
+        "(e.g. `i`), a modifier combo (`ctrl k`, `ctrl shift p`), or a " +
+        "leader chord that starts with `space` (`space p`, `space f`). " +
+        "Press Esc to cancel an in-flight leader."
+      }
+    >
+      {binds.map((b) => (
+        <div key={b.action} className={styles.row}>
+          <Field label="Action">
+            <span>{APP_ACTION_LABELS[b.action as AppAction] ?? b.action}</span>
+          </Field>
+          <Field label="Combo">
+            <input
+              className={styles.input}
+              value={b.combo}
+              onChange={(e) => setBind(b.action as AppAction, e.target.value)}
+              spellCheck={false}
+              placeholder="e.g. space p"
+            />
+          </Field>
+        </div>
+      ))}
+      <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 8 }}>
+        <button onClick={reset}>Reset to defaults</button>
+      </div>
+    </Card>
   );
 }
 

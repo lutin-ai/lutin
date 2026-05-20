@@ -31,7 +31,10 @@ md.use({
       const safeLang = escapeHtml(tag);
       return (
         `<div class="lutin-md__pre">` +
-        `<div class="lutin-md__pre-head"><span class="lutin-md__pre-lang">${safeLang}</span></div>` +
+        `<div class="lutin-md__pre-head">` +
+        `<span class="lutin-md__pre-lang">${safeLang}</span>` +
+        `<button type="button" class="lutin-md__pre-copy" data-lutin-copy aria-label="Copy code">Copy</button>` +
+        `</div>` +
         `<pre><code class="hljs language-${safeLang}">${highlighted}</code></pre>` +
         `</div>`
       );
@@ -76,6 +79,24 @@ export function Markdown({ text, className }: MarkdownProps) {
     // (e.g. <strong> inside the link text).
     let el = e.target as HTMLElement | null;
     while (el && el !== e.currentTarget) {
+      if (el instanceof HTMLElement && el.hasAttribute("data-lutin-copy")) {
+        e.preventDefault();
+        const wrap = el.closest(".lutin-md__pre");
+        const code = wrap?.querySelector("pre code");
+        const text = code?.textContent ?? "";
+        const btn = el;
+        const restore = btn.textContent ?? "Copy";
+        const done = () => {
+          btn.textContent = "Copied";
+          btn.classList.add("is-copied");
+          window.setTimeout(() => {
+            btn.textContent = restore;
+            btn.classList.remove("is-copied");
+          }, 1200);
+        };
+        navigator.clipboard?.writeText(text).then(done, () => {});
+        return;
+      }
       if (el.tagName === "A") {
         const href = (el as HTMLAnchorElement).getAttribute("href");
         if (href && /^(https?:|mailto:)/i.test(href)) {

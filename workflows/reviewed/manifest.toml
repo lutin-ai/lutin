@@ -1,0 +1,5 @@
+name = "Reviewed"
+description = "Linear chat with inline principle review on every tool call"
+
+[runtime]
+kind = "binary"

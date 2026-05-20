@@ -57,6 +57,66 @@ export function PluginIframe(props: Props) {
   const [bridgeReady, setBridgeReady] = useState(false);
   const [iframeLoaded, setIframeLoaded] = useState(false);
 
+  // App-keybind "focus workflow" dispatches a window event the chrome
+  // doesn't otherwise listen for. Forward focus into the iframe and
+  // post a generic focus-input message so plugins that have a primary
+  // composer (chat) can route to it. If the iframe / shim isn't ready
+  // yet (brand-new session, plugin still loading) we queue one focus
+  // request and replay it as soon as `iframeLoaded` flips true.
+  const pendingFocus = useRef(false);
+  const focusIframe = () => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    iframe.focus();
+    try {
+      iframe.contentWindow?.postMessage({ type: "lutin-focus-input" }, "*");
+    } catch { /* cross-origin throws are non-fatal */ }
+  };
+  useEffect(() => {
+    const onFocus = () => {
+      if (!iframeLoaded) { pendingFocus.current = true; return; }
+      focusIframe();
+    };
+    window.addEventListener("lutin:focus-workflow", onFocus);
+    return () => window.removeEventListener("lutin:focus-workflow", onFocus);
+  }, [iframeLoaded]);
+  useEffect(() => {
+    if (iframeLoaded && pendingFocus.current) {
+      pendingFocus.current = false;
+      // Wait one frame so the shim's lutin-init handler runs first;
+      // otherwise our lutin-focus-input message lands before the shim
+      // installs its message listener and is dropped.
+      requestAnimationFrame(() => requestAnimationFrame(focusIframe));
+    }
+  }, [iframeLoaded]);
+
+  // Re-dispatch keydowns forwarded from inside the iframe (see
+  // `lutin.js`'s `lutin-keydown` postMessage). The chrome's app-keybind
+  // listener lives on `window` and can't see keystrokes absorbed by a
+  // cross-origin iframe; replaying them here as synthetic KeyboardEvents
+  // lets the same handler dispatch them.
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const iframe = iframeRef.current;
+      if (!iframe || e.source !== iframe.contentWindow) return;
+      const d = e.data as { type?: string; key?: string; code?: string;
+        ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean } | null;
+      if (!d || d.type !== "lutin-keydown" || typeof d.key !== "string") return;
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: d.key,
+        code: d.code ?? "",
+        ctrlKey: !!d.ctrlKey,
+        metaKey: !!d.metaKey,
+        shiftKey: !!d.shiftKey,
+        altKey: !!d.altKey,
+        bubbles: false,
+        cancelable: true,
+      }));
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
   // Resolve plugin URL.
   useEffect(() => {
     let cancelled = false;
@@ -539,9 +599,18 @@ function parseSubAgentRows(input: unknown): SubAgentRow[] | null {
 function parseSessionSummary(input: unknown): SessionSummaryPatch | null {
   if (!input || typeof input !== "object") return null;
   const r = input as Record<string, unknown>;
-  if (r.contextTokens !== null && typeof r.contextTokens !== "number") return null;
-  if (typeof r.totalPromptTokens !== "number") return null;
-  if (typeof r.totalCompletionTokens !== "number") return null;
+  // Token fields are optional: a workflow that has remounted but not
+  // yet received `SummaryUpdated` from the engine omits them so the
+  // chrome keeps whatever it loaded from `summary.json`. Treat
+  // absent === undefined === "leave alone".
+  const ctxPresent = "contextTokens" in r;
+  if (ctxPresent && r.contextTokens !== null && typeof r.contextTokens !== "number") {
+    return null;
+  }
+  const promptPresent = "totalPromptTokens" in r;
+  if (promptPresent && typeof r.totalPromptTokens !== "number") return null;
+  const completionPresent = "totalCompletionTokens" in r;
+  if (completionPresent && typeof r.totalCompletionTokens !== "number") return null;
   // `persona` and `title` are optional — workflows that don't expose
   // them just omit the field. Reject only if the field is present and
   // not the right shape; absent is fine.
@@ -554,18 +623,23 @@ function parseSessionSummary(input: unknown): SessionSummaryPatch | null {
     return null;
   }
   return {
-    contextTokens: r.contextTokens as number | null,
-    totalPromptTokens: r.totalPromptTokens,
-    totalCompletionTokens: r.totalCompletionTokens,
+    contextTokens: ctxPresent ? (r.contextTokens as number | null) : undefined,
+    totalPromptTokens: promptPresent ? (r.totalPromptTokens as number) : undefined,
+    totalCompletionTokens: completionPresent
+      ? (r.totalCompletionTokens as number)
+      : undefined,
     persona: personaRaw === undefined ? undefined : (personaRaw as string | null),
     title: titleRaw === undefined ? undefined : (titleRaw as string | null),
   };
 }
 
 export interface SessionSummaryPatch {
-  contextTokens: number | null;
-  totalPromptTokens: number;
-  totalCompletionTokens: number;
+  /** `undefined` = field absent in the message, leave the prior
+   *  value alone in the store. `null` for `contextTokens` is the
+   *  explicit "no usage yet" sentinel from the engine. */
+  contextTokens?: number | null;
+  totalPromptTokens?: number;
+  totalCompletionTokens?: number;
   /** `undefined` = field absent in the message, leave as-is in the
    *  store. `null` = workflow says "no persona / no title yet". */
   persona?: string | null;

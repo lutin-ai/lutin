@@ -43,6 +43,14 @@ export { ErrorBanner } from "./components/ErrorBanner";
 export { Header } from "./components/Header";
 export { Thinking } from "./components/Thinking";
 export { ToolCall } from "./components/ToolCall";
+export { WriteToolView } from "./components/WriteToolView";
+export type { WriteToolViewProps } from "./components/WriteToolView";
+export { EditToolView, diffCounts } from "./components/EditToolView";
+export type { EditToolViewProps } from "./components/EditToolView";
+export { ShellToolView } from "./components/ShellToolView";
+export type { ShellToolViewProps } from "./components/ShellToolView";
+export { CodeBlock, langFromPath } from "./components/CodeBlock";
+export type { CodeBlockProps } from "./components/CodeBlock";
 export { SummaryFooter, formatTokens } from "./components/SummaryFooter";
 export type { SummaryFooterProps } from "./components/SummaryFooter";
 

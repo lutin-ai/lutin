@@ -48,6 +48,11 @@ interface AppState {
   /// Drop a session's sub-agent state. Called by `PluginIframe` on
   /// unmount so a stale tree doesn't bleed into the next session.
   clearSubAgentState: (session: SessionId) => void;
+  /// User-initiated removal of a session from the sidebar (after a
+  /// successful `DeleteSession` to the CP). The matching
+  /// `SessionEnded` broadcast only marks the row Dormant, so callers
+  /// that truly want the row gone (delete menu) invoke this directly.
+  removeSession: (slug: Slug, session: SessionId) => void;
   /// Merge live counters (from the iframe's `publishSummary`) into a
   /// session's `summary` so the sidebar's `ctx` column refreshes
   /// without a `ListSessions` round-trip. Persona / title / other
@@ -57,9 +62,14 @@ interface AppState {
     slug: Slug,
     session: SessionId,
     patch: {
-      contextTokens: number | null;
-      totalPromptTokens: number;
-      totalCompletionTokens: number;
+      /** `undefined` = leave the existing token field untouched
+       *  (workflow has remounted but not yet received a fresh
+       *  `SummaryUpdated`). `null` for `contextTokens` is the engine's
+       *  "no usage yet" sentinel. Without this convention every
+       *  session-switch would wipe the sidebar's `ctx` column. */
+      contextTokens?: number | null;
+      totalPromptTokens?: number;
+      totalCompletionTokens?: number;
       /** `undefined` = leave the existing persona/title untouched
        *  (workflow didn't include the field in this tick). `null` =
        *  explicit "no persona / no title yet". */
@@ -107,7 +117,21 @@ export const useApp = create<AppState>((set) => ({
       seen.add(sess.id);
       dedup.push(sess);
     }
-    set((s) => ({ sessionsBySlug: { ...s.sessionsBySlug, [slug]: dedup } }));
+    set((s) => {
+      // Preserve any session the incoming list doesn't know about —
+      // it's almost certainly a fresh `SessionStarted` from `applyEvent`
+      // that hasn't reached the CP-side `ListSessions` snapshot yet.
+      // Removals come through explicit `SessionEnded` / `SessionDeleted`
+      // events, not through omission from a stale list.
+      const existing = s.sessionsBySlug[slug] ?? [];
+      const survivors = existing.filter((e) => !seen.has(e.id));
+      return {
+        sessionsBySlug: {
+          ...s.sessionsBySlug,
+          [slug]: [...dedup, ...survivors],
+        },
+      };
+    });
   },
   selectSession: (id) => set({ selectedSession: id }),
   setSubAgents: (session, agents) =>
@@ -144,6 +168,21 @@ export const useApp = create<AppState>((set) => ({
       const { [session]: _drop, ...rest } = s.chatStateBySession;
       return { chatStateBySession: rest };
     }),
+  removeSession: (slug, session) =>
+    set((s) => {
+      const list = s.sessionsBySlug[slug];
+      if (!list) return s;
+      const { [session]: _drop, ...restChatState } = s.chatStateBySession;
+      return {
+        sessionsBySlug: {
+          ...s.sessionsBySlug,
+          [slug]: list.filter((x) => x.id !== session),
+        },
+        selectedSession:
+          s.selectedSession === session ? null : s.selectedSession,
+        chatStateBySession: restChatState,
+      };
+    }),
   setSessionSummary: (slug, session, patch) =>
     set((s) => {
       const list = s.sessionsBySlug[slug];
@@ -153,9 +192,15 @@ export const useApp = create<AppState>((set) => ({
       const prev = list[idx];
       const nextSummary = {
         ...(prev.summary ?? {}),
-        context_tokens: patch.contextTokens,
-        total_prompt_tokens: patch.totalPromptTokens,
-        total_completion_tokens: patch.totalCompletionTokens,
+        ...(patch.contextTokens !== undefined
+          ? { context_tokens: patch.contextTokens }
+          : {}),
+        ...(patch.totalPromptTokens !== undefined
+          ? { total_prompt_tokens: patch.totalPromptTokens }
+          : {}),
+        ...(patch.totalCompletionTokens !== undefined
+          ? { total_completion_tokens: patch.totalCompletionTokens }
+          : {}),
         ...(patch.persona !== undefined ? { persona: patch.persona } : {}),
         ...(patch.title !== undefined ? { title: patch.title } : {}),
       };
@@ -183,22 +228,49 @@ export const useApp = create<AppState>((set) => ({
       if ("SessionStarted" in event) {
         const { slug, info } = event.SessionStarted;
         const list = s.sessionsBySlug[slug] ?? [];
-        if (list.some((x) => x.id === info.id)) return s;
+        const idx = list.findIndex((x) => x.id === info.id);
+        if (idx >= 0) {
+          // Resume re-broadcasts `SessionStarted` for an id we already
+          // know about. Update in place so a Dormant → Running flip
+          // propagates. Preserve `summary` when the broadcast omits it
+          // (engines write summary.json lazily, so a freshly-resumed
+          // session's info.summary can be null even when we have one
+          // on file from a prior run). Bump `last_activity` to now —
+          // the engine writes summary.json on boot, but that disk
+          // write isn't observable from here; without this nudge the
+          // sidebar keeps the row in whatever bucket the stale
+          // in-memory `last_activity` put it (often "Yesterday").
+          const prevSummary = info.summary ?? list[idx].summary;
+          const nextSummary = prevSummary
+            ? { ...prevSummary, last_activity: new Date().toISOString() }
+            : { last_activity: new Date().toISOString() };
+          const next = list.slice();
+          next[idx] = { ...list[idx], ...info, summary: nextSummary };
+          return {
+            sessionsBySlug: { ...s.sessionsBySlug, [slug]: next },
+          };
+        }
         return {
           sessionsBySlug: { ...s.sessionsBySlug, [slug]: [...list, info] },
         };
       }
       if ("SessionEnded" in event) {
+        // `SessionEnded` fires for both reaps (idle-timeout / crash /
+        // manual `docker stop`) and user-initiated `DeleteSession`. The
+        // reap case leaves the session on disk — dropping the row from
+        // the sidebar makes a still-resumable chat look gone, which is
+        // exactly the "hides chats" complaint. So we only flip the row
+        // to Dormant here; explicit deletions go through `removeSession`
+        // optimistically in the delete handler.
         const { slug, session } = event.SessionEnded;
         const list = s.sessionsBySlug[slug] ?? [];
+        const idx = list.findIndex((x) => x.id === session);
+        if (idx < 0) return s;
+        const next = list.slice();
+        next[idx] = { ...list[idx], state: "Dormant" };
         const { [session]: _drop, ...restChatState } = s.chatStateBySession;
         return {
-          sessionsBySlug: {
-            ...s.sessionsBySlug,
-            [slug]: list.filter((x) => x.id !== session),
-          },
-          selectedSession:
-            s.selectedSession === session ? null : s.selectedSession,
+          sessionsBySlug: { ...s.sessionsBySlug, [slug]: next },
           chatStateBySession: restChatState,
         };
       }

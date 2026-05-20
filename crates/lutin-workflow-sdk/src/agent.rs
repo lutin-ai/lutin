@@ -111,7 +111,11 @@ pub fn refresh_agent(agent: &mut Agent, args: BuildArgs<'_>) -> Result<(), Build
 /// Resolve a persona + settings into the (config, toolbox) pair used
 /// to construct or refresh an agent. Internal seam between
 /// [`build_agent`] and [`refresh_agent`] so they can't drift.
-fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildError> {
+///
+/// Public so workflows that don't run the SDK's `Agent` loop (e.g.
+/// scratchpad, which drives its own state machine) can reuse the same
+/// provider/model/toolbox/system-prompt resolution.
+pub fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), BuildError> {
     let BuildArgs {
         persona,
         settings,

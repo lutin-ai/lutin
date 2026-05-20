@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod compaction;
+pub mod idle;
 pub mod prompt;
 pub mod state;
 pub mod summary;

@@ -60,7 +60,7 @@ Spawned agents:
 default_skills = []
 model = "Qwen/Qwen3.6-35B-A3B-FP8"
 provider = "open-ai-compat"
-temperature = 0.3
+temperature = 0.5
 # presence_penalty = 1.5
 thinking_enabled = false
 reasoning_effort = "low"

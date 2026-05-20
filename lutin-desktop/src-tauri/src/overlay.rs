@@ -40,21 +40,28 @@ const TOP_OFFSET_LOGICAL: f64 = 24.0;
 /// window hasn't been mapped yet and `outer_size()` returns zeros on
 /// some backends (notably webkit2gtk), which leaves the pill's
 /// top-left corner sitting at screen center instead of its true
-/// center.
-const WIDTH_LOGICAL: f64 = 240.0;
+/// center. The window is wider than the resting pill so a streaming
+/// partial transcript can grow inline without resizing the window
+/// mid-utterance; the pill itself stays centered in CSS.
+const WIDTH_LOGICAL: f64 = 520.0;
 
 /// What the pill displays. Mirrors the JS-side `OverlayPhase` 1:1.
 /// Externally tagged on `kind` so each variant can carry its own
 /// payload without a wrapper.
 ///
 /// `Listening` updates several times per second from the chunk pump
-/// in `dispatch.rs` — `mib` is bytes shipped to CP so far, and
-/// `elapsed_ms` is wall-clock since PTT down. Both are read-only
-/// stats fed to the overlay pill.
+/// in `dispatch.rs` — `mib` is bytes shipped to CP so far,
+/// `elapsed_ms` is wall-clock since PTT down, and `partial` is the
+/// running transcript so far (parakeet streaming only; empty for
+/// whisper or before the first delta lands).
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OverlayPhase {
-    Listening { mib: f32, elapsed_ms: u64 },
+    Listening {
+        mib: f32,
+        elapsed_ms: u64,
+        partial: String,
+    },
     Transcribing,
     Done,
     Error { message: String },
@@ -160,7 +167,14 @@ fn position_top_center<R: Runtime>(win: &tauri::WebviewWindow<R>) {
 /// confirms whether the window exists at all.
 #[tauri::command]
 pub fn overlay_test(app: AppHandle) {
-    show(&app, OverlayPhase::Listening { mib: 0.0, elapsed_ms: 0 });
+    show(
+        &app,
+        OverlayPhase::Listening {
+            mib: 0.0,
+            elapsed_ms: 0,
+            partial: "hello world".to_string(),
+        },
+    );
     hide_after(&app, 2_000);
 }
 

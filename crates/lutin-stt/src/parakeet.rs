@@ -1,43 +1,45 @@
-//! NVIDIA Parakeet TDT backend (multilingual).
+//! NVIDIA Parakeet backend, streaming via `ParakeetUnified`.
 //!
-//! Wraps `parakeet-rs` (ORT under the hood) behind the `SttWorker`
-//! trait. The factory takes a directory containing
-//! `encoder-model.onnx`, `decoder_joint-model.onnx`, and `vocab.txt`
-//! (CP downloads them out-of-band, mirroring the whisper backend).
+//! The unified path runs the encoder over a sliding
+//! (left-context + chunk + right-context) window — at default settings
+//! a ~6.7 s rolling window with ~0.56 s of "new" audio per step. The
+//! decoder LSTM state persists across chunks; the encoder ONNX
+//! session does not, but the per-chunk encoder cost is bounded
+//! regardless of total clip length. End-to-end latency from
+//! end-of-speech to final transcript is therefore roughly constant
+//! instead of scaling with clip duration.
 //!
-//! `parakeet-rs::Transcriber::transcribe_samples` takes `&mut self`,
-//! so the worker holds the model behind a `Mutex` to satisfy the
-//! crate-wide `&self` trait shape. Concurrent calls serialise — fine
-//! for our PTT pattern (one clip at a time) and matches Parakeet's
-//! own model-thread expectation.
+//! Model files live in a directory containing the istupakov ONNX
+//! exports (`encoder-model.onnx` + `.data`, `decoder_joint-model.onnx`)
+//! plus the SentencePiece `tokenizer.model` from mlx-community —
+//! CP's download module handles the per-file repo split.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
-use parakeet_rs::{ExecutionConfig, ExecutionProvider, ParakeetTDT, Transcriber};
-use tokio::sync::watch;
+use parakeet_rs::{
+    ExecutionConfig, ExecutionProvider, ParakeetUnified, ParakeetUnifiedHandle,
+};
 
-use crate::backend::{MIN_INFERENCE_SAMPLES, SttBackendFactory, SttWorker, TranscribeParams};
+use crate::backend::{SttStream, SttStreamingFactory};
 use crate::SttError;
 
-/// Factory pinned to one model directory. Cheap to construct; the
-/// ORT sessions load on `create_worker`.
-pub struct ParakeetFactory {
-    model_dir: PathBuf,
-    /// Execution provider chosen at build time. CUDA when the crate
-    /// was compiled with `--features cuda`; CPU otherwise. (TensorRT
-    /// would be the obvious win for Blackwell but parakeet-rs picks
-    /// CUDA-only when both are enabled — switching to TRT means
-    /// passing it through here later.)
-    provider: ExecutionProvider,
+/// Streaming factory pinned to one model directory. Loads the ORT
+/// session in `load` (eagerly — desktop calls this on the warmup
+/// path before the first PTT release).
+pub struct ParakeetStreamingFactory {
+    handle: ParakeetUnifiedHandle,
 }
 
-impl ParakeetFactory {
-    pub fn new(model_dir: PathBuf) -> Self {
-        Self {
-            model_dir,
-            provider: default_provider(),
-        }
+impl ParakeetStreamingFactory {
+    pub fn load(model_dir: PathBuf) -> Result<Self, SttError> {
+        let config = ExecutionConfig::new().with_execution_provider(default_provider());
+        let handle = ParakeetUnifiedHandle::load(&model_dir, Some(config)).map_err(|e| {
+            SttError::Load(format!(
+                "load parakeet unified from {}: {e}",
+                model_dir.display()
+            ))
+        })?;
+        Ok(Self { handle })
     }
 }
 
@@ -51,43 +53,40 @@ fn default_provider() -> ExecutionProvider {
     ExecutionProvider::Cpu
 }
 
-impl SttBackendFactory for ParakeetFactory {
-    fn create_worker(&self) -> Result<Box<dyn SttWorker>, SttError> {
-        let config = ExecutionConfig::new().with_execution_provider(self.provider);
-        let model = ParakeetTDT::from_pretrained(&self.model_dir, Some(config)).map_err(|e| {
-            SttError::Load(format!(
-                "load parakeet from {}: {e}",
-                self.model_dir.display()
-            ))
-        })?;
-        Ok(Box::new(ParakeetWorker {
-            model: Mutex::new(model),
+impl SttStreamingFactory for ParakeetStreamingFactory {
+    fn open_stream(&self) -> Result<Box<dyn SttStream>, SttError> {
+        Ok(Box::new(ParakeetStream {
+            inner: ParakeetUnified::from_shared(&self.handle),
         }))
     }
 }
 
-pub struct ParakeetWorker {
-    model: Mutex<ParakeetTDT>,
+struct ParakeetStream {
+    inner: ParakeetUnified,
 }
 
-impl SttWorker for ParakeetWorker {
-    fn transcribe(
-        &self,
-        pcm: &[i16],
-        _params: &TranscribeParams,
-        cancel_rx: &watch::Receiver<bool>,
-    ) -> Result<String, SttError> {
-        if pcm.len() < MIN_INFERENCE_SAMPLES {
-            return Ok(String::new());
-        }
-        if *cancel_rx.borrow() {
-            return Err(SttError::Cancelled);
-        }
-        let audio: Vec<f32> = pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
-        let mut guard = self.model.lock().expect("parakeet model poisoned");
-        let result = guard
-            .transcribe_samples(audio, 16_000, 1, None)
-            .map_err(|e| SttError::Inference(format!("parakeet: {e}")))?;
-        Ok(result.text.trim().to_owned())
+impl SttStream for ParakeetStream {
+    fn push(&mut self, pcm: Vec<i16>) -> Result<String, SttError> {
+        let audio = pcm_i16_to_f32(&pcm);
+        self.inner
+            .transcribe_chunk(&audio)
+            .map_err(|e| SttError::Inference(format!("parakeet streaming chunk: {e}")))
     }
+
+    fn finish(mut self: Box<Self>) -> Result<String, SttError> {
+        // Run `flush` to emit the right-context tail through the
+        // chunk pipeline, then read the canonical transcript out of
+        // the model's accumulator. The flush return value is just
+        // the final delta — we discard it; `get_transcript` decodes
+        // every token seen so far, which is what the CP wire
+        // `Transcription { text }` reply expects.
+        self.inner
+            .flush()
+            .map_err(|e| SttError::Inference(format!("parakeet streaming flush: {e}")))?;
+        Ok(self.inner.get_transcript().trim().to_owned())
+    }
+}
+
+fn pcm_i16_to_f32(pcm: &[i16]) -> Vec<f32> {
+    pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect()
 }

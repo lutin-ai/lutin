@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useScrollStick } from "../hooks/useScrollStick";
 import type { Slots } from "../slots";
@@ -84,12 +84,68 @@ export function ChatView({
   const totalSize = virtualizer.getTotalSize();
   // Re-stick when the virtualizer remeasures rows (mid-stream height
   // changes) as well as when the message list itself grows.
-  useScrollStick(scrollRef, [
-    messages.length,
-    lastTextLen(messages),
-    turn,
-    totalSize,
-  ]);
+  // Bottom padding so the latest user message can anchor at the top of
+  // the viewport even when the agent reply is short or empty. Tracks
+  // the scroll container's clientHeight so it stays correct across
+  // resizes — without this the virtualizer caps total height at the
+  // measured content and `anchorAt` is silently clamped.
+  const [bottomPad, setBottomPad] = useState(0);
+  // Read via ref so the scroll hook always sees the latest value
+  // without making `bottomPad` a dependency of its layout effect
+  // (which would re-snap on every resize).
+  const bottomPadRef = useRef(0);
+  bottomPadRef.current = bottomPad;
+  const { anchorAt, scrollToBottom, stuck } = useScrollStick(
+    scrollRef,
+    [messages.length, lastTextLen(messages), turn, totalSize],
+    () => bottomPadRef.current,
+  );
+
+  // "Jump to latest" pill: counts messages that landed after the user
+  // scrolled away. Resets to zero on re-stick. Stored as a length
+  // snapshot (not a count) so we don't have to subscribe to every
+  // streaming-token render.
+  const [unstuckAtLen, setUnstuckAtLen] = useState<number | null>(null);
+  useEffect(() => {
+    if (stuck) setUnstuckAtLen(null);
+    else if (unstuckAtLen === null) setUnstuckAtLen(messages.length);
+  }, [stuck, messages.length, unstuckAtLen]);
+  const pendingCount = unstuckAtLen === null ? 0 : Math.max(0, messages.length - unstuckAtLen);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => setBottomPad(el.clientHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // After a new user message is appended, scroll so that message sits
+  // at the top of the viewport. Tracked by id (not index) so we don't
+  // re-anchor when an old user message gets re-rendered mid-stream.
+  const lastUserIdRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    let idx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].kind === "user") {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return;
+    const id = messages[idx].id ?? null;
+    if (id === null || id === lastUserIdRef.current) return;
+    lastUserIdRef.current = id;
+    const offset = virtualizer.getVirtualItems().find((vi) => vi.index === idx)?.start;
+    if (offset !== undefined) anchorAt(offset);
+    else {
+      // Row not in the virtual window yet — ask the virtualizer to
+      // bring it on, then anchor on the next layout pass via the
+      // measured offset.
+      virtualizer.scrollToIndex(idx, { align: "start" });
+    }
+  }, [messages, virtualizer, anchorAt]);
 
   const Header = slots?.Header ?? DefaultHeader;
   const ErrorBanner = slots?.ErrorBanner ?? DefaultErrorBanner;
@@ -123,8 +179,9 @@ export function ChatView({
       <Header turn={turn} onCancel={onCancel} />
       {errored && <ErrorBanner message={errored} />}
 
+      <div className="lutin-chat__scroll-wrap">
       <div ref={scrollRef} className="lutin-chat__scrollback">
-        <div className="lutin-chat__virt" style={{ height: totalSize }}>
+        <div className="lutin-chat__virt" style={{ height: totalSize + bottomPad }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const m = messages[vi.index];
             return (
@@ -150,6 +207,19 @@ export function ChatView({
             );
           })}
         </div>
+      </div>
+
+      {!stuck && (
+        <button
+          type="button"
+          className="lutin-chat__jump-pill"
+          onClick={scrollToBottom}
+          aria-label="Jump to latest"
+        >
+          {pendingCount > 0 ? `${pendingCount} new` : "Jump to latest"}
+          <span aria-hidden="true"> ↓</span>
+        </button>
+      )}
       </div>
 
       {!hideComposer && (

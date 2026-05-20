@@ -789,6 +789,20 @@ async fn drain_updates(
                 CpEvent::TtsAudio { stream_id, chunk } => {
                     state.tts_playback.enqueue(stream_id, &chunk);
                 }
+                // Streaming-transcription deltas: append to the
+                // active PTT's running partial. The overlay polls
+                // the phase cache, so the next chunk-pump tick (or
+                // the manual update below) will surface the text.
+                // Scoped to the live PTT — late deltas after PTT-up
+                // are silently dropped.
+                CpEvent::TranscriptionPartial { stream_id, text_delta } => {
+                    let mut guard = state.active_ptt.lock().expect("active_ptt poisoned");
+                    if let Some(p) = guard.as_mut() {
+                        if p.stream_id == stream_id {
+                            p.partial.push_str(&text_delta);
+                        }
+                    }
+                }
                 // Other events (including `TtsFinished`, which is
                 // the workflow's cue to speak the next sentence)
                 // pass through to JS as-is.

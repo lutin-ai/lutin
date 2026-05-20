@@ -334,18 +334,15 @@ export function App({ lutin }: Props) {
   // reflects persona switches and the first user message immediately.
   useEffect(() => {
     const title = deriveTitle(snap.completed);
-    const tokens = snap.summary ?? {
-      contextTokens: null,
-      totalPromptTokens: 0,
-      totalCompletionTokens: 0,
-    };
     // Omit `title` when we can't derive one (transcript not yet
     // loaded after a remount). `null` would tell the chrome to clear
     // the persisted title; `undefined` leaves it intact, so the
     // sidebar keeps showing the on-disk title until we have something
-    // authoritative to publish.
+    // authoritative to publish. Same convention for token fields:
+    // before the engine has re-emitted `SummaryUpdated` post-remount
+    // `snap.summary` is null and we must not clobber chrome's `ctx`.
     lutin.publishSummary({
-      ...tokens,
+      ...(snap.summary ?? {}),
       persona: snap.persona,
       ...(title !== null ? { title } : {}),
     });

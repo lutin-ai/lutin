@@ -93,9 +93,14 @@ export interface Lutin extends LutinInit {
  *  `summaryUpdated` broadcast. Mirrors the Rust `ChatEvent::SummaryUpdated`
  *  payload but flattens to JSON-friendly numbers. */
 export interface SessionSummaryUpdate {
-  contextTokens: number | null;
-  totalPromptTokens: number;
-  totalCompletionTokens: number;
+  /** Omit token fields when the workflow has no usage report yet
+   *  (post-remount, before the engine re-emits `SummaryUpdated`).
+   *  Omitted = chrome keeps whatever it already loaded from
+   *  `summary.json`; sending `null`/`0` here would wipe the
+   *  sidebar's `ctx` column on every session switch. */
+  contextTokens?: number | null;
+  totalPromptTokens?: number;
+  totalCompletionTokens?: number;
   /** Active persona name, or `null` if the session has none selected.
    *  Pushed alongside the token tick so the chrome's sidebar reflects
    *  persona switches without waiting for a `ListSessions` poll. */

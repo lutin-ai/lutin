@@ -110,8 +110,17 @@ export interface PersonaInfo {
   model: string;
 }
 
+/** One row of the projected scrollback paired with its metrics.
+ *  Mirrors `chat::HistoricalEntry`. Carried atomically by
+ *  `transcriptReplaced` events and `ChatOk::Subscribed` responses so
+ *  the UI never has to align two parallel vecs by position. */
+export interface HistoricalEntry {
+  message: HistoricalMessage;
+  meta: MessageMeta;
+}
+
 export type ChatOk =
-  | { kind: "subscribed"; state: SessionState; history: HistoricalMessage[] }
+  | { kind: "subscribed"; state: SessionState; entries: HistoricalEntry[] }
   | { kind: "messageQueued"; turnId: TurnId }
   | { kind: "cancelled" }
   | { kind: "stateUpdated"; state: SessionState }
@@ -144,8 +153,7 @@ export type ChatEvent =
   | { kind: "toolCallCompleted"; id: string; outcome: ToolOutcome }
   | { kind: "messageFinished"; turnId: TurnId; reason: FinishReason }
   | { kind: "stateChanged"; state: SessionState }
-  | { kind: "historyReplaced"; history: HistoricalMessage[] }
-  | { kind: "metricsReplaced"; metrics: MessageMeta[] }
+  | { kind: "transcriptReplaced"; entries: HistoricalEntry[] }
   | { kind: "subAgentsChanged"; subAgents: SubAgentInfo[] }
   | { kind: "subAgentTranscriptUpdated"; id: string; history: HistoricalMessage[] }
   | { kind: "toolCallStreaming"; id: string; name: string }
@@ -221,6 +229,13 @@ function readHistoricalMessage(r: pc.Reader): HistoricalMessage {
     default:
       throw new Error(`postcard: invalid HistoricalMessage ${v}`);
   }
+}
+
+function readHistoricalEntry(r: pc.Reader): HistoricalEntry {
+  return {
+    message: readHistoricalMessage(r),
+    meta: readMessageMeta(r),
+  };
 }
 
 function readFinishReason(r: pc.Reader): FinishReason {
@@ -397,7 +412,7 @@ function readChatOk(r: pc.Reader): ChatOk {
       return {
         kind: "subscribed",
         state: readSessionState(r),
-        history: pc.readVec(r, readHistoricalMessage),
+        entries: pc.readVec(r, readHistoricalEntry),
       };
     case 1:
       return { kind: "messageQueued", turnId: pc.readU64(r) };
@@ -523,35 +538,33 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
       return { kind: "stateChanged", state: readSessionState(r) };
     case 6:
       return {
-        kind: "historyReplaced",
-        history: pc.readVec(r, readHistoricalMessage),
+        kind: "transcriptReplaced",
+        entries: pc.readVec(r, readHistoricalEntry),
       };
     case 7:
-      return { kind: "metricsReplaced", metrics: pc.readVec(r, readMessageMeta) };
-    case 8:
       return {
         kind: "subAgentsChanged",
         subAgents: pc.readVec(r, readSubAgentInfo),
       };
-    case 9:
+    case 8:
       return {
         kind: "subAgentTranscriptUpdated",
         id: pc.readString(r),
         history: pc.readVec(r, readHistoricalMessage),
       };
-    case 10:
+    case 9:
       return {
         kind: "toolCallStreaming",
         id: pc.readString(r),
         name: pc.readString(r),
       };
-    case 11:
+    case 10:
       return {
         kind: "toolCallArgsDelta",
         id: pc.readString(r),
         args: pc.readString(r),
       };
-    case 12:
+    case 11:
       return {
         kind: "summaryUpdated",
         contextTokens: pc.readOption(r, pc.readU32),

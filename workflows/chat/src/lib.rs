@@ -80,7 +80,7 @@ pub enum ChatRequest {
     Rerun,
     /// In-place edit of a single projected history entry. `index`
     /// addresses the UI's projected scrollback (the same `Vec` shape
-    /// returned by `Subscribed.history`), not the engine's underlying
+    /// returned by `Subscribed.entries`), not the engine's underlying
     /// `Vec<Message>`. No truncation: editing a mid-history entry
     /// rewrites just that text and leaves later turns alone.
     EditMessage { index: u32, text: String },
@@ -95,7 +95,7 @@ pub enum ChatRequest {
     /// the underlying message that owns it.
     DeleteFromHere { index: u32 },
     /// Fetch the metrics sidecar projected to the same shape as
-    /// `Subscribed.history` (one entry per `HistoricalMessage`). New
+    /// `Subscribed.entries` (one entry per `HistoricalMessage`). New
     /// at variant index 10 — appended to the end so existing indices
     /// stay stable.
     GetMetrics,
@@ -118,10 +118,12 @@ pub enum ChatOk {
     /// Subscribed; chrome receives the persisted state plus the
     /// transcript projected to the UI's render shape (no tool calls,
     /// no system, no images — chat-only). Late-joining clients see
-    /// the same scrollback any other subscriber would.
+    /// the same scrollback any other subscriber would. `entries`
+    /// pairs every projected message with its metrics so the UI
+    /// never has to align two parallel vecs.
     Subscribed {
         state: SessionState,
-        history: Vec<HistoricalMessage>,
+        entries: Vec<HistoricalEntry>,
     },
     MessageQueued { turn_id: TurnId },
     Cancelled,
@@ -130,12 +132,12 @@ pub enum ChatOk {
     /// Reply to `ListPersonas`.
     Personas { personas: Vec<PersonaInfo> },
     /// Reply to `EditMessage`/`DeleteMessage`/`DeleteFromHere`. The
-    /// post-mutation history travels on the `HistoryReplaced`
+    /// post-mutation transcript travels on the `TranscriptReplaced`
     /// broadcast — every subscriber (including the originator) reads
     /// state from that single channel rather than racing two copies.
     HistoryAcknowledged,
     /// Reply to `GetMetrics`. Aligned to the same projection that
-    /// `Subscribed.history` uses — `metrics[i]` describes the same
+    /// `Subscribed.entries` uses — `metrics[i]` describes the same
     /// `HistoricalMessage` the UI is rendering at index `i`.
     Metrics(Vec<MessageMeta>),
     /// Reply to `ListSubAgents`. Sorted ascending by numeric id so the
@@ -268,6 +270,16 @@ pub enum HistoricalMessage {
     Summary { text: String },
 }
 
+/// One row of the projected scrollback, paired with its metrics. The
+/// engine emits `Vec<HistoricalEntry>` on `TranscriptReplaced` and in
+/// `ChatOk::Subscribed` so subscribers never have to align two parallel
+/// vecs by index.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoricalEntry {
+    pub message: HistoricalMessage,
+    pub meta: MessageMeta,
+}
+
 /// Result of a tool call. Two variants that carry the result/error text
 /// directly — replaces the older `(ok: bool, text: String)` pair where
 /// the meaning of `text` flipped on `ok`.
@@ -320,15 +332,13 @@ pub enum ChatEvent {
     MessageFinished { turn_id: TurnId, reason: FinishReason },
     /// Pushed when `SessionState` mutates so subscribers can rerender.
     StateChanged(SessionState),
-    /// Pushed after `EditMessage`/`DeleteMessage`/`DeleteFromHere`
-    /// applies, so every connected subscriber rebuilds its scrollback
-    /// from the canonical projected history.
-    HistoryReplaced(Vec<HistoricalMessage>),
-    /// Pushed alongside `HistoryReplaced` (or after a turn finishes) so
-    /// subscribers can rerender per-message footers (timestamp, TTFT,
-    /// duration, token counts). Length matches the most-recent
-    /// `HistoryReplaced` entry-for-entry.
-    MetricsReplaced(Vec<MessageMeta>),
+    /// Pushed after any mutation, turn boundary, or compaction so every
+    /// connected subscriber rebuilds its scrollback from the canonical
+    /// projected transcript. Each entry pairs a projected message with
+    /// its metrics atomically — the previous `HistoryReplaced` +
+    /// `MetricsReplaced` pair raced on the wire because subscribers
+    /// indexed two parallel vecs positionally.
+    TranscriptReplaced(Vec<HistoricalEntry>),
     /// Live sub-agent registry snapshot. Emitted at turn end and on
     /// every terminal sub-agent transition; the UI panel rebinds its
     /// list straight from the payload (no per-id diffing required).
@@ -336,7 +346,7 @@ pub enum ChatEvent {
     /// One sub-agent's transcript was extended (or rewound, in the
     /// terminal-stamp case). Carries the full projected history — the
     /// UI replaces what it has rather than diffing, matching the
-    /// `HistoryReplaced` convention. Open child views subscribe to this
+    /// `TranscriptReplaced` convention. Open child views subscribe to this
     /// keyed by `id` and ignore deltas for other ids.
     SubAgentTranscriptUpdated {
         id: String,
@@ -491,7 +501,7 @@ mod tests {
                 "ChatResponse::Ok(Subscribed{empty})",
                 encode::<ChatResponse>(&Ok(ChatOk::Subscribed {
                     state: SessionState::default(),
-                    history: vec![],
+                    entries: vec![],
                 }))
                 .unwrap(),
             ),
@@ -502,7 +512,10 @@ mod tests {
                         persona: Some("alice".into()),
                         model_override: None,
                     },
-                    history: vec![HistoricalMessage::User("hi".into())],
+                    entries: vec![HistoricalEntry {
+                        message: HistoricalMessage::User("hi".into()),
+                        meta: MessageMeta::User { timestamp: Some("T".into()) },
+                    }],
                 }))
                 .unwrap(),
             ),
@@ -523,8 +536,8 @@ mod tests {
                 encode(&ChatRequest::DeleteFromHere { index: 1 }).unwrap(),
             ),
             (
-                "ChatEvent::HistoryReplaced(empty)",
-                encode(&ChatEvent::HistoryReplaced(vec![])).unwrap(),
+                "ChatEvent::TranscriptReplaced(empty)",
+                encode(&ChatEvent::TranscriptReplaced(vec![])).unwrap(),
             ),
             (
                 "ChatResponse::Ok(HistoryAcknowledged)",
@@ -541,10 +554,6 @@ mod tests {
                     timestamp: Some("T".into()),
                 }])))
                 .unwrap(),
-            ),
-            (
-                "ChatEvent::MetricsReplaced(empty)",
-                encode(&ChatEvent::MetricsReplaced(vec![])).unwrap(),
             ),
         ];
 
@@ -574,9 +583,11 @@ mod tests {
                     0x00, 0x00, // Ok, Subscribed
                     0x01, 0x05, b'a', b'l', b'i', b'c', b'e', // Some("alice")
                     0x00, // model_override None
-                    0x01, // history len 1
-                    0x00, // role User
+                    0x01, // entries len 1
+                    0x00, // HistoricalMessage::User
                     0x02, b'h', b'i', // text "hi"
+                    0x00, // MessageMeta::User
+                    0x01, 0x01, b'T', // timestamp Some("T")
                 ],
             ),
             ("ChatResponse::Err(NoTurnInFlight)", &[0x01, 0x00]),
@@ -586,7 +597,7 @@ mod tests {
             ),
             ("ChatRequest::DeleteMessage{2}", &[0x08, 0x02]),
             ("ChatRequest::DeleteFromHere{1}", &[0x09, 0x01]),
-            ("ChatEvent::HistoryReplaced(empty)", &[0x06, 0x00]),
+            ("ChatEvent::TranscriptReplaced(empty)", &[0x06, 0x00]),
             ("ChatResponse::Ok(HistoryAcknowledged)", &[0x00, 0x06]),
             ("ChatRequest::GetMetrics", &[0x0a]),
             ("ChatResponse::Ok(Metrics(empty))", &[0x00, 0x07, 0x00]),
@@ -599,7 +610,6 @@ mod tests {
                     0x01, 0x01, b'T', // timestamp = Some("T")
                 ],
             ),
-            ("ChatEvent::MetricsReplaced(empty)", &[0x07, 0x00]),
         ];
 
         assert_eq!(cases.len(), expected.len());
