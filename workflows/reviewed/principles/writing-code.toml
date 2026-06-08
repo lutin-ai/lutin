@@ -1,0 +1,23 @@
+title = "Writing code"
+persona = "reviewer"
+priority = 50
+condition = """
+The agent is creating or modifying source code via this tool call (not docs,
+plain config, or read-only inspection).
+
+NOT met (skip) for trivial mechanical edits that carry no design decision:
+adding or removing an import, or fixing a simple syntax error (a typo, a missing
+bracket/semicolon/comma). For anything that adds or changes program logic, the
+condition IS met.
+"""
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+description = """
+This is a grouping principle. It does not judge the action itself — it only
+decides whether we are in a code-writing situation. If the pending write/edit
+introduces or changes program logic, the condition is met and the
+sub-principles (secrets, error handling, message quality) are checked.
+
+Treat pure documentation, comments-only edits, or data/config files that carry
+no logic as NOT met.
+"""

@@ -119,6 +119,7 @@ pub(super) async fn run_plan_stage(agent: &mut Agent, step_id: StepId) -> Result
             text: response.text.clone(),
             tool_calls: tool_calls.clone(),
             thinking: response.thinking.clone(),
+            thinking_signature: response.thinking_signature.clone(),
         });
 
         let Some(call) = tool_calls.first() else {

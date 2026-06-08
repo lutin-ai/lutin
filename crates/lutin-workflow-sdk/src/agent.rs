@@ -146,12 +146,17 @@ pub fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), Build
         .or_else(|| persona.model.clone())
         .ok_or_else(|| BuildError::PersonaMissingModel(persona.name.clone()))?;
 
-    // ReasoningParams isn't re-exported from lutin-agent-sdk, so the
-    // effort/max-tokens knobs on Persona aren't plumbed through yet —
-    // only `thinking_enabled` is.
     let sampling = SamplingParams {
         temperature: persona.temperature,
         thinking_enabled: persona.thinking_enabled,
+        reasoning: Some(lutin_agent_sdk::ReasoningParams {
+            effort: match persona.reasoning_effort {
+                lutin_entities::ReasoningEffort::Low => lutin_llm::ReasoningEffort::Low,
+                lutin_entities::ReasoningEffort::Medium => lutin_llm::ReasoningEffort::Medium,
+                lutin_entities::ReasoningEffort::High => lutin_llm::ReasoningEffort::High,
+            },
+            max_tokens: persona.reasoning_max_tokens,
+        }),
         penalties: persona
             .presence_penalty
             .map(|presence| lutin_agent_sdk::PenaltyParams {
@@ -202,6 +207,36 @@ pub fn build_inputs(args: BuildArgs<'_>) -> Result<(AgentConfig, Toolbox), Build
     Ok((config, toolbox))
 }
 
+/// Resolve OAuth credentials: the CP-brokered access-token file when present
+/// (the only option inside session containers, where `/global` is RO and
+/// there is no keyring), falling back to the OS keyring for host-run
+/// workflows that logged in via `login_interactive`.
+fn load_oauth_store(provider_name: &str) -> Result<OAuthCredentialStore, BuildError> {
+    let not_logged_in = || BuildError::ProviderMisconfigured {
+        name: provider_name.to_string(),
+        reason: "anthropic oauth: not logged in — open Settings → Providers and log in".into(),
+    };
+    if let Ok(global) = std::env::var("LUTIN_GLOBAL_CONFIG_DIR") {
+        let path = lutin_llm::anthropic::brokered_token_path(std::path::Path::new(&global));
+        if path.is_file() {
+            let store = OAuthCredentialStore::load_brokered(path).map_err(|e| {
+                BuildError::ProviderMisconfigured {
+                    name: provider_name.to_string(),
+                    reason: format!("oauth broker token: {e}"),
+                }
+            })?;
+            if store.is_authenticated() {
+                return Ok(store);
+            }
+        }
+    }
+    match OAuthCredentialStore::load() {
+        Ok(store) if store.is_authenticated() => Ok(store),
+        Ok(_) => Err(not_logged_in()),
+        Err(_) => Err(not_logged_in()),
+    }
+}
+
 /// Construct a provider from one [`ProviderConfig`] entry. Resolves the
 /// `(api_key, api_key_env, use_oauth)` tri-state once at the boundary.
 pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, BuildError> {
@@ -246,13 +281,7 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, Buil
         ProviderKind::Anthropic => {
             let auth = match &auth {
                 ResolvedAuth::OAuth => {
-                    let store = OAuthCredentialStore::load().map_err(|e| {
-                        BuildError::ProviderMisconfigured {
-                            name: cfg.name.clone(),
-                            reason: format!("oauth load failed: {e}"),
-                        }
-                    })?;
-                    AnthropicAuth::OAuthSubscription(store)
+                    AnthropicAuth::OAuthSubscription(load_oauth_store(&cfg.name)?)
                 }
                 ResolvedAuth::Inline(k) => AnthropicAuth::ApiKey(k.clone()),
                 ResolvedAuth::FromEnv(var) => {

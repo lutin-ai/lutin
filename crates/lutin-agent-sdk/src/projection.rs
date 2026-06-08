@@ -69,6 +69,7 @@ mod tests {
             text: s.into(),
             tool_calls: Vec::new(),
             thinking: None,
+            thinking_signature: None,
         }
     }
     fn system(s: &str) -> Message {
@@ -143,6 +144,7 @@ mod tests {
                     arguments: serde_json::Value::Null,
                 }],
                 thinking: None,
+                thinking_signature: None,
             },
             Message::ToolResult(lutin_llm::ToolResultContent {
                 call_id: lutin_llm::CallId::from("c1"),

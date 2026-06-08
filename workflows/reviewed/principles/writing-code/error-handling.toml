@@ -1,0 +1,41 @@
+title = "Error handling"
+persona = "reviewer"
+condition = "The code performs operations that can fail (I/O, parsing, network, subprocess, fallible calls), catches or handles errors, defines error types or messages, or performs operations that may be retried or replayed."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 10
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Errors as values
+Return errors as data (Result/Either/error returns) where the language supports
+it; reserve panics/exceptions for true bugs and unrecoverable conditions. A
+signature should reveal that it can fail. Define a domain error type that
+enumerates real failure modes rather than a string or generic Error; convert
+library exceptions to typed errors at the boundary. (In exception-first
+languages — Python/Java/C#/Ruby — use exceptions idiomatically, but still type
+the failures that matter.)
+
+## Catch only what you can handle
+Default action on an error is to propagate. Catch only when you have a specific
+recovery (retry, fallback, default, deliberate log-and-continue) and name the
+specific error type — never swallow (`Err(_) => ()`, catch-and-log-as-success),
+which hides the failure from the caller. The one place a broad catch belongs is
+the top of a request handler, job runner, or main loop.
+
+## Human-readable messages
+An error message must tell the reader what failed, why, and what to do. FAIL on
+empty/generic messages ("Error", "Invalid input"), missing identifiers (which
+path/field/host), raw internal symbols the reader can't act on, or a missing
+obvious next-step. Never put a secret in a message. Wrap with context as it
+propagates rather than rethrowing opaquely.
+
+## Idempotency for retried ops
+Anything retriable — HTTP handlers, queue consumers, webhook receivers, jobs,
+outbound network writes — must be safe to run more than once on the same input:
+idempotency keys, upsert/set-state over insert/increment, and the
+"already happened?" check before the side effect, not after. Read-only
+operations and true one-shot local operations (a hand-run migration, a CLI
+invocation) are exempt.
+'''

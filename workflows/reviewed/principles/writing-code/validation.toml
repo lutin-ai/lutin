@@ -1,0 +1,33 @@
+title = "Validation"
+persona = "reviewer"
+condition = "The code handles or consumes input that crosses a trust or system boundary (user input, network, request bodies/headers/query, files, env vars, subprocess output, external APIs, LLM output)."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 12
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Validate at boundaries, trust internally
+Check inputs once, at the edge (HTTP handlers, queue consumers, file/CLI parsers,
+FFI, DB/external reads), parsing into a strict domain type and rejecting early with
+a clear error. Inside business logic, take domain types and skip redundant
+defensive checks (`if x is None`, `if !s.is_empty()`) for invariants the type
+already guarantees — the fix for distrust is a trustworthy boundary, not scattered
+asserts. Use `debug_assert!` only for invariant *bugs*, not input validation.
+Exempt: weakly-typed internal subsystems called from many places (treat as their
+own boundary) and defense-in-depth for auth/authz/crypto.
+
+## Validate untrusted input at the boundary
+This is the security angle: a raw untrusted string may be a SQL fragment, path
+traversal, script tag, or `${jndi:…}`. FAIL when raw input (HTTP body/param/header,
+env var, file, subprocess output, LLM response) flows into a sensitive sink (SQL,
+shell, filesystem path, redirect URL, HTML, log format, deserializer) without a
+parse step; when a handler/consumer types its payload as `String`/`Value`/`dict`/
+`any` instead of a typed schema; when user segments are concatenated into a path
+without rejecting `..`/absolute/null bytes; or when LLM tool-call args pass straight
+to a privileged op unvalidated. PASS when input is parsed into a typed shape at the
+boundary and only the typed form flows downstream, or the sink is intrinsically
+safe (prepared-statement param, argv array, auto-escaping HTML library). Code
+reading values it just wrote in-process is not a trust boundary.
+'''

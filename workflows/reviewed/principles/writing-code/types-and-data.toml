@@ -1,0 +1,63 @@
+title = "Types And Data"
+persona = "reviewer"
+condition = "The code defines or manipulates data types, enums/states, domain values, nullable/optional fields, data layout/schemas, or stores/derives state that could live in more than one place."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 10
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Make illegal states unrepresentable
+Encode invariants in the type system so the compiler rejects bad states. Use sum
+types for "one of N exclusive shapes" (put a field that only exists when `Pending`
+*inside* the `Pending` variant), non-empty types when "at least one" is required,
+and smart constructors as the only way to build the type. Replace "comment says
+this field is only set when..." with structure. Exempt: invariants that aren't
+load-bearing (don't split one concept into three structs), and raw boundary
+representations (JSON/DB rows) that validate then convert inward.
+
+## Newtype your domain primitives
+Wrap domain-meaningful values in distinct types: `UserId(u64)`, `Email(String)`,
+`Cents` — not raw `u64`/`String`. This prevents argument-swap bugs
+(`transfer(from: AccountId, to: AccountId, amount: Cents)`), localizes invariants
+and formatting, and aids grep/refactor. Construct through a fallible constructor
+when there are invariants; derive only the traits you need. Exempt: local,
+short-lived values inside one function — the win is at API/module boundaries.
+
+## Avoid nullable / optional sprawl
+`Option<Option<T>>`, `T | null | undefined`, and structs of many independent
+optionals model the author's uncertainty, not the domain. Group fields that must
+be set together into one `Option<UserDetails>`; turn `Option<Option<T>>` and
+nullable booleans into named enums of the real states; collapse `T | null | ""`
+to one canonical form at parse time. Exempt: genuinely independent optionals
+(optional bio/avatar/pronouns) and wire/PATCH payloads — but parse those into a
+stricter internal type promptly.
+
+## Parse, don't validate
+At the boundary, convert untrusted input into a strict typed value once
+(`parse_email(s) -> Result<Email, _>`, not `is_valid_email(s) -> bool`); after
+that, trust the type rather than re-checking. Internal functions take `Email`, not
+`String`; use smart constructors so the only way to build is through the parse
+step; replace deep `assert!`/`require()` with a stricter boundary type. Exempt:
+one-off throwaway predicates that produce no value ("allowed right now?") and tiny
+invariants that don't recur.
+
+## Single source of truth
+Each piece of data has exactly one owner; everything else is a derivation, cache,
+or reconcilable copy. FAIL two places that drift (email in `users` *and*
+`subscriptions`), caches treated as authoritative, an editable derived value
+(`order.total` UPDATEd without touching line items), or two ID systems for one
+entity. Derived values compute on read or rebuild one-directionally (source →
+derived). Exempt: deliberate denormalization/replication with an explicitly owned
+refresh path, and multi-source data (local vs SSO) with a written precedence rule.
+
+## Design data layout first
+Performance follows from how data is shaped, stored, and accessed; pick the layout
+before optimizing code on top. Group what's iterated/allocated/lifetimed together;
+prefer struct-of-arrays when a hot loop reads only some fields (array-of-structs
+when it reads all); avoid pointer-chasing (`Vec<T>` over `Vec<Box<T>>`); reserve
+capacity when size is known; use index handles into an arena over pointers.
+Exempt: cold/one-shot paths, and micro-optimizations (`#[repr(packed)]`, manual
+SIMD) without a measured need.
+'''

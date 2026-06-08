@@ -25,16 +25,14 @@ pub struct PersonaInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewVerdict {
     Pass,
-    Fix { feedback: String },
-    Rethink { feedback: String },
+    Fail { feedback: String },
 }
 
 impl From<&Verdict> for ReviewVerdict {
     fn from(v: &Verdict) -> Self {
         match v {
             Verdict::Pass => ReviewVerdict::Pass,
-            Verdict::Fix(f) => ReviewVerdict::Fix { feedback: f.clone() },
-            Verdict::Rethink(f) => ReviewVerdict::Rethink { feedback: f.clone() },
+            Verdict::Fail(f) => ReviewVerdict::Fail { feedback: f.clone() },
         }
     }
 }
@@ -120,6 +118,22 @@ pub enum ChatEvent {
     },
     StateChanged { state: SessionState },
     TurnFinished { turn_id: TurnId, reason: FinishReason },
+    /// A trusted principle (passed `recency_points` times in a row for
+    /// this tool) was skipped this step instead of re-reviewed. Live-only;
+    /// never part of the persisted transcript.
+    PrincipleSkipped {
+        step_id: u64,
+        attempt: u32,
+        principle: String,
+        streak: u32,
+    },
+    /// The model's reasoning for an attempt, emitted before it acts.
+    /// Live-only; never part of the persisted transcript.
+    Thinking {
+        step_id: u64,
+        attempt: u32,
+        text: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -147,11 +161,21 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_principle_skipped() {
+        let e = ChatEvent::PrincipleSkipped {
+            step_id: 4,
+            attempt: 1,
+            principle: "naming-and-readability".into(),
+            streak: 7,
+        };
+        assert_eq!(decode::<ChatEvent>(&encode(&e).unwrap()).unwrap(), e);
+    }
+
+    #[test]
     fn roundtrip_verdict_variants() {
         for v in [
             ReviewVerdict::Pass,
-            ReviewVerdict::Fix { feedback: "f".into() },
-            ReviewVerdict::Rethink { feedback: "r".into() },
+            ReviewVerdict::Fail { feedback: "f".into() },
         ] {
             assert_eq!(decode::<ReviewVerdict>(&encode(&v).unwrap()).unwrap(), v);
         }

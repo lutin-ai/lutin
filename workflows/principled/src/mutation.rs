@@ -150,7 +150,7 @@ fn projected_slots(entries: &[Entry]) -> impl Iterator<Item = (usize, ProjectedS
         )
         .then_some(ProjectedSlot::SubAgent);
         let (thinking, text, tools_count) = match &e.message {
-            Message::Assistant { text, thinking, tool_calls } => (
+            Message::Assistant { text, thinking, tool_calls, .. } => (
                 thinking
                     .as_deref()
                     .is_some_and(|s| !s.is_empty())
@@ -189,6 +189,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: calls,
+            thinking_signature: None,
         }
     }
 

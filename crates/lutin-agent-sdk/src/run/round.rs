@@ -190,6 +190,7 @@ pub async fn run_round(input: RoundInput<'_>) -> Result<RoundOutput, RoundError>
         text,
         tool_calls: tool_calls.clone(),
         thinking,
+        thinking_signature: None,
     };
     let _ = events.send(AgentEvent::AssistantMessage(assistant.clone()));
 

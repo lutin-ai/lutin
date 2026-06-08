@@ -24,6 +24,7 @@ lutin-control-protocol = { path = "../crates/lutin-control-protocol" }
 lutin-tts = { path = "../crates/lutin-tts" }
 lutin-stt = { path = "../crates/lutin-stt" }
 lutin-storage = { path = "../crates/lutin-storage" }
+lutin-llm = { path = "../crates/lutin-llm" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process", "fs", "signal"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"

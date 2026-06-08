@@ -16,8 +16,9 @@ pub use messages::{
 };
 pub use oauth::{begin_login, login_interactive, PendingLogin, CLIENT_ID};
 pub use store::{
-    CredBackend, Credentials, EncryptedFileBackend, KeyringBackend, MemoryBackend,
-    OAuthCredentialStore,
+    brokered_token_path, BrokeredFileBackend, CredBackend, Credentials, EncryptedFileBackend,
+    KeyringBackend, MemoryBackend, OAuthCredentialStore, PlainFileBackend,
+    BROKERED_TOKEN_REL_PATH,
 };
 
 #[derive(Clone)]

@@ -1,0 +1,25 @@
+title = "Do not read more than 5 files in a row"
+persona = "reviewer"
+context = ["tool_call", "prior_steps"]
+applies_to = ["read"]
+description = '''
+Do not read more than 5 files in a row, try to do small chunks of work.
+
+Why:
+- Long uninterrupted read streaks mean the agent is hoarding context
+  instead of acting on it; older reads get evicted before they are
+  used, so the streak feeds on itself.
+- Small read-act-read cycles keep the working set fresh and make each
+  edit grounded in recently verified file state.
+
+How to apply:
+- Look at the recent steps: if the last 5+ tool calls are all `read`
+  with no intervening edit, write, shell, or reply, fail this read.
+- Tell the agent to act on what it has already read (make an edit,
+  run a check, or report findings) before reading further.
+
+Counter-cases (pass without complaint):
+- Fewer than 5 consecutive reads.
+- A read streak broken by any non-read action.
+- Re-reading a file just modified (e.g. to verify an edit).
+'''

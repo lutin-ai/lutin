@@ -1,0 +1,52 @@
+title = "Change Hygiene"
+persona = "reviewer"
+condition = "Editing code in a way that can be judged as a change: its size and scope, dead/unused code left behind, mixing refactor with behavior change, added/updated dependencies, or tests defined or modified."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 8
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Prefer small, focused edits
+A single Edit/Write should be small — a few hundred lines at most. Big drops are
+unreviewable, fail large, and usually smuggle in two unrelated changes; split
+into multiple edits, landing structural moves apart from content and additions
+apart from deletions. Exempt: generated/templated content (lockfiles, snapshots,
+fixtures, vendored code), a genuinely cohesive new unit, or uniform mechanical
+search-and-replace.
+
+## Separate refactors from behavior changes
+One edit changes the shape of code OR its behavior, never both — mixed diffs are
+unreviewable and un-bisectable. Refactor first (rename/move/extract/inline as a
+no-op), then change behavior against the new shape. Don't fix a bug "while you're
+in there"; land it separately. Exempt: a rename forced by the behavior change
+where splitting leaves an incoherent intermediate state, trivial one-line
+extractions, and regenerated code.
+
+## Delete dead code immediately
+Remove commented-out blocks, unused exports/functions/params, and unreachable
+branches the moment you notice them — version control remembers. Convert
+"impossible" branches to an explicit `unreachable!()`/assert that documents the
+invariant. Don't leave breadcrumbs, `_unused` renames, or "for compatibility"
+types nothing uses. Exempt: code behind a feature flag mid-rollout (pending, not
+dead) and public API with external consumers (deprecate, then remove on schedule).
+
+## Add dependencies deliberately
+A new dep is a forever supply-chain commitment; the bar is "better than 20 lines
+of local code", not "it exists". FAIL a typosquat or unmaintained fork
+(`requets`, `colour`); a loose pin (`*`, `latest`, unbounded `>=`, branch ref for
+a git dep) in a reproducible manifest; a heavyweight pull for a small task; or a
+dep duplicating the stdlib or an existing dep (`once_cell` post-`LazyLock`). PASS
+a widely-used, maintained dep pinned to the project's convention with a committed
+lockfile, or one that removes/lightens an existing dep.
+
+## Test behavior, not implementation
+Assert what the code does — outputs, returned values, effects at the boundary (DB
+row, HTTP response, file written) — not which helpers it calls or in what order.
+Prefer real deps (in-memory DBs, fakes) over mocks; reserve mocks for genuinely
+external/slow services. A failing test should point at a behavior a user cares
+about, not "the cache was called 3 times not 2". Exempt: pure-function unit tests
+(the unit's behavior) and effect-driven code where the call is the behavior
+(a logger, a metrics sink).
+'''

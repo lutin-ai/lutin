@@ -93,6 +93,7 @@ pub(super) async fn run_summarize_stage(agent: &mut Agent, step_id: StepId) -> R
             text: response.text.clone(),
             tool_calls: tool_calls.clone(),
             thinking: response.thinking.clone(),
+            thinking_signature: response.thinking_signature.clone(),
         });
 
         let Some(call) = tool_calls.first() else {
@@ -144,6 +145,7 @@ pub(super) async fn run_summarize_stage(agent: &mut Agent, step_id: StepId) -> R
             arguments: plan.args.clone(),
         }],
         thinking: None,
+        thinking_signature: None,
     });
     agent.messages.push(Message::ToolResult(ToolResultContent {
         call_id: step_call_id.clone(),

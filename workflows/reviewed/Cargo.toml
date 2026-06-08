@@ -20,6 +20,7 @@ lutin-entities = { path = "../../crates/lutin-entities" }
 lutin-ids = { path = "../../crates/lutin-ids" }
 lutin-keypair = { path = "../../crates/lutin-keypair" }
 lutin-llm = { path = "../../crates/lutin-llm" }
+lutin-memory = { path = "../../crates/lutin-memory", default-features = false, features = ["llm-summarizer"] }
 lutin-protocol = { path = "../../crates/lutin-protocol" }
 lutin-settings = { path = "../../crates/lutin-settings" }
 lutin-storage = { path = "../../crates/lutin-storage" }

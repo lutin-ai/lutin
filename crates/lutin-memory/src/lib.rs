@@ -3,6 +3,7 @@ pub mod agent;
 pub mod event;
 #[cfg(feature = "llm-summarizer")]
 pub mod llm_summarizer;
+#[cfg(feature = "memory-agent")]
 pub mod python;
 pub mod schema;
 pub mod store;
@@ -145,6 +146,7 @@ impl Memory {
         self.store.query_sql(sql)
     }
 
+    #[cfg(feature = "memory-agent")]
     pub fn run_python(&self, code: &str) -> Result<String> {
         python::run_script(self.store.clone(), code)
     }

@@ -63,6 +63,11 @@ pub enum Message {
         text: String,
         tool_calls: Vec<ToolCall>,
         thinking: Option<String>,
+        /// Provider attestation for `thinking` (Anthropic's encrypted
+        /// `signature`). Required to replay thinking blocks in tool-use
+        /// loops; without it the block is dropped from replay instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
     },
     ToolResult(ToolResultContent),
     /// Standalone image content — emitted after a tool result that produced
@@ -156,6 +161,9 @@ pub struct CompletionResponse {
     pub text: String,
     /// Reasoning / extended-thinking content, if the provider returned any.
     pub thinking: Option<String>,
+    /// Provider attestation for `thinking` (Anthropic only). `None` when the
+    /// response carried no thinking or more than one thinking block.
+    pub thinking_signature: Option<String>,
     /// Tool calls made by the assistant (empty if none).
     pub tool_calls: Vec<ToolCall>,
     pub model: ModelId,

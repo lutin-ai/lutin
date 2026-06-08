@@ -36,6 +36,8 @@ pub struct RunnerCtx {
     pub project_config_dir: PathBuf,
     pub resolver: Arc<Resolver>,
     pub events: broadcast::Sender<ChatEvent>,
+    pub memory: Option<Arc<lutin_memory::Memory>>,
+    pub chat_id: String,
 }
 
 pub async fn run_agent_loop(ctx: RunnerCtx, mut rx: mpsc::UnboundedReceiver<AgentCmd>) {
@@ -103,6 +105,12 @@ async fn handle_send(ctx: &RunnerCtx, text: String, turn: TurnId) {
 
 async fn run_turn(ctx: &RunnerCtx, user_text: String) -> Result<(), String> {
     let mut agent = build_agent(ctx).map_err(|e| format!("build agent: {e}"))?;
+    crate::memory::record(
+        ctx.memory.as_ref(),
+        &ctx.chat_id,
+        lutin_memory::EventType::UserMessage,
+        user_text.clone(),
+    );
     agent.messages.push(Message::User(user_text));
 
     let outcome = runtime::run_turn(&mut agent, &PRINCIPLES)
@@ -111,6 +119,7 @@ async fn run_turn(ctx: &RunnerCtx, user_text: String) -> Result<(), String> {
     if let Err(e) = store::save(&agent) {
         warn!(error = %e, "reviewed: persist state failed");
     }
+    crate::recency::save(&agent.state_dir, &agent.recency.lock().expect("recency lock"));
     match outcome {
         TurnOutcome::Yield { reply: _ } => Ok(()),
     }
@@ -134,24 +143,38 @@ fn build_agent(ctx: &RunnerCtx) -> Result<Agent, String> {
         })?
         .to_path_buf();
 
+    let mut extra_tools = match &ctx.memory {
+        Some(memory) => crate::memory::tools(memory.clone()),
+        None => Vec::new(),
+    };
+    extra_tools.extend(crate::tasks::tools(ctx.state_dir.clone()));
     let args = BuildArgs {
         persona: &persona,
         settings: &settings,
-        sandbox_root,
+        sandbox_root: sandbox_root.clone(),
         model_override: None,
-        extra_tools: Vec::new(),
+        extra_tools,
         prompt_extras: PromptExtras::default(),
         disable_streaming: true,
     };
     let (config, toolbox) = build_inputs(args).map_err(map_build_error)?;
+
+    let mut system = config.system.clone();
+    system.push_str(&crate::tasks::prompt_block(&ctx.state_dir));
+    system.push_str(
+        "\n\nMake small, incremental edits: prefer several write/edit calls of at most 50 \
+        lines each over one large write. Calls exceeding 50 lines are rejected before review.",
+    );
 
     let saved = store::load(&ctx.state_dir).map_err(|e| format!("load state: {e}"))?;
     let mut messages = match saved {
         Some(s) => s.messages,
         None => Vec::new(),
     };
-    if messages.is_empty() && !config.system.is_empty() {
-        messages.push(Message::System(config.system.clone()));
+    if let Some(Message::System(s)) = messages.first_mut() {
+        s.clone_from(&system);
+    } else if !system.is_empty() {
+        messages.insert(0, Message::System(system));
     }
 
     // Match scratchpad: Qwen-family models loop with greedy decoding,
@@ -165,11 +188,21 @@ fn build_agent(ctx: &RunnerCtx) -> Result<Agent, String> {
         model: config.model,
         temperature,
         presence_penalty,
+        thinking_enabled: config.sampling.thinking_enabled,
+        reasoning: config.sampling.reasoning.as_ref().map(|r| lutin_llm::Reasoning {
+            effort: r.effort,
+            max_tokens: r.max_tokens,
+        }),
         messages,
         toolbox,
         state_dir: ctx.state_dir.clone(),
+        sandbox_root,
         resolver: ctx.resolver.clone(),
         events: ctx.events.clone(),
+        memory: ctx.memory.clone(),
+        chat_id: ctx.chat_id.clone(),
+        recency: std::sync::Mutex::new(crate::recency::load(&ctx.state_dir)),
+        reviewer_providers: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

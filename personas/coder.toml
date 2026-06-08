@@ -11,11 +11,13 @@ Current date/time: %datetime% (%day%)
 """
 
 default_skills = []
-model = "Qwen/Qwen3.6-35B-A3B-FP8"
-provider = "open-ai-compat"
+#model = "Qwen/Qwen3.6-27B-FP8"
+#provider = "open-ai-compat"
+model = "claude-opus-4-8"
+provider = "anthropic"
 temperature = 0.6
 presence_penalty = 1.5
-thinking_enabled = false
+thinking_enabled = true
 reasoning_effort = "low"
 
 tool_filter_mode = "blacklist"

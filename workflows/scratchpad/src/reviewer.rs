@@ -59,6 +59,7 @@ pub async fn review_principle(
             text: response.text.clone(),
             tool_calls: response.tool_calls.clone(),
             thinking: response.thinking.clone(),
+            thinking_signature: response.thinking_signature.clone(),
         });
         messages.push(Message::User(
             "You did not call `submit_verdict`. Call it now with your verdict.".into(),

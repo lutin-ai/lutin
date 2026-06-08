@@ -160,6 +160,7 @@ mod tests {
                 text: "hey".into(),
                 thinking: None,
                 tool_calls: Vec::new(),
+                thinking_signature: None,
             },
         ];
         let body = serde_json::to_vec_pretty(&legacy).unwrap();

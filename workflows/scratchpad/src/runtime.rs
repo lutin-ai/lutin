@@ -72,5 +72,6 @@ pub(crate) fn build_plan_description(plan: &Plan) -> Message {
         ),
         tool_calls: vec![],
         thinking: None,
+        thinking_signature: None,
     }
 }

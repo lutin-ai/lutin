@@ -175,6 +175,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: calls,
+            thinking_signature: None,
         }
     }
 

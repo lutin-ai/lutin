@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "./projects".into())
             .into(),
         global_config_dir,
+        data_dir,
     };
 
     let sup = Supervisor::spawn(signing, config);

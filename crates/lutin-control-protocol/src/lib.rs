@@ -334,6 +334,19 @@ pub enum Request {
     /// Tear down the stream. Subsequent `Speak`/`Cancel` against this
     /// id return `TtsStreamNotFound`.
     CloseTtsStream { stream_id: TtsStreamId },
+    /// Start an Anthropic subscription-OAuth login. CP generates the
+    /// PKCE challenge and replies with the authorize URL to open in the
+    /// user's browser; the pending verifier is held CP-side until
+    /// `CompleteAnthropicLogin` (a new `Begin` replaces it).
+    BeginAnthropicLogin,
+    /// Exchange the code the user pasted from the browser. On success
+    /// CP persists the credentials (host keyring) and starts mirroring
+    /// the access token to the brokered file engines read.
+    CompleteAnthropicLogin { code: String },
+    /// Whether Anthropic OAuth credentials are currently stored.
+    AnthropicOauthStatus,
+    /// Drop stored Anthropic OAuth credentials and the brokered file.
+    AnthropicLogout,
 }
 
 /// Opaque handle for a streaming TTS session. CP allocates these
@@ -733,6 +746,17 @@ pub enum ResponseOk {
     TtsCancelled,
     /// Reply to `CloseTtsStream`.
     TtsStreamClosed,
+    /// Reply to `BeginAnthropicLogin`.
+    AnthropicLoginStarted { auth_url: String },
+    /// Reply to `CompleteAnthropicLogin`.
+    AnthropicLoginCompleted { expires_at_ms: i64 },
+    /// Reply to `AnthropicOauthStatus`.
+    AnthropicOauth {
+        authenticated: bool,
+        expires_at_ms: Option<i64>,
+    },
+    /// Reply to `AnthropicLogout`.
+    AnthropicLoggedOut,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -786,6 +810,9 @@ pub enum ApiError {
     /// Wire-bound limits: too many open streams, text too long.
     #[error("tts limit exceeded: {0}")]
     TtsLimit(TtsLimit),
+    /// Anthropic OAuth login / token exchange / logout failure.
+    #[error("anthropic oauth: {0}")]
+    AnthropicOauth(String),
 }
 
 /// Specific limit a TTS request blew through. Same shape as

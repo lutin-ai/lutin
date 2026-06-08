@@ -18,8 +18,7 @@ export interface PersonaInfo {
 
 export type ReviewVerdict =
   | { kind: "pass" }
-  | { kind: "fix"; feedback: string }
-  | { kind: "rethink"; feedback: string };
+  | { kind: "fail"; feedback: string };
 
 export type Turn =
   | { kind: "user"; id: string; text: string }
@@ -88,7 +87,20 @@ export type ChatEvent =
       output: string;
     }
   | { kind: "stateChanged"; state: SessionState }
-  | { kind: "turnFinished"; turnId: TurnId; reason: FinishReason };
+  | { kind: "turnFinished"; turnId: TurnId; reason: FinishReason }
+  | {
+      kind: "principleSkipped";
+      stepId: bigint;
+      attempt: number;
+      principle: string;
+      streak: number;
+    }
+  | {
+      kind: "thinking";
+      stepId: bigint;
+      attempt: number;
+      text: string;
+    };
 
 // ─── helpers ──────────────────────────────────────────────────────────
 
@@ -120,9 +132,7 @@ function readReviewVerdict(r: pc.Reader): ReviewVerdict {
     case 0:
       return { kind: "pass" };
     case 1:
-      return { kind: "fix", feedback: pc.readString(r) };
-    case 2:
-      return { kind: "rethink", feedback: pc.readString(r) };
+      return { kind: "fail", feedback: pc.readString(r) };
     default:
       throw new Error(`postcard: invalid ReviewVerdict ${v}`);
   }
@@ -257,6 +267,21 @@ export function decodeChatEvent(bytes: Uint8Array): ChatEvent {
         kind: "turnFinished",
         turnId: pc.readU64(r),
         reason: readFinishReason(r),
+      };
+    case 7:
+      return {
+        kind: "principleSkipped",
+        stepId: pc.readU64(r),
+        attempt: pc.readU32(r),
+        principle: pc.readString(r),
+        streak: pc.readU32(r),
+      };
+    case 8:
+      return {
+        kind: "thinking",
+        stepId: pc.readU64(r),
+        attempt: pc.readU32(r),
+        text: pc.readString(r),
       };
     default:
       throw new Error(`postcard: invalid ChatEvent ${v}`);

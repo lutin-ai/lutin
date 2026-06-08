@@ -730,6 +730,141 @@ function ProviderCard({ provider, onChange, onRemove }: ProviderCardProps) {
           </label>
         )}
       </div>
+      {showOauth && provider.use_oauth && <AnthropicOauthSection />}
+    </div>
+  );
+}
+
+/* ───────── Anthropic OAuth login ───────── */
+
+type OauthStatus = { authenticated: boolean; expires_at_ms: number | null };
+
+function AnthropicOauthSection() {
+  const [status, setStatus] = useState<OauthStatus | null>(null);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () =>
+    cpSendOk("AnthropicOauthStatus")
+      .then((r) => {
+        if (typeof r === "object" && "AnthropicOauth" in r) setStatus(r.AnthropicOauth);
+      })
+      .catch((e) => setError(String(e)));
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const begin = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await cpSendOk("BeginAnthropicLogin");
+      if (typeof r === "object" && "AnthropicLoginStarted" in r) {
+        const url = r.AnthropicLoginStarted.auth_url;
+        setAuthUrl(url);
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        openUrl(url).catch(() => {/* user can copy the link instead */});
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const complete = async () => {
+    if (!code.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await cpSendOk({ CompleteAnthropicLogin: { code: code.trim() } });
+      setAuthUrl(null);
+      setCode("");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await cpSendOk("AnthropicLogout");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={styles.oauthSection}>
+      {status?.authenticated ? (
+        <div className={styles.oauthRow}>
+          <span className={styles.oauthStatus}>
+            Logged in with Claude subscription
+            {status.expires_at_ms
+              ? ` · token refreshes ${new Date(status.expires_at_ms).toLocaleTimeString()}`
+              : ""}
+          </span>
+          <button className={styles.addBtn} disabled={busy} onClick={logout}>
+            Log out
+          </button>
+        </div>
+      ) : authUrl == null ? (
+        <div className={styles.oauthRow}>
+          <span className={styles.oauthStatus}>Not logged in</span>
+          <button className={styles.addBtn} disabled={busy} onClick={begin}>
+            Log in with Claude
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className={styles.oauthRow}>
+            <span className={styles.oauthStatus}>
+              Authorize in the browser, then paste the code below.{" "}
+              <a href={authUrl} target="_blank" rel="noreferrer">
+                Open link manually
+              </a>
+            </span>
+          </div>
+          <div className={styles.oauthRow}>
+            <input
+              className={styles.input}
+              placeholder="Authorization code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && complete()}
+            />
+            <button
+              className={styles.addBtn}
+              disabled={busy || !code.trim()}
+              onClick={complete}
+            >
+              Complete login
+            </button>
+            <button
+              className={styles.addBtn}
+              disabled={busy}
+              onClick={() => {
+                setAuthUrl(null);
+                setCode("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+      {error && <div className={styles.error}>{error}</div>}
     </div>
   );
 }

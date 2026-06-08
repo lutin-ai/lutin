@@ -84,11 +84,21 @@ async fn main() -> Result<()> {
         env.global_config_dir.clone(),
         Some(env.project_config_dir.clone()),
     ));
+    let memory = reviewed::memory::open_session(
+        &resolver,
+        &env.project_config_dir,
+        &env.state_dir,
+    );
+    if memory.is_none() {
+        warn!("reviewed: episodic memory unavailable; recall tools and recording disabled");
+    }
     let runner_ctx = RunnerCtx {
         state_dir: env.state_dir.clone(),
         project_config_dir: env.project_config_dir.clone(),
         resolver: resolver.clone(),
         events: events.clone(),
+        memory,
+        chat_id: env.session.to_string(),
     };
     tokio::spawn(run_agent_loop(runner_ctx, cmd_rx));
 

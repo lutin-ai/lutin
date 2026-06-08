@@ -1,0 +1,53 @@
+title = "State and concurrency"
+persona = "reviewer"
+condition = "The code introduces or manages mutable state, shared state, global/module-level/ambient state, declares variables that could be immutable, or spawns/coordinates concurrent tasks or threads."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 10
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Avoid global mutable state
+Singletons, module-level mutables, ambient context, and "current X" globals make
+code hard to reason about, test, and refactor; they create invisible coupling and
+leak state between tests. Pass dependencies (config, clock, logger, DB pool,
+flags) explicitly; construct lifetime-spanning resources once at the top and
+thread them down. Truly-invariant read-only config in a `static`/`OnceLock` is
+fine, and logging/metrics/tracing infrastructure is acceptably global by design.
+
+## Prefer immutability by default
+Default to immutable bindings, fields, and data (`let` over `let mut`, `const`,
+`final`, `val`); make mutability a deliberate, local decision. Immutable values
+share, cache, compare, and compose with concurrency safely, and eliminate the
+"changed under me" bug class. Build values up and return them instead of
+construct-then-mutate. Exempt: hot loops where per-iteration allocation is
+measurably costly, builders/parsers, and I/O or ring buffers whose point is mutation.
+
+## Scope mutation tightly
+Where mutation is necessary, keep it local, brief, and contained — a `let mut` that
+lives three lines is trivial; one spanning a 200-line function is not. Build-then-
+freeze into an immutable binding (`let result = { let mut x = ...; x }`). Lock,
+mutate, drop the guard, then do other work; never hold a lock across an `.await`,
+I/O, or blocking call. Long-lived state machines that legitimately need durable
+mutable state should encapsulate it in an object/task that owns it.
+
+## Prefer message passing over shared mutable state
+For concurrency, default to channels and ownership transfer rather than locks
+around shared data: spawn a task per long-lived resource and talk to it via a
+channel (`mpsc`/`broadcast`/`oneshot`, Go channels, Erlang mailboxes), moving
+ownership into the message. Pair request/response with a one-shot reply channel.
+Before adding a `Mutex<T>`, ask if it can be a task that owns `T`. Read-mostly data
+(`RwLock`/arc-swap), channel-overhead-dominated hot paths, and small well-scoped
+mutexes are acceptable — this governs the default, not a prohibition.
+
+## Structured concurrency
+Every spawned task has an owner that joins it, cancels it, or hands it off — tasks
+must not outlive their scope by accident. A handle-less `spawn`/`go func`/thread is
+fire-and-forget: cancellation is impossible, errors and panics vanish, and leaks
+accumulate invisibly. Each spawn produces a handle (`JoinHandle`, `JoinSet`,
+`errgroup`, `TaskScope`); tie request-scoped work to the request via a
+`CancellationToken`/tracker, and give long-lived background tasks a top-level
+supervisor that shuts them down on exit. Exempt: true top-level daemons that own
+themselves, and flush-on-drop telemetry side-channels.
+'''

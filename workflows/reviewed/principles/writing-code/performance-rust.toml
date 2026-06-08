@@ -1,0 +1,58 @@
+title = "Performance (Rust / systems languages)"
+persona = "reviewer"
+priority = 200
+condition = "The code is in a systems language (Rust, C, C++) or on a performance-sensitive hot path: it uses locks/Arc/shared ownership, passes values that could be borrowed, passes or stores collections that could be slices/views, allocates data that could live on the stack, or uses a hash map where a Vec would suffice."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 8
+description = '''
+Review the change against this rubric. It applies only to systems-language code
+(Rust, C, C++) or measured hot paths — do not fire it on general/GC'd code. FAIL a
+genuine violation with a concrete fix; PASS if it honors these or none apply.
+
+## Avoid locks and Arc in Rust
+Treat `Arc<Mutex<T>>`/`Arc<RwLock<T>>` as a last resort, not a default — it pays at
+runtime (atomic refcount traffic, deadlocks, lock-order bugs, contention) for what
+single ownership gives free at compile time. Prefer passing `&mut T` down and
+returning owned values up, message passing for concurrency, and `OnceLock`/`&'static`
+for read-mostly config. Scope locks tightly and never hold one across `.await`
+(see clippy `await_holding_lock`). Genuinely shared state with no natural owner
+(connection pool, metrics aggregator) and library APIs requiring `Arc<dyn Trait>`
+at the boundary are acceptable.
+
+## Pass by reference, don't take ownership you don't need
+Default to borrowing arguments; take ownership only to store, move, or consume.
+Owning a parameter forces callers to clone or give up their value and spreads
+cloning up the call chain. Use `&T`/`const T&` for read-only, `&mut T`/`T&` for
+in-place mutation, by-value for small `Copy` types, and owned types only when
+consuming/storing. If you clone at every call site to feed a function, it wants a
+borrow. Builders/constructors and functions that spawn or store the value
+legitimately consume their inputs.
+
+## Prefer slices and views over owned collections
+Parameters and intermediate values should be the least-owning type that works:
+`&str` over `String`, `&[T]` over `Vec<T>`, `string_view`/`Span<T>`/`ReadOnlySpan<T>`
+over owned. A `&str` parameter accepts `String`, `&String`, `&str`, and literals for
+free; owned types in signatures pull allocations into callers. Accept borrowed when
+consuming, return owned when producing. `&Vec<T>`/`&String` in Rust signatures are
+almost always wrong — use `&[T]`/`&str`. Take the owned type when storing it in a
+struct or sending it across threads, and at FFI/trait-object boundaries.
+
+## Prefer stack over heap when lifetime is local
+If a value lives for the function call and isn't shared, keep it on the stack;
+reach for `Box`/`new`/`make_unique` only for heap semantics. Stack allocation is a
+register adjustment and cache-hot; heap allocation costs an allocator call and a
+later free plus lifetime obligations. Default to value types: `T` over `Box<T>`,
+`[T; N]`/`&[T]` over `Vec<T>` when bounded; reuse buffers across hot-loop iterations.
+Heap is correct for large (multi-KB) values, polymorphic trait objects, recursive
+data structures, and values that escape the frame.
+
+## Prefer Vec over HashMap in most cases
+Default to `Vec<T>` (or `Vec<(K, V)>`); reach for `HashMap` only with a measured need
+for keyed lookup at scale. For small N (often hundreds), a linear `iter().find(...)`
+beats hashing — no hashing, no pointer chasing, cache-friendly, and it preserves
+insertion order and serializes/diffs deterministically (HashMap's iteration order
+silently breaks snapshot tests). Prefer `Vec<(K, V)>` or `BTreeMap` for ordered keyed
+data. HashMap/`FxHashMap` is correct for large keyed collections with frequent
+random access, and HashSet for deduplicating large sets.
+'''

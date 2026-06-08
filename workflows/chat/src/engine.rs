@@ -1272,7 +1272,7 @@ fn projected_slots(entries: &[Entry]) -> impl Iterator<Item = (usize, ProjectedS
         )
         .then_some(ProjectedSlot::SubAgent);
         let (thinking, text, tools_count) = match &e.message {
-            Message::Assistant { text, thinking, tool_calls } => (
+            Message::Assistant { text, thinking, tool_calls, .. } => (
                 thinking
                     .as_deref()
                     .is_some_and(|s| !s.is_empty())
@@ -1983,7 +1983,7 @@ fn project_messages<'a>(
             lutin_llm::Message::Summary { text } => {
                 out.push(HistoricalMessage::Summary { text: text.clone() });
             }
-            lutin_llm::Message::Assistant { text, thinking, tool_calls } => {
+            lutin_llm::Message::Assistant { text, thinking, tool_calls, .. } => {
                 if let Some(t) = thinking
                     && !t.is_empty()
                 {
@@ -2164,7 +2164,7 @@ fn project_metrics(entries: &[Entry]) -> Vec<MessageMeta> {
             lutin_llm::Message::Summary { .. } => {
                 out.push(MessageMeta::Summary { timestamp: ts });
             }
-            lutin_llm::Message::Assistant { text, thinking, tool_calls } => {
+            lutin_llm::Message::Assistant { text, thinking, tool_calls, .. } => {
                 if thinking.as_deref().is_some_and(|s| !s.is_empty()) {
                     let s = entry.metrics.thinking.unwrap_or_default();
                     out.push(MessageMeta::Thinking {
@@ -2340,6 +2340,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: Vec::new(),
+            thinking_signature: None,
         }
     }
 
@@ -2348,6 +2349,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: calls,
+            thinking_signature: None,
         }
     }
 

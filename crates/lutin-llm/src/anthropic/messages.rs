@@ -251,7 +251,21 @@ struct WireRequest {
 struct ThinkingConfig {
     #[serde(rename = "type")]
     ty: &'static str,
-    budget_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<&'static str>,
+}
+
+/// Claude 4.6+ models take `thinking: {type: "adaptive"}`; Opus 4.7/4.8
+/// reject the manual `enabled` + `budget_tokens` form outright. Older
+/// models (4.5 and earlier, all Haiku) only support the manual form.
+fn supports_adaptive_thinking(model: &str) -> bool {
+    !(model.contains("haiku")
+        || model.contains("claude-3")
+        || model.contains("-4-5")
+        || model.contains("-4-1")
+        || model.contains("-4-0"))
 }
 
 #[derive(Serialize, Clone)]
@@ -284,6 +298,7 @@ enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        signature: String,
     },
     ToolUse {
         id: String,
@@ -332,6 +347,8 @@ enum RespBlock {
     },
     Thinking {
         thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
     },
     ToolUse {
         id: String,
@@ -411,14 +428,18 @@ fn build_wire(
                 text,
                 tool_calls,
                 thinking,
+                thinking_signature,
             } => {
                 let mut blocks = Vec::new();
-                // Skip empty thinking — replayed assistant turns may carry
-                // `Some("")` when reasoning was enabled but produced none.
-                if let Some(t) = thinking {
-                    if !t.is_empty() {
-                        blocks.push(ContentBlock::Thinking { thinking: t });
-                    }
+                // Replay thinking only with its signature — the API verifies
+                // it and rejects unsigned blocks. Unsigned thinking (other
+                // providers, old transcripts) is dropped from replay, which
+                // adaptive mode accepts.
+                if let Some(signature) = thinking_signature {
+                    blocks.push(ContentBlock::Thinking {
+                        thinking: thinking.unwrap_or_default(),
+                        signature,
+                    });
                 }
                 // Skip empty text — tool-only assistant turns have no visible
                 // text; an empty Text block would be rejected by the API.
@@ -528,10 +549,21 @@ fn build_wire(
         .map(|t| convert_tool(t, use_oauth))
         .collect();
 
+    // `display: "summarized"` is required on Opus 4.7/4.8, where it
+    // defaults to "omitted" and thinking blocks come back with empty text.
     let thinking = if thinking_enabled {
-        Some(ThinkingConfig {
-            ty: "enabled",
-            budget_tokens: reasoning_max_tokens.unwrap_or(4096),
+        Some(if supports_adaptive_thinking(model.as_str()) {
+            ThinkingConfig {
+                ty: "adaptive",
+                budget_tokens: None,
+                display: Some("summarized"),
+            }
+        } else {
+            ThinkingConfig {
+                ty: "enabled",
+                budget_tokens: Some(reasoning_max_tokens.unwrap_or(4096)),
+                display: None,
+            }
         })
     } else {
         None
@@ -547,7 +579,9 @@ fn build_wire(
 
     Ok(WireRequest {
         model: model.to_string(),
-        max_tokens: max_tokens.unwrap_or(4096),
+        // Thinking and text share the max_tokens budget, so give thinking
+        // requests headroom; the manual form also requires budget < max.
+        max_tokens: max_tokens.unwrap_or(if thinking_enabled { 16000 } else { 4096 }),
         messages: wire_messages,
         system: system_parts,
         tools,
@@ -638,6 +672,8 @@ async fn parse_response(resp: reqwest::Response) -> Result<WireResponse, LlmErro
 fn response_from_wire(resp: WireResponse, model: ModelId) -> CompletionResponse {
     let mut text = String::new();
     let mut thinking: Option<String> = None;
+    let mut thinking_signature: Option<String> = None;
+    let mut thinking_blocks = 0usize;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     for block in resp.content {
@@ -648,8 +684,13 @@ fn response_from_wire(resp: WireResponse, model: ModelId) -> CompletionResponse 
                 }
                 text.push_str(&t);
             }
-            RespBlock::Thinking { thinking: t } => {
+            RespBlock::Thinking {
+                thinking: t,
+                signature,
+            } => {
+                thinking_blocks += 1;
                 thinking.get_or_insert_with(String::new).push_str(&t);
+                thinking_signature = signature;
             }
             RespBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall {
@@ -671,9 +712,16 @@ fn response_from_wire(resp: WireResponse, model: ModelId) -> CompletionResponse 
         })
         .unwrap_or_default();
 
+    // Signatures attest one block each and can't span a concatenation, so
+    // only a single-block response yields a replayable signature.
+    if thinking_blocks != 1 {
+        thinking_signature = None;
+    }
+
     CompletionResponse {
         text,
         thinking,
+        thinking_signature,
         tool_calls,
         model,
         usage,

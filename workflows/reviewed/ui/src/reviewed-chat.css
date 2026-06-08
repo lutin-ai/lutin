@@ -1,148 +1,93 @@
-/* Minimal chrome for the reviewed workflow. Pulls --chat-* tokens
- * from @lutin/chat-widgets/theme.css. Append-only flat log; no step
- * cards. */
+/* Reviewed-specific tool-call chrome layered over <ChatView>. The base
+ * transcript, bubbles, and tool widgets come from
+ * @lutin/chat-widgets/theme.css; this file only adds the active-step
+ * outline and the principle verdict panel under each tool bubble. */
 
-.app {
+.lutin-reviewed__step {
+  /* The wrapper replaces `.lutin-chat__msg` as the row's outer element,
+   * so it recreates the centered-column constraints — otherwise the
+   * outline and panel stretch full width while the bubble stays at the
+   * column max-width. */
   display: flex;
   flex-direction: column;
-  height: 100%;
+  gap: 4px;
   width: 100%;
-  background: var(--chat-bg);
-  color: var(--chat-text);
-  font-family: var(--chat-font);
-  font-size: var(--chat-fs-lg);
-  min-height: 0;
-}
-
-.transcript {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-  padding: 24px 28px;
-}
-
-.transcript-inner {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
-  max-width: 920px;
+  max-width: min(920px, 100%);
   margin: 0 auto;
 }
 
-.row { display: flex; width: 100%; }
-.row--user { justify-content: flex-end; }
-.row--assistant, .row--note { justify-content: stretch; }
-
-.user-bubble {
-  max-width: 75%;
-  background: var(--chat-user-bg);
-  border: 1px solid var(--chat-user-border);
-  border-radius: var(--chat-r-md);
-  padding: var(--chat-s-2) var(--chat-s-3);
-  white-space: pre-wrap;
-  word-break: break-word;
+.lutin-reviewed__step--active {
+  border: 1px solid var(--chat-accent-soft);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--chat-accent-soft);
 }
 
-.assistant-bubble {
-  flex: 1;
-  background: var(--chat-assistant-bg);
-  border: 1px solid var(--chat-assistant-border);
-  border-radius: var(--chat-r-md);
-  padding: var(--chat-s-2) var(--chat-s-3);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.note {
-  flex: 1;
-  border-radius: var(--chat-r-md);
-  border: 1px solid var(--chat-assistant-border);
-  background: rgba(255, 255, 255, 0.02);
-  padding: 8px 12px;
-  font-size: var(--chat-fs-sm, 13px);
+.lutin-reviewed__review {
+  border-top: 1px solid var(--chat-border);
+  padding-top: 6px;
+  margin-top: 2px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  font-size: 0.85rem;
 }
 
-.note .tag {
+.lutin-reviewed__review-head {
+  color: var(--chat-text-muted);
+}
+
+.lutin-reviewed__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lutin-reviewed__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 9px 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.lutin-reviewed__chip-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.lutin-reviewed__chip--pass {
+  color: var(--chat-ok);
+  background: var(--chat-surface);
+  border-color: var(--chat-border);
+}
+
+.lutin-reviewed__chip--fail {
+  color: var(--chat-err);
+  background: var(--chat-err-soft);
+  border-color: var(--chat-err);
+}
+
+.lutin-reviewed__chip--skipped {
+  color: var(--chat-text-faint);
+  background: var(--chat-surface);
+  border-color: var(--chat-border);
+}
+
+.lutin-reviewed__feedback {
+  border-left: 2px solid var(--chat-err);
+  padding: 4px 0 4px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--chat-text-faint);
+}
+
+.lutin-reviewed__feedback-principle {
+  display: block;
   font-weight: 600;
-  text-transform: uppercase;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  opacity: 0.8;
+  color: var(--chat-err);
+  margin-bottom: 2px;
 }
-.note code {
-  background: rgba(255, 255, 255, 0.05);
-  padding: 1px 6px;
-  border-radius: 4px;
-  width: max-content;
-}
-.note pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 6px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  max-height: 240px;
-  overflow: auto;
-}
-.note .output {
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 6px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  max-height: 280px;
-  overflow: auto;
-}
-.note .feedback {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.note--draft   { border-color: rgba(180, 180, 255, 0.35); }
-.note--pass    { border-color: rgba(120, 220, 140, 0.45); }
-.note--fix     { border-color: rgba(240, 200, 100, 0.55); }
-.note--rethink { border-color: rgba(255, 130, 130, 0.55); }
-.note--executed{ border-color: rgba(140, 220, 220, 0.5); }
-.note--system  { opacity: 0.7; font-style: italic; }
-
-.composer {
-  border-top: 1px solid var(--chat-assistant-border);
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--chat-bg);
-}
-.composer textarea {
-  width: 100%;
-  box-sizing: border-box;
-  background: var(--chat-user-bg);
-  color: var(--chat-text);
-  border: 1px solid var(--chat-user-border);
-  border-radius: var(--chat-r-md);
-  padding: 8px 10px;
-  font-family: inherit;
-  font-size: inherit;
-  resize: vertical;
-}
-.composer-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.composer button {
-  background: var(--chat-user-bg);
-  color: var(--chat-text);
-  border: 1px solid var(--chat-user-border);
-  border-radius: var(--chat-r-sm, 6px);
-  padding: 6px 14px;
-  cursor: pointer;
-}
-.composer button:disabled { opacity: 0.5; cursor: default; }

@@ -215,6 +215,7 @@ fn push_iterate_call_and_log(
             arguments: plan.args.clone(),
         }],
         thinking: None,
+        thinking_signature: None,
     });
 
     let feedback_content = match fix_log.last() {
@@ -277,6 +278,7 @@ async fn draft_args(agent: &mut Agent, plan: &Plan) -> Result<DraftOutcome> {
             text: response.text.clone(),
             tool_calls: tool_calls.clone(),
             thinking: response.thinking.clone(),
+            thinking_signature: response.thinking_signature.clone(),
         });
 
         let Some(call) = tool_calls.first() else {

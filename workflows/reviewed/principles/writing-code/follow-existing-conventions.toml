@@ -1,0 +1,38 @@
+title = "Follow the conventions already in the codebase"
+persona = "reviewer"
+condition = "Code is being added to or changed in a project that already has established patterns — naming, formatting, imports, error handling, file/module structure."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+tools = ["read", "shell"]
+recency_points = 5
+description = '''
+New code should look like it belongs. Consistency with the surrounding codebase
+beats the model's personal defaults: a reader should not be able to tell which
+lines the agent wrote.
+
+## Why
+- Mixed conventions make a codebase harder to read, review, and maintain than
+  any single convention — even a worse one applied consistently.
+- The local style usually encodes decisions (lint rules, formatter config, team
+  agreements) that an outsider can't see but must respect.
+
+## Apply
+Before judging, use `read` / `shell` to look at reality, not just the diff:
+- neighboring files and the module being edited (naming, structure, idioms);
+- formatter / linter config (`.editorconfig`, `prettier`, `eslint`, `rustfmt`,
+  `ruff`, etc.);
+- how the project already does the thing being added (its HTTP client, its error
+  type, its test layout, named vs default exports, import ordering).
+
+FAIL when the new code introduces a naming, formatting, structural, or
+dependency convention at odds with the established local pattern — e.g.
+camelCase in a snake_case file, a new HTTP library when one is standardized, or
+a default export in a named-export codebase. Name the specific mismatch and the
+local convention to follow.
+
+## Counter-cases (PASS)
+- The code matches the surrounding conventions.
+- There is no established convention to follow (new/empty area), or the file is
+  genuinely the first of its kind.
+- The user explicitly asked to change or modernize the convention.
+'''

@@ -116,6 +116,7 @@ pub async fn review(
             text: response.text.clone(),
             tool_calls: response.tool_calls.clone(),
             thinking: response.thinking.clone(),
+            thinking_signature: response.thinking_signature.clone(),
         });
         messages.push(LlmMessage::User(
             "You did not call the `submit_verdict` tool. You must call it exactly once, \

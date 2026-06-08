@@ -15,6 +15,10 @@ use futures::Stream;
 pub use ids::*;
 pub use types::*;
 
+/// Re-exported so dependents that pin a different reqwest version can still
+/// construct clients compatible with this crate's API surface.
+pub use reqwest;
+
 /// Errors from LLM provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

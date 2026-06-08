@@ -283,6 +283,7 @@ mod tests {
             text: s.into(),
             tool_calls: Vec::new(),
             thinking: None,
+            thinking_signature: None,
         }
     }
     fn system(s: &str) -> Message {

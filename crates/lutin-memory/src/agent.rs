@@ -244,6 +244,7 @@ impl MemoryAgent {
                     text: turn.content.clone(),
                     tool_calls: Vec::new(),
                     thinking: None,
+                    thinking_signature: None,
                 }),
             }
         }
@@ -284,6 +285,7 @@ impl MemoryAgent {
                 text: resp.text,
                 tool_calls: tool_calls.clone(),
                 thinking: None,
+                thinking_signature: None,
             });
 
             for call in &tool_calls {

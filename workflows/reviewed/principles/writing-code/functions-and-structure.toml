@@ -1,0 +1,72 @@
+title = "Functions and Structure"
+persona = "reviewer"
+condition = "The code defines, splits, restructures, or calls functions, abstractions, or control flow — including boolean parameters, inheritance vs composition, nesting, helpers, recursion, indirection layers, side effects, or multi-responsibility functions."
+context = ["tool_call"]
+applies_to = ["write", "edit", "edit_lines"]
+recency_points = 8
+description = '''
+Review the change against this rubric. FAIL a genuine violation with a concrete
+fix; PASS if it honors these or none apply.
+
+## Split functions by responsibility
+A function should own one responsibility; distinct concerns have distinct reasons
+to change and hide bugs in long bodies. When a body has section dividers or paints
+several widgets/phases, extract a named region per concern (`draw_history_panel`,
+not `section_3`). Exempt: one-screen demos, sections sharing heavy local state,
+and symmetric parallel arms. Defers to "inline single-use helpers" — split by
+responsibility, not to chase a line count.
+
+## Inline single-use helpers
+A function called from exactly one place, especially far from its caller, is often
+pure friction — inline it. A helper earns its keep only if its name captures a
+known concept, it hides genuinely complex internals, or it's a natural test seam.
+"Will be useful later" is not a reason; extract when the second real caller
+arrives. Exempt: phase-named sections of a long top-level function, and test-seam
+helpers.
+
+## No premature abstraction (rule of three)
+Write it concretely the first time, duplicate the second, abstract on the third
+when the shape is clear. Wrong abstractions cost more than duplication — callers
+depend on their shape. When extracting, take only what's truly common; be willing
+to un-abstract a helper that grew into special cases. Exempt: obvious domain
+concepts (Order, Money) and external contracts (APIs, schemas) you can't delay.
+
+## Avoid boolean parameters
+A bare `true`/`false` at a call site is opaque: `open(path, true, false)` vs
+`open(path, Mode::ReadOnly, Create::No)`. Replace bool params with small naming
+enums; two interacting booleans are usually two functions. Avoid `Option<bool>` —
+three states want a three-variant enum. Exempt: genuine predicates (`is_empty`),
+named args where the name is the doc (`force=True`), and private helpers beside
+their call site.
+
+## Prefer guard clauses over nesting
+Handle errors/edge/exit conditions first with early returns; keep the happy path
+flat at the bottom. Invert `if (ok) {...}` to `if (!ok) return;`; validate inputs
+and flags at the top; drop `else` after a `return`/`throw`/`continue`/`break`. Aim
+for one or two levels of indentation. Exempt: short symmetric if/else, and
+genuinely interdependent conditions (extract a helper instead of a wall of guards).
+
+## Iterate, don't recurse, when the stack matters
+In languages without guaranteed TCO (Java, Python, JS, Go, most Rust/C builds),
+prefer loops for traversals that grow with input — recursion stack-overflows on
+hostile inputs. Use an explicit stack/queue for unbounded tree/graph traversal;
+add depth limits to any recursion over external input. Exempt: guaranteed-TCO
+languages (Scheme, `@tailrec` Scala), logarithmic-depth algorithms (balanced
+trees, binary search), and bounded-input toy code.
+
+## Prefer pure functions
+A pure function takes inputs, returns outputs, touches nothing else (no globals,
+I/O, clocks, random, hidden state). Push effects to the edges; keep the core pure
+for trivial testing and reproducible bugs. Pass the clock/random/deps in as
+parameters; prefer returning a description of changes over performing them. A
+`void`/`()` return is a red flag for hidden effects. Exempt: the necessarily
+impure program shell, and encapsulated performance-critical mutation.
+
+## Composition over inheritance
+Build behavior by combining small focused pieces (traits, interfaces, fields)
+rather than extending a base hierarchy that couples descendants to parent
+internals. Use interfaces for "behaves-as", wrapped fields for "has-a" (a `Cache`
+contains a `Storage`). Overriding a method to neutralize parent behavior means the
+hierarchy is wrong. Exempt: genuine stable "is-a" hierarchies (AST nodes, widget
+trees) and frameworks that demand you extend their base classes at the boundary.
+'''

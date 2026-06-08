@@ -32,7 +32,7 @@ fn render(m: &Message) -> (&'static str, String) {
     match m {
         Message::System(s) => ("system", s.clone()),
         Message::User(s) => ("user", s.clone()),
-        Message::Assistant { text, tool_calls, thinking } => {
+        Message::Assistant { text, tool_calls, thinking, .. } => {
             let mut s = String::new();
             if let Some(t) = thinking
                 && !t.is_empty()

@@ -245,6 +245,124 @@ fn write_file_0600(path: &std::path::Path, data: &[u8]) -> Result<(), LlmError> 
     std::fs::write(path, data).map_err(|e| LlmError::Other(format!("cred file write: {e}")))
 }
 
+/// Full credentials (refresh token included) as plain JSON, 0600. Fallback
+/// for hosts without a Secret Service / keychain — keep the file outside any
+/// directory mounted into containers.
+pub struct PlainFileBackend {
+    path: PathBuf,
+}
+
+impl PlainFileBackend {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl CredBackend for PlainFileBackend {
+    fn read(&self) -> Result<Option<Credentials>, LlmError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(LlmError::Other(format!("cred file read: {e}"))),
+        };
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    fn write(&self, creds: &Credentials) -> Result<(), LlmError> {
+        let bytes = serde_json::to_vec(creds)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| LlmError::Other(format!("cred file mkdir: {e}")))?;
+        }
+        let tmp = self.path.with_extension("tmp");
+        write_file_0600(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| LlmError::Other(format!("cred file rename: {e}")))
+    }
+
+    fn clear(&self) -> Result<(), LlmError> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LlmError::Other(format!("cred file delete: {e}"))),
+        }
+    }
+}
+
+/// Plain-JSON file holding only the short-lived access token, written by the
+/// control panel (the broker) and read by engines. Never contains the refresh
+/// token — `read` surfaces it as `Credentials` with an empty `refresh_token`,
+/// which is fine because brokered stores never call the refresh endpoint.
+pub struct BrokeredFileBackend {
+    path: PathBuf,
+}
+
+pub const BROKERED_TOKEN_REL_PATH: &str = "credentials/anthropic-access.json";
+
+pub fn brokered_token_path(global_config_dir: &std::path::Path) -> PathBuf {
+    global_config_dir.join(BROKERED_TOKEN_REL_PATH)
+}
+
+#[derive(Serialize, Deserialize)]
+struct BrokeredToken {
+    access_token: String,
+    expires_at_ms: i64,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+impl BrokeredFileBackend {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn exists(&self) -> bool {
+        self.path.is_file()
+    }
+}
+
+impl CredBackend for BrokeredFileBackend {
+    fn read(&self) -> Result<Option<Credentials>, LlmError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(LlmError::Other(format!("broker token read: {e}"))),
+        };
+        let tok: BrokeredToken = serde_json::from_slice(&bytes)?;
+        Ok(Some(Credentials {
+            access_token: tok.access_token,
+            refresh_token: String::new(),
+            expires_at_ms: tok.expires_at_ms,
+            scopes: tok.scopes,
+        }))
+    }
+
+    fn write(&self, creds: &Credentials) -> Result<(), LlmError> {
+        let tok = BrokeredToken {
+            access_token: creds.access_token.clone(),
+            expires_at_ms: creds.expires_at_ms,
+            scopes: creds.scopes.clone(),
+        };
+        let bytes = serde_json::to_vec(&tok)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| LlmError::Other(format!("broker token mkdir: {e}")))?;
+        }
+        let tmp = self.path.with_extension("tmp");
+        write_file_0600(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| LlmError::Other(format!("broker token rename: {e}")))
+    }
+
+    fn clear(&self) -> Result<(), LlmError> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LlmError::Other(format!("broker token delete: {e}"))),
+        }
+    }
+}
+
 /// In-memory only; loses state on drop. Useful for tests and for the
 /// `ANTHROPIC_OAUTH_TOKEN`-override path where refresh is not performed.
 pub struct MemoryBackend {
@@ -289,6 +407,7 @@ struct StoreInner {
     refresh_lock: AsyncMutex<()>,
     http: reqwest::Client,
     backend: Arc<dyn CredBackend>,
+    brokered: bool,
 }
 
 impl OAuthCredentialStore {
@@ -309,6 +428,14 @@ impl OAuthCredentialStore {
         Self::load_with(Arc::new(KeyringBackend::new()))
     }
 
+    /// Broker-fed store: the control panel owns the refresh token and keeps
+    /// the access-token file fresh; this store only ever re-reads the file.
+    pub fn load_brokered(path: PathBuf) -> Result<Self, LlmError> {
+        let backend: Arc<dyn CredBackend> = Arc::new(BrokeredFileBackend::new(path));
+        let cached = backend.read()?;
+        Ok(Self::build_flagged(backend, cached, true))
+    }
+
     /// Persist fresh credentials to `backend` and return a store holding them.
     pub fn store_with(
         backend: Arc<dyn CredBackend>,
@@ -324,12 +451,21 @@ impl OAuthCredentialStore {
     }
 
     fn build(backend: Arc<dyn CredBackend>, cached: Option<Credentials>) -> Self {
+        Self::build_flagged(backend, cached, false)
+    }
+
+    fn build_flagged(
+        backend: Arc<dyn CredBackend>,
+        cached: Option<Credentials>,
+        brokered: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(StoreInner {
                 cached: Mutex::new(cached),
                 refresh_lock: AsyncMutex::new(()),
                 http: reqwest::Client::new(),
                 backend,
+                brokered,
             }),
         }
     }
@@ -339,10 +475,14 @@ impl OAuthCredentialStore {
     }
 
     pub fn clear(&self) -> Result<(), LlmError> {
-        // Clear backend first; if that fails, leave the cache intact so the
-        // two sources of truth don't diverge. Only drop the in-memory copy
-        // once the persistent copy is gone.
-        self.inner.backend.clear()?;
+        // Brokered stores don't own the token file — only the control panel
+        // writes/deletes it. Drop the local cache and leave the file alone.
+        if !self.inner.brokered {
+            // Clear backend first; if that fails, leave the cache intact so the
+            // two sources of truth don't diverge. Only drop the in-memory copy
+            // once the persistent copy is gone.
+            self.inner.backend.clear()?;
+        }
         *self.inner.cached.lock().unwrap() = None;
         Ok(())
     }
@@ -390,6 +530,9 @@ impl OAuthCredentialStore {
     }
 
     async fn do_refresh(&self) -> Result<String, LlmError> {
+        if self.inner.brokered {
+            return self.reload_brokered();
+        }
         // Snapshot the current credentials under the sync lock, then drop the
         // guard before any `.await` or backend I/O.
         let current = {
@@ -419,6 +562,25 @@ impl OAuthCredentialStore {
                 Err(err)
             }
         }
+    }
+}
+
+impl OAuthCredentialStore {
+    fn reload_brokered(&self) -> Result<String, LlmError> {
+        let fresh = self.inner.backend.read()?.ok_or_else(|| {
+            LlmError::Other(
+                "anthropic oauth: not logged in — open Settings → Providers and log in".into(),
+            )
+        })?;
+        if fresh.near_expiry() {
+            return Err(LlmError::Other(
+                "anthropic oauth: access token expired — is the Lutin control panel running?"
+                    .into(),
+            ));
+        }
+        let token = fresh.access_token.clone();
+        *self.inner.cached.lock().unwrap() = Some(fresh);
+        Ok(token)
     }
 }
 
@@ -467,6 +629,30 @@ mod tests {
         // Wrong key fails cleanly.
         let wrong = EncryptedFileBackend::new(tmp.clone(), [0u8; 32]);
         assert!(wrong.read().is_err());
+
+        backend.clear().unwrap();
+        assert!(backend.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn brokered_file_roundtrip_and_clear_keeps_file() {
+        let tmp =
+            std::env::temp_dir().join(format!("lutin-broker-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let backend = BrokeredFileBackend::new(tmp.clone());
+
+        assert!(backend.read().unwrap().is_none());
+        backend.write(&sample_creds()).unwrap();
+
+        let loaded = backend.read().unwrap().expect("present");
+        assert_eq!(loaded.access_token, "at");
+        assert!(loaded.refresh_token.is_empty());
+
+        let store = OAuthCredentialStore::load_brokered(tmp.clone()).unwrap();
+        assert!(store.is_authenticated());
+        store.clear().unwrap();
+        assert!(!store.is_authenticated());
+        assert!(tmp.is_file());
 
         backend.clear().unwrap();
         assert!(backend.read().unwrap().is_none());

@@ -611,6 +611,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: Vec::new(),
+            thinking_signature: None,
         }
     }
 
@@ -619,6 +620,7 @@ mod tests {
             text: text.into(),
             thinking: None,
             tool_calls: calls,
+            thinking_signature: None,
         }
     }
 

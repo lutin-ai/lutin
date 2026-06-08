@@ -87,7 +87,11 @@ export type Request =
   | "ListProviders"
   | { SetProviders: { providers: ProviderConfig[] } }
   | "GetWebSearch"
-  | { SetWebSearch: { settings: WebSearchSettings } };
+  | { SetWebSearch: { settings: WebSearchSettings } }
+  | "BeginAnthropicLogin"
+  | { CompleteAnthropicLogin: { code: string } }
+  | "AnthropicOauthStatus"
+  | "AnthropicLogout";
 
 export type ResponseOk =
   | { Projects: ProjectInfo[] }
@@ -104,7 +108,16 @@ export type ResponseOk =
   | { Providers: ProviderConfig[] }
   | "ProvidersSaved"
   | { WebSearch: WebSearchSettings }
-  | "WebSearchSaved";
+  | "WebSearchSaved"
+  | { AnthropicLoginStarted: { auth_url: string } }
+  | { AnthropicLoginCompleted: { expires_at_ms: number } }
+  | {
+      AnthropicOauth: {
+        authenticated: boolean;
+        expires_at_ms: number | null;
+      };
+    }
+  | "AnthropicLoggedOut";
 
 export type ApiError =
   | { NotFound: Slug }
@@ -112,7 +125,8 @@ export type ApiError =
   | { Supervisor: string }
   | { WorkflowNotFound: WorkflowId }
   | { SessionNotFound: SessionId }
-  | { Settings: string };
+  | { Settings: string }
+  | { AnthropicOauth: string };
 
 export type Response = { Ok: ResponseOk } | { Err: ApiError };
 

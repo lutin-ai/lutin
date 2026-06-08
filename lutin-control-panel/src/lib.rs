@@ -2,6 +2,7 @@
 //! request dispatch, broadcast fan-out. Holds the control-panel
 //! signing key.
 
+pub mod anthropic_oauth;
 pub mod defaults;
 mod downloads;
 mod registry;
@@ -57,6 +58,9 @@ pub struct SpawnConfig {
     pub projects_root: PathBuf,
     /// Global `.lutin/` directory.
     pub global_config_dir: PathBuf,
+    /// CP-private state dir (keypair, OAuth credential fallback). Never
+    /// mounted into session containers.
+    pub data_dir: PathBuf,
 }
 
 enum Command {
@@ -142,6 +146,10 @@ pub struct AppState {
     /// service `Arc` inside each entry keeps a backend alive as long
     /// as any stream points at it.
     tts_streams: tts_streams::TtsStreamRegistry,
+    /// Anthropic subscription-OAuth broker: holds the refresh token in
+    /// the host keyring and mirrors the access token to the brokered
+    /// file session containers read.
+    anthropic_oauth: anthropic_oauth::OauthBroker,
 }
 
 pub struct Supervisor {
@@ -175,6 +183,10 @@ impl Supervisor {
         let tts_backends = tts::TtsBackends::new(config.global_config_dir.clone(), tts_sink_tx);
         let tts_streams = tts_streams::TtsStreamRegistry::new();
         tokio::spawn(tts_sink_pump(tts_sink_rx, ev_tx.clone()));
+        let anthropic_oauth = anthropic_oauth::OauthBroker::new(
+            config.global_config_dir.clone(),
+            config.data_dir.clone(),
+        );
 
         let join = tokio::spawn(supervisor(cmd_rx, ev_tx.clone(), sd_rx, config));
         let state = AppState {
@@ -184,6 +196,7 @@ impl Supervisor {
             transcription,
             tts_backends,
             tts_streams,
+            anthropic_oauth,
         };
         Self {
             state,
@@ -239,6 +252,36 @@ impl AppState {
             Request::CloseTtsStream { stream_id } => {
                 return self.handle_close_tts_stream(stream_id);
             }
+            // OAuth RPCs bypass the supervisor for the same reason as
+            // transcription: the token exchange is multi-second network
+            // I/O independent of project state.
+            Request::BeginAnthropicLogin => {
+                return match self.anthropic_oauth.begin() {
+                    Ok(auth_url) => Response::Ok(ResponseOk::AnthropicLoginStarted { auth_url }),
+                    Err(e) => Response::Err(ApiError::AnthropicOauth(e)),
+                };
+            }
+            Request::CompleteAnthropicLogin { code } => {
+                return match self.anthropic_oauth.complete(&code).await {
+                    Ok(expires_at_ms) => {
+                        Response::Ok(ResponseOk::AnthropicLoginCompleted { expires_at_ms })
+                    }
+                    Err(e) => Response::Err(ApiError::AnthropicOauth(e)),
+                };
+            }
+            Request::AnthropicOauthStatus => {
+                let (authenticated, expires_at_ms) = self.anthropic_oauth.status();
+                return Response::Ok(ResponseOk::AnthropicOauth {
+                    authenticated,
+                    expires_at_ms,
+                });
+            }
+            Request::AnthropicLogout => {
+                return match self.anthropic_oauth.logout() {
+                    Ok(()) => Response::Ok(ResponseOk::AnthropicLoggedOut),
+                    Err(e) => Response::Err(ApiError::AnthropicOauth(e)),
+                };
+            }
             _ => {}
         }
         let (reply, rx) = oneshot::channel();
@@ -290,8 +333,12 @@ impl AppState {
             | Request::OpenTtsStream { .. }
             | Request::SpeakTts { .. }
             | Request::CancelTts { .. }
-            | Request::CloseTtsStream { .. } => {
-                unreachable!("transcription/tts requests are handled before this match");
+            | Request::CloseTtsStream { .. }
+            | Request::BeginAnthropicLogin
+            | Request::CompleteAnthropicLogin { .. }
+            | Request::AnthropicOauthStatus
+            | Request::AnthropicLogout => {
+                unreachable!("transcription/tts/oauth requests are handled before this match");
             }
         };
         if self.commands.send(cmd).await.is_err() {

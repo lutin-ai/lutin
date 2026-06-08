@@ -6,8 +6,8 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    embed_dir(
-        manifest.join("../../principles"),
+    embed_tree(
+        manifest.join("principles"),
         out_dir.join("principles_data.rs"),
         "PRINCIPLES_RAW",
     );
@@ -16,6 +16,43 @@ fn main() {
         out_dir.join("personas_data.rs"),
         "PERSONAS_RAW",
     );
+}
+
+/// Embed a directory tree of TOML files. Hierarchy is expressed by the
+/// filesystem: `foo.toml` defines a principle and a sibling directory
+/// `foo/` holds its sub-principles. Names are `/`-joined relative paths
+/// (`foo`, `foo/bar`); `principle.rs` reassembles the tree from them.
+fn embed_tree(src_dir: PathBuf, out_path: PathBuf, static_name: &str) {
+    println!("cargo:rerun-if-changed={}", src_dir.display());
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    walk(&src_dir, "", &mut entries);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    write_entries(&out_path, static_name, &entries);
+}
+
+fn walk(dir: &PathBuf, prefix: &str, entries: &mut Vec<(String, String)>) {
+    let read = fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in read {
+        let entry = entry.expect("read dir entry");
+        let path = entry.path();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("filename");
+        let name = if prefix.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{prefix}/{stem}")
+        };
+        if path.is_dir() {
+            walk(&path, &name, entries);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let body = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            entries.push((name, body));
+        }
+    }
 }
 
 fn embed_dir(src_dir: PathBuf, out_path: PathBuf, static_name: &str) {
@@ -39,12 +76,15 @@ fn embed_dir(src_dir: PathBuf, out_path: PathBuf, static_name: &str) {
         entries.push((name.to_string(), body));
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    write_entries(&out_path, static_name, &entries);
+}
 
+fn write_entries(out_path: &PathBuf, static_name: &str, entries: &[(String, String)]) {
     let mut src = format!("pub(crate) static {static_name}: &[(&str, &str)] = &[\n");
-    for (name, body) in &entries {
+    for (name, body) in entries {
         src.push_str(&format!("    ({name:?}, {body:?}),\n"));
     }
     src.push_str("];\n");
-    fs::write(&out_path, src)
+    fs::write(out_path, src)
         .unwrap_or_else(|e| panic!("write {}: {e}", out_path.display()));
 }

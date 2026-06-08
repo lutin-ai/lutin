@@ -1,0 +1,44 @@
+title = "Track multi-step work with the task tools"
+persona = "reviewer"
+priority = 20
+condition = "The current work is genuinely multi-step — roughly three or more distinct steps, or it spans multiple files or sessions. NOT met for small, single-step, or quick one-off changes."
+context = ["tool_call", "chat", "prior_steps"]
+applies_to = ["message", "write", "edit", "edit_lines", "shell"]
+recency_points = 5
+description = '''
+For work that is large enough to lose track of, the agent must use its task
+tools (`create_task`, `start_task`, `finish_task`, `delete_task`) to plan the
+steps and keep their status current as it goes. The agent's current task list
+is shown to you under "# Agent task list (current)" — judge against that, not
+against any file in the project.
+
+This principle is deliberately scoped to substantial work. Do NOT demand task
+tracking for a one-line fix, a rename, or a quick command — that is just noise.
+
+## Why
+- Multi-step work drifts and forgets. A maintained checklist is the cheapest
+  way to stay oriented and to let the user see and steer progress.
+- The task list is persisted and re-injected every turn — it survives context
+  loss and restarts, unlike a plan that lives only in the conversation.
+- Starting a task forces a written description of the approach, which is where
+  sloppy plans get caught.
+
+## Apply
+Check the task list against the work in flight:
+- Is the planned work captured as tasks at all?
+- Is the step being acted on covered by an in-progress task?
+- Is the list current — no task left in progress that is plainly finished, no
+  stale entries for abandoned work?
+
+FAIL when substantial multi-step work is underway and the task list is empty,
+does not cover the current work, or has clearly fallen out of date. Feedback:
+ask the agent to create/start the relevant tasks (or finish stale ones) before
+proceeding.
+
+## Counter-cases (PASS)
+- The task is small, single-step, or obviously trivial.
+- The task list exists and reasonably reflects the current work.
+- The pending action IS task upkeep (a `create_task`/`start_task`/
+  `finish_task`/`delete_task` call).
+- The user explicitly opted out of task tracking for this work.
+'''

@@ -586,6 +586,7 @@ pub fn parse_completion_response(
     Ok(super::CompletionResponse {
         text: msg.content.unwrap_or_default(),
         thinking,
+        thinking_signature: None,
         tool_calls,
         model: super::ModelId::from(api_resp.model.unwrap_or_default()),
         usage: usage.unwrap_or_default(),

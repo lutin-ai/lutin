@@ -157,6 +157,7 @@ impl LlmProvider for MockProvider {
         Ok(CompletionResponse {
             text: resp.text,
             thinking: None,
+            thinking_signature: None,
             tool_calls: resp.tool_calls,
             model: "mock-model".into(),
             usage: Usage::default(),
