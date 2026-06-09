@@ -47,7 +47,7 @@ const DRAFT_MAX_ATTEMPTS: usize = 20;
 /// oldest messages (after the system prompt) until the running estimate
 /// fits, so a long session can't grow the prompt without bound. There's
 /// no compaction here — older history is simply forgotten.
-const CONTEXT_TOKEN_LIMIT: usize = 80_000;
+pub(crate) const CONTEXT_TOKEN_LIMIT: usize = 80_000;
 
 pub async fn run_turn(agent: &mut Agent, principles: &[Principle]) -> Result<TurnOutcome> {
     let stage = "turn";
@@ -453,9 +453,11 @@ fn slide_window(messages: &mut Vec<Message>) {
     }
 }
 
-/// Rough token estimate (~4 chars/token). Only used to bound the prompt,
-/// so a loose heuristic is fine — we trim conservatively.
-fn estimate_tokens(msg: &Message) -> usize {
+/// Rough token estimate (~3 chars/token). Real tokenized text runs closer
+/// to 3 chars/token than 4 for the code and JSON we carry, so /4 undercounts
+/// by enough to blow a model's window once a response reservation is added.
+/// Only used to bound the prompt, so a loose heuristic is fine.
+pub(crate) fn estimate_tokens(msg: &Message) -> usize {
     let chars = match msg {
         Message::System(s) | Message::User(s) => s.chars().count(),
         Message::Summary { text } => text.chars().count(),
@@ -475,11 +477,11 @@ fn estimate_tokens(msg: &Message) -> usize {
         Message::ToolResult(rc) => rc.content.chars().count(),
         // Images don't have a character length; charge a flat ~1k tokens
         // each so they still count against the budget.
-        Message::Image { items } => items.len() * 4_000,
+        Message::Image { items } => items.len() * 3_000,
         Message::SubAgentReply { text, .. } => text.chars().count(),
         Message::SubAgentFailure { reason, .. } => reason.chars().count(),
     };
-    chars / 4 + 4
+    chars / 3 + 4
 }
 
 /// Walk the principle tree against the drafted call. Each level is fired

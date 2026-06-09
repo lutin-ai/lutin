@@ -14,6 +14,13 @@ const GATE_APPLIES: &str = "condition_met";
 const GATE_SKIP: &str = "condition_not_met";
 const MAX_ATTEMPTS: u32 = 3;
 const REVIEWER_MAX_TOKENS: u32 = 8192;
+/// History budget for a reviewer prompt. Unlike the agent loop, the reviewer
+/// renders the whole conversation into a single user message and asks for an
+/// 8192-token verdict on top, so it gets less than the agent's full input
+/// budget: the shared limit minus room for the response and the reviewer's
+/// own framing (action under review, principle, system prompt).
+const REVIEWER_HISTORY_LIMIT: usize =
+    crate::runtime::CONTEXT_TOKEN_LIMIT - REVIEWER_MAX_TOKENS as usize - 8_000;
 /// Investigation budget per review: tool calls a reviewer may make before
 /// it must issue a verdict.
 const INVESTIGATE_MAX_STEPS: usize = 8;
@@ -259,6 +266,24 @@ const GATE_SYSTEM: &str =
 /// trigger so it forms a cacheable prefix. The transcript comes FIRST — it
 /// is the largest block and the most stable across turns — and the small
 /// pending action comes last.
+/// Keep the newest tail of `history` that fits `budget` estimated tokens,
+/// dropping older messages. The newest message is always kept even if it
+/// alone exceeds the budget. Rendered as prose for the reviewer, so a
+/// dropped predecessor only loses context — it can't malform the request.
+fn trim_history(history: &[Message], budget: usize) -> &[Message] {
+    let mut used = 0usize;
+    let mut start = history.len();
+    for i in (0..history.len()).rev() {
+        let t = crate::runtime::estimate_tokens(&history[i]);
+        if start != history.len() && used + t > budget {
+            break;
+        }
+        used += t;
+        start = i;
+    }
+    &history[start..]
+}
+
 fn situation_context(
     subject: ReviewSubject<'_>,
     history: &[Message],
@@ -268,8 +293,12 @@ fn situation_context(
     let mut parts: Vec<String> = Vec::new();
 
     if include_history && !history.is_empty() {
+        let kept = trim_history(history, REVIEWER_HISTORY_LIMIT);
         let mut t = String::from("# Conversation so far\n");
-        for m in history {
+        if kept.len() < history.len() {
+            t.push_str("(earlier messages omitted to fit the context budget)\n");
+        }
+        for m in kept {
             t.push_str(&render_message_for_reviewer(m));
         }
         parts.push(t);

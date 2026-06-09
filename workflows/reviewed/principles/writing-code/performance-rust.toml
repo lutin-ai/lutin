@@ -4,7 +4,7 @@ priority = 200
 condition = "The code is in a systems language (Rust, C, C++) or on a performance-sensitive hot path: it uses locks/Arc/shared ownership, passes values that could be borrowed, passes or stores collections that could be slices/views, allocates data that could live on the stack, or uses a hash map where a Vec would suffice."
 context = ["tool_call"]
 applies_to = ["write", "edit", "edit_lines"]
-recency_points = 8
+recency_points = -1
 description = '''
 Review the change against this rubric. It applies only to systems-language code
 (Rust, C, C++) or measured hot paths — do not fire it on general/GC'd code. FAIL a

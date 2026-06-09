@@ -48,7 +48,8 @@ export function makeReviewedToolCall(
 }
 
 // create_task is pure plumbing — a full args/output widget is noise.
-// Render just the state dot and the task title.
+// Render the standard tool header (dot + name) with the task title as the
+// summary, so it matches every other tool bubble; no expandable body.
 function CreateTaskCall({ message }: { message: ToolCallProps["message"] }) {
   let title: string | null = null;
   if (
@@ -69,9 +70,8 @@ function CreateTaskCall({ message }: { message: ToolCallProps["message"] }) {
             aria-hidden="true"
             title={message.state}
           />
-          <span className="lutin-chat__tool-summary">
-            {title ?? message.name}
-          </span>
+          <span className="lutin-chat__tool-name">{message.name}</span>
+          {title && <span className="lutin-chat__tool-summary">{title}</span>}
         </div>
       </div>
     </div>

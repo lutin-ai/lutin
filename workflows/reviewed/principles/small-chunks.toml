@@ -13,13 +13,21 @@ Why:
   edit grounded in recently verified file state.
 
 How to apply:
-- Look at the recent steps: if the last 5+ tool calls are all `read`
-  with no intervening edit, write, shell, or reply, fail this read.
-- Tell the agent to act on what it has already read (make an edit,
-  run a check, or report findings) before reading further.
+- The "Prior accepted steps" section lists one accepted step per
+  numbered line, in order, as `<tool> <args>`. The read under review
+  is not in that list — it is the current call.
+- Count the unbroken run of `read` lines at the END of that list.
+  Together with the current read, if that makes 5+ reads in a row with
+  no intervening edit, write, shell, or other action, fail this read.
+- If the "Prior accepted steps" section is absent or empty, this is at
+  most the first read in a streak — pass. Do not block or complain
+  about missing context; absence of history is itself an answer.
+- On failure, tell the agent to act on what it has already read (make
+  an edit, run a check, or report findings) before reading further.
 
 Counter-cases (pass without complaint):
-- Fewer than 5 consecutive reads.
+- No "Prior accepted steps" section, or it ends in a non-read step.
+- Fewer than 5 consecutive reads counting the current one.
 - A read streak broken by any non-read action.
 - Re-reading a file just modified (e.g. to verify an edit).
 '''

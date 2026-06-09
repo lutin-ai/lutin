@@ -4,7 +4,7 @@ priority = 20
 condition = "The current work is genuinely multi-step — roughly three or more distinct steps, or it spans multiple files or sessions. NOT met for small, single-step, or quick one-off changes."
 context = ["tool_call", "chat", "prior_steps"]
 applies_to = ["message", "write", "edit", "edit_lines", "shell"]
-recency_points = 5
+recency_points = -1
 description = '''
 For work that is large enough to lose track of, the agent must use its task
 tools (`create_task`, `start_task`, `finish_task`, `delete_task`) to plan the

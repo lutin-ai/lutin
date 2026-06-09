@@ -4,7 +4,7 @@ condition = "Code is being added to or changed in a project that already has est
 context = ["tool_call"]
 applies_to = ["write", "edit", "edit_lines"]
 tools = ["read", "shell"]
-recency_points = 5
+recency_points = -1
 description = '''
 New code should look like it belongs. Consistency with the surrounding codebase
 beats the model's personal defaults: a reader should not be able to tell which

@@ -165,6 +165,12 @@ pub struct BeginOutcome {
     /// Names of principles whose slot is `Skipped` on the active
     /// frame. `decide` filters them out before LLM fan-out.
     pub skipped_principles: Vec<String>,
+    /// Accepted prior step frames projected to text, or `None` when no
+    /// configured principle opted into `prior_steps` context (or there
+    /// are no accepted frames yet). Built on the runner because that's
+    /// where the `StepStack` lives; `decide` only forwards it to the
+    /// reviewer fan-out.
+    pub prior_steps: Option<String>,
 }
 
 /// Runner-owned half. Holds the persistent step stack and the
@@ -283,10 +289,24 @@ impl ReviewSession {
             .filter(|(_, slot)| matches!(slot.status, ReviewerSlotStatus::Skipped { .. }))
             .map(|(name, _)| name.clone())
             .collect();
+        // Project the accepted history only when some principle asked
+        // for it — the string is otherwise dead weight on the reply
+        // channel. The active frame just pushed is `Active`, so the
+        // Accepted-only filter naturally excludes the call under review.
+        let wants_prior = self
+            .bundles
+            .iter()
+            .any(|b| b.principle.context.contains(&ContextItem::PriorSteps));
+        let prior_steps = if wants_prior {
+            project_prior_steps(self.stack.frames())
+        } else {
+            None
+        };
         BeginOutcome {
             frame_id,
             is_new: needs_new,
             skipped_principles,
+            prior_steps,
         }
     }
 
@@ -792,6 +812,7 @@ impl ApprovalPolicy for ReviewApproval {
             &live,
             call,
             artifact.as_deref(),
+            begin.prior_steps.as_deref(),
             &self.events,
             &self.next_reviewer_call_id,
             begin.frame_id,
@@ -880,6 +901,7 @@ async fn run_reviewer_with_retries(
     bundle: &Arc<ReviewerBundle>,
     call: &ToolCall,
     artifact: Option<&str>,
+    prior_steps: Option<&str>,
     events: &broadcast::Sender<ChatEvent>,
     reviewer_call_id: u64,
     frame_id: StepId,
@@ -889,6 +911,11 @@ async fn run_reviewer_with_retries(
     let principle_name = &bundle.principle.name;
     let artifact = if bundle.principle.context.contains(&ContextItem::ToolArtifact) {
         artifact
+    } else {
+        None
+    };
+    let prior_steps = if bundle.principle.context.contains(&ContextItem::PriorSteps) {
+        prior_steps
     } else {
         None
     };
@@ -909,7 +936,7 @@ async fn run_reviewer_with_retries(
             call,
             artifact,
             chat: None,
-            prior_steps: None,
+            prior_steps,
         };
         let call_fut = review(&*bundle.provider, &bundle.model, &bundle.persona, inputs);
         match tokio_timeout(REVIEWER_ATTEMPT_TIMEOUT, call_fut).await {
@@ -974,6 +1001,7 @@ async fn run_reviewers_parallel(
     bundles: &[Arc<ReviewerBundle>],
     call: &ToolCall,
     artifact: Option<&str>,
+    prior_steps: Option<&str>,
     events: &broadcast::Sender<ChatEvent>,
     next_reviewer_call_id: &AtomicU64,
     frame_id: StepId,
@@ -1002,6 +1030,7 @@ async fn run_reviewers_parallel(
                 &bundle,
                 call,
                 artifact,
+                prior_steps,
                 &events,
                 id,
                 frame_id,
@@ -1095,6 +1124,53 @@ fn to_wire_verdict(k: &VerdictKind) -> ReviewVerdictWire {
             reasoning: reasoning.clone(),
             suggested_fix: suggested_fix.clone(),
         },
+    }
+}
+
+/// Project the accepted prior step frames to a compact,
+/// provider-agnostic text block for principles that opted into
+/// `prior_steps` context (e.g. `small-chunks`, which counts the run of
+/// consecutive same-tool steps leading up to the call under review).
+/// One numbered line per accepted step in stack order: the executed
+/// tool name plus a truncated arg summary. Returns `None` when no frame
+/// has been accepted yet, so the reviewer prompt omits the section
+/// entirely rather than rendering an empty heading.
+fn project_prior_steps(frames: &[StepFrame]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for frame in frames {
+        if !matches!(frame.status, StepStatus::Accepted) {
+            continue;
+        }
+        let executed = frame
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| matches!(a.outcome, AttemptOutcome::Executed));
+        let (tool, args) = match executed {
+            Some(a) => (a.tool_name.as_str(), summarize_args_json(&a.arguments_json)),
+            // An accepted frame should always carry an executed
+            // attempt; fall back to the locked tool name so a missing
+            // record degrades to a name-only line, not a panic.
+            None => (frame.iterated_tool.as_str(), String::new()),
+        };
+        let n = lines.len() + 1;
+        let line = format!("{n}. {tool} {args}");
+        lines.push(line.trim_end().to_string());
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// `summarize_args` over the JSON-encoded argument string stored on an
+/// `AttemptRecord`. Best-effort: unparseable JSON yields an empty
+/// summary rather than leaking raw bytes into the reviewer prompt.
+fn summarize_args_json(arguments_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(arguments_json) {
+        Ok(v) => summarize_args(&v),
+        Err(_) => String::new(),
     }
 }
 
@@ -1643,5 +1719,57 @@ mod tests {
             } => assert!(feedback.contains("wrong premise")),
             other => panic!("expected Resolved::Rewound, got {other:?}"),
         }
+    }
+
+    fn accepted_frame(id: u64, tool: &str, args: serde_json::Value) -> StepFrame {
+        let mut f = StepFrame::new(StepId(id), 0, &[], tool.to_string());
+        push_attempt(
+            &mut f,
+            "c",
+            tool,
+            &serde_json::to_string(&args).unwrap(),
+            &[],
+            AttemptOutcome::Executed,
+        );
+        f.status = StepStatus::Accepted;
+        f
+    }
+
+    #[test]
+    fn project_prior_steps_none_when_no_accepted_frames() {
+        // A lone active frame (the call under review) has no accepted
+        // history, so the section is omitted entirely.
+        let active = StepFrame::new(StepId(0), 0, &[], "read".to_string());
+        assert_eq!(project_prior_steps(&[active]), None);
+        assert_eq!(project_prior_steps(&[]), None);
+    }
+
+    #[test]
+    fn project_prior_steps_lists_accepted_in_order_excluding_active() {
+        let frames = vec![
+            accepted_frame(0, "read", json!({"path": "a.rs"})),
+            accepted_frame(1, "edit", json!({"path": "a.rs"})),
+            accepted_frame(2, "read", json!({"path": "b.rs"})),
+            // Active frame for the in-flight call must not appear.
+            StepFrame::new(StepId(3), 0, &[], "read".to_string()),
+        ];
+        let text = project_prior_steps(&frames).expect("has accepted frames");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("1. read "));
+        assert!(lines[0].contains("a.rs"));
+        assert!(lines[1].starts_with("2. edit "));
+        assert!(lines[2].starts_with("3. read "));
+        assert!(lines[2].contains("b.rs"));
+    }
+
+    #[test]
+    fn project_prior_steps_skips_abandoned_frames() {
+        let mut abandoned = accepted_frame(0, "read", json!({"path": "x"}));
+        abandoned.status = StepStatus::Abandoned;
+        let frames = vec![abandoned, accepted_frame(1, "edit", json!({"path": "y"}))];
+        let text = project_prior_steps(&frames).expect("one accepted frame");
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with("1. edit "));
     }
 }

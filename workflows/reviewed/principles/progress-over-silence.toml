@@ -3,7 +3,7 @@ persona = "reviewer"
 condition = "A long-running or potentially silent shell command or network request is about to be executed."
 context = ["tool_call"]
 applies_to = ["shell", "http_request"]
-recency_points = 5
+recency_points = -1
 description = '''
 Any tool call that can plausibly take more than a few seconds
 should either produce visible progress as it runs, or be bounded
